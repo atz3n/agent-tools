@@ -27,7 +27,7 @@ Agent → curl → localhost:8088 (tasks-server)  → markdown files on a volume
 
 | Server | Port | What it does |
 |--------|------|--------------|
-| [github-proxy](servers/github-proxy/) | 8086 | Reverse proxy for the GitHub REST API, restricted to pull requests, reviews, and review comments. Injects a PAT as a Bearer token. |
+| [github-proxy](servers/github-proxy/) | 8086 | Reverse proxy for the GitHub REST API, restricted to pull requests, reviews, review comments, and issues. Injects a PAT as a Bearer token. |
 | [odoo-proxy](servers/odoo-proxy/) | 8087 | Application server over Odoo: manages the login session internally and exposes `/task/data`, `/task/messages`, and `/task/message` for project tasks. |
 | [tasks-server](servers/tasks-server/) | 8088 | REST API + zero-dependency web UI for tasks stored as markdown files with YAML frontmatter, organized per project with auto-incrementing IDs. |
 
@@ -40,7 +40,7 @@ Each server has its own README with endpoints, setup, and configuration.
 | Feature | Skills |
 |---------|--------|
 | git | `commit`, `commit-staged` |
-| github-proxy | `github-create-pull-request`, `github-review-pull-request` |
+| github-proxy | `github-create-pull-request`, `github-review-pull-request`, `github-manage-issues` |
 | odoo-proxy | `odoo-get-task-data`, `odoo-get-task-messages`, `odoo-post-task-message` |
 | project | `project-new-project`, `project-write-spec`, `project-architecture`, `project-implement`, `project-refine`, `project-qa`, `project-doctor`, `project-help`, `project-autopilot` |
 | tasks-server | `tasks-server` |

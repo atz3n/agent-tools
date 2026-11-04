@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Minimal reverse proxy that exposes only GitHub Pull Request management endpoints.
+"""Minimal reverse proxy that exposes only GitHub Pull Request and Issue endpoints.
 
 Forwards requests to https://api.github.com with Bearer auth from GITHUB_PERSONAL_ACCESS_TOKEN.
-Non-PR endpoints are rejected with 403.
+Non-PR/issue endpoints are rejected with 403.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import signal
 from urllib.parse import urlparse
 
 from .config import PORT, TARGET, TOKEN, logger, validate_token
-from .whitelist import _PR_PATHS, is_pr_endpoint
+from .whitelist import _ALLOWED_PATHS, is_allowed_endpoint
 
 # ---------------------------------------------------------------------------
 # Signal handler
@@ -30,14 +30,14 @@ def _shutdown(server: http.server.HTTPServer, signum: int, frame: object) -> Non
 # ---------------------------------------------------------------------------
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
-    """Forward allowed PR requests to GitHub; reject everything else."""
+    """Forward allowed PR/issue requests to GitHub; reject everything else."""
 
     def _proxy(self, method: str) -> None:
         raw_path = self.path
         path = raw_path.split("?")[0]  # strip query params for whitelist matching
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
 
-        if not is_pr_endpoint(path):
+        if not is_allowed_endpoint(path):
             logger.info(f"{method} {raw_path} 403 from {self.client_address[0]}")
             self.send_response(403)
             self.send_header("Content-Type", "application/json")
@@ -113,8 +113,8 @@ if __name__ == "__main__":
     validate_token()
 
     server = http.server.HTTPServer(("0.0.0.0", PORT), ProxyHandler)
-    logger.info("PR-only proxy listening on 127.0.0.1:%d -> %s", PORT, TARGET)
-    for endpoint in _PR_PATHS:
+    logger.info("PR/issue proxy listening on 127.0.0.1:%d -> %s", PORT, TARGET)
+    for endpoint in _ALLOWED_PATHS:
         logger.info("  %s", endpoint)
 
     signal.signal(signal.SIGTERM, lambda s, f: _shutdown(server, s, f))

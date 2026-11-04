@@ -12,7 +12,7 @@ This repo provides **agent-facing tools** — small, focused services that expos
 
 | Component | Port | Purpose |
 |-----------|------|---------|
-| **github-proxy** | 8086 | Reverse proxy for GitHub REST API, restricted to PR/review endpoints only. Injects a PAT from `secrets/`. |
+| **github-proxy** | 8086 | Reverse proxy for GitHub REST API, restricted to PR/review/issue endpoints only. Injects a PAT from `secrets/`. |
 | **odoo-proxy** | 8087 | Application server for Odoo task data. Manages an Odoo login session internally and exposes `/task/data`, `/task/messages`, and `/task/message`. |
 | **tasks-server** | 8088 | REST API for managing tasks stored as markdown files with YAML frontmatter. Includes a zero-dependency web UI. |
 | **skills/** | — | Agent skill markdown files organized by feature. |
@@ -36,7 +36,7 @@ All three services use a package-based structure (`github_proxy/`, `odoo_proxy/`
 ```
 agent-tools/
 ├── servers/
-│   ├── github-proxy/          # GitHub PR-only proxy
+│   ├── github-proxy/          # GitHub PR/issue proxy
 │   │   ├── github_proxy/      # Package: config.py, whitelist.py, server.py
 │   │   ├── docker/            # Dockerfile + docker-compose.yml
 │   │   ├── scripts/           # build/run/pause/stop/lint/test/clean scripts
@@ -70,6 +70,7 @@ agent-tools/
 │   │   └── commit-staged/     # Commit only already-staged changes
 │   ├── github-proxy/          # GitHub proxy skills
 │   │   ├── github-create-pull-request/
+│   │   ├── github-manage-issues/
 │   │   └── github-review-pull-request/
 │   ├── odoo-proxy/            # Odoo proxy skills
 │   │   ├── odoo-get-task-data/
@@ -247,7 +248,7 @@ To install: copy skill directories into `~/.pi/agent/skills/`, preserving the fe
 | Feature | Skills |
 |---------|--------|
 | **git** | `commit`, `commit-staged` |
-| **github-proxy** | `github-create-pull-request`, `github-review-pull-request` |
+| **github-proxy** | `github-create-pull-request`, `github-review-pull-request`, `github-manage-issues` |
 | **odoo-proxy** | `odoo-get-task-data`, `odoo-get-task-messages`, `odoo-post-task-message` |
 | **project** | `project-new-project`, `project-write-spec`, `project-architecture`, `project-implement`, `project-refine`, `project-qa`, `project-help`, `project-doctor`, `project-autopilot` (unattended orchestration in fresh `pi -p` sessions on an `autopilot/*` branch) |
 | **tasks-server** | `tasks-server` |
@@ -345,7 +346,7 @@ Containers are grouped under the `pia` project by plain `docker --label` stampin
 
 ### github-proxy
 
-- **Whitelist**: 20 regex patterns covering PR CRUD, reviews, review comments (including replies and reactions), review reactions, merge, commits, files, and `/user`.
+- **Whitelist**: 27 regex patterns covering PR CRUD, reviews, review comments (including replies and reactions), review reactions, merge, commits, files, issue CRUD, issue comments, issue labels/assignees, repository labels, and `/user`.
 - **Auth**: Bearer token injected from `GITHUB_PERSONAL_ACCESS_TOKEN` env var.
 - **Headers**: Combines duplicate `Accept` headers, strips hop-by-hop headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`), sets `User-Agent: pr-proxy/1.0`.
 - **Network skill**: Auto-detects Docker environment and sets `PROXY` to `host.docker.internal:8086` when running inside a container.

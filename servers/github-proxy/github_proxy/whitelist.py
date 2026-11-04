@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PR endpoint whitelist for the GitHub proxy."""
+"""Endpoint whitelist for the GitHub proxy (PR + issue endpoints)."""
 
 from __future__ import annotations
 
@@ -33,21 +33,41 @@ _PR_PATHS: list[str] = [
     r"^/repos/[^/]+/[^/]+/pulls/\d+/files$",
     r"^/repos/[^/]+/[^/]+/pulls/\d+/merge$",
     r"^/repos/[^/]+/[^/]+/pulls/\d+/update-branch$",
-    # PR discussion comments (GitHub stores PR comments under the issues API)
-    r"^/repos/[^/]+/[^/]+/issues/\d+/comments$",
     # Cross-ref: commits that return PRs
     r"^/repos/[^/]+/[^/]+/commits/[^/]+/pulls$",
     # Authenticated user (required to determine owner for PR endpoints)
     r"^/user$",
 ]
 
-_PR_PATTERNS: list[re.Pattern[str]] = [re.compile(p) for p in _PR_PATHS]
+# ---------------------------------------------------------------------------
+# Issue endpoint whitelist
+# ---------------------------------------------------------------------------
+
+_ISSUE_PATHS: list[str] = [
+    # Issue CRUD (GitHub has no DELETE for issues — close via PATCH state=closed)
+    r"^/repos/[^/]+/[^/]+/issues$",
+    r"^/repos/[^/]+/[^/]+/issues/\d+$",
+    # Issue / PR discussion comments
+    r"^/repos/[^/]+/[^/]+/issues/\d+/comments$",
+    r"^/repos/[^/]+/[^/]+/issues/\d+/comments/\d+$",
+    # Issue labels
+    r"^/repos/[^/]+/[^/]+/issues/\d+/labels$",
+    r"^/repos/[^/]+/[^/]+/issues/\d+/labels/[^/]+$",
+    # Issue assignees
+    r"^/repos/[^/]+/[^/]+/issues/\d+/assignees$",
+    # Repository labels (needed to pick valid labels when creating/updating issues)
+    r"^/repos/[^/]+/[^/]+/labels$",
+]
+
+_ALLOWED_PATHS: list[str] = _PR_PATHS + _ISSUE_PATHS
+
+_ALLOWED_PATTERNS: list[re.Pattern[str]] = [re.compile(p) for p in _ALLOWED_PATHS]
 
 
-def is_pr_endpoint(path: str) -> bool:
-    """Check if path matches any PR endpoint pattern.
+def is_allowed_endpoint(path: str) -> bool:
+    """Check if path matches any allowed (PR or issue) endpoint pattern.
 
     Strips query parameters before matching.
     """
     clean_path = path.split("?")[0]
-    return any(p.match(clean_path) for p in _PR_PATTERNS)
+    return any(p.match(clean_path) for p in _ALLOWED_PATTERNS)

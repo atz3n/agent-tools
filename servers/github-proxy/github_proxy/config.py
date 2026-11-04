@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configuration and logging for the GitHub PR-only proxy."""
+"""Configuration and logging for the GitHub PR/issue proxy."""
 
 from __future__ import annotations
 
