@@ -9,6 +9,12 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip ripgrep fd-find htop tshark && \
     rm -rf /var/lib/apt/lists/*
 
+# Debian ships python3 only; symlink 'python' (and 'pip') to python3/pip3 so
+# scripts and agents can call 'python' too. A symlink on PATH beats a bash
+# alias: it also works in non-interactive shells ('docker exec', tool calls).
+RUN ln -s "$(command -v python3)" /usr/local/bin/python && \
+    ln -s "$(command -v pip3)" /usr/local/bin/pip
+
 # Install Docker CLI (client only). No daemon runs in this image: with
 # 'pia run --docker' the host Docker socket is mounted and the CLI talks to
 # the host daemon (see harness/pia/README.md).
