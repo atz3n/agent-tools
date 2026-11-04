@@ -5,6 +5,8 @@ review.md
 .qwen
 __pycache__
 .ruff_cache
+.coverage
+htmlcov/
 .DS_Store
 .playwright
 # Playwright CLI output (may contain credentials)

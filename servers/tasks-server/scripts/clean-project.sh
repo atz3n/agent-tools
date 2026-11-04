@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Removes build artifacts (__pycache__, .ruff_cache, .mypy_cache, etc.)
-# from a project.
+# Removes build artifacts (__pycache__, .ruff_cache, .mypy_cache, .coverage,
+# htmlcov, etc.) from a project.
 
 ###################################################################################################
 # CONFIGURATION
@@ -56,6 +56,9 @@ FIND_ARGS+=(".mypy_cache")
 FIND_ARGS+=("-o")
 FIND_ARGS+=("-name")
 FIND_ARGS+=(".pytest_cache")
+FIND_ARGS+=("-o")
+FIND_ARGS+=("-name")
+FIND_ARGS+=("htmlcov")
 FIND_ARGS+=(")")
 FIND_ARGS+=("-prune")
 FIND_ARGS+=("-exec")
@@ -72,8 +75,11 @@ FIND_ARGS+=("+")
 if $DRY_RUN; then
   echo "[INFO] Dry run — would delete:"
   find "${FIND_ARGS[@]}" -exec echo "  {}" \;
+  if [ -f "${HERE}/.coverage" ]; then echo "  ${HERE}/.coverage"; fi
+  echo "[INFO] Done."
 else
   echo "[INFO] Removing build artifacts in ${HERE}..."
   find "${FIND_ARGS[@]}" -exec rm -rf {} +
+  rm -f "${HERE}/.coverage"
   echo "[INFO] Done."
 fi

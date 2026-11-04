@@ -46,6 +46,7 @@ The proxy is reachable at `http://localhost:8087`.
 | `./scripts/stop-docker.sh` | Stop and remove containers |
 | `./scripts/lint-project.sh` | Lint with ruff and pyright |
 | `./scripts/test-project.sh` | Run the unittest suite |
+| `./scripts/coverage-project.sh` | Run tests with coverage (fails below `fail_under`; `--html` for report) |
 | `./scripts/clean-project.sh` | Remove caches and build artifacts |
 
 ## Credential management

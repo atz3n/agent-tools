@@ -775,5 +775,348 @@ class TestHandlerMethods(unittest.TestCase):
         self.assertTrue(hasattr(ProxyHandler, '_send_json'))
 
 
+class TestProxyRouting(unittest.TestCase):
+    """Test _proxy() routing for every method and endpoint."""
+
+    def _routed(self, method: str, path: str) -> tuple[ProxyHandler, list[str]]:
+        """Run _proxy with all sub-handlers stubbed; return handler and call log."""
+        handler = cast(Any, _make_handler())
+        handler.path = path
+        calls: list[str] = []
+        handler._handle_tasks_list = lambda p: calls.append('tasks_list')
+        handler._handle_task_get = lambda i: calls.append(f'task_get:{i}')
+        handler._handle_task_create = lambda: calls.append('task_create')
+        handler._handle_task_update = lambda i: calls.append(f'task_update:{i}')
+        handler._handle_task_delete = lambda i: calls.append(f'task_delete:{i}')
+        handler._handle_projects_list = lambda: calls.append('projects_list')
+        handler._handle_projects_create = lambda: calls.append('projects_create')
+        handler._handle_ui = lambda: calls.append('ui')
+        handler._handle_static = lambda: calls.append('static')
+        handler._proxy(method)
+        return handler, calls
+
+    # --- GET -------------------------------------------------------------------
+
+    def test_get_tasks_list_routes(self) -> None:
+        """GET /tasks should route to the tasks-list handler."""
+        _, calls = self._routed('GET', '/tasks')
+        self.assertEqual(calls, ['tasks_list'])
+
+    def test_get_task_by_id_routes_with_parsed_id(self) -> None:
+        """GET /tasks/{id} should pass the numeric id to the handler."""
+        _, calls = self._routed('GET', '/tasks/42')
+        self.assertEqual(calls, ['task_get:42'])
+
+    def test_get_projects_routes(self) -> None:
+        """GET /projects should route to the projects-list handler."""
+        _, calls = self._routed('GET', '/projects')
+        self.assertEqual(calls, ['projects_list'])
+
+    def test_get_ui_routes(self) -> None:
+        """GET /ui should route to the UI handler."""
+        _, calls = self._routed('GET', '/ui')
+        self.assertEqual(calls, ['ui'])
+
+    def test_get_css_routes_to_static(self) -> None:
+        """GET /css/* should route to the static handler."""
+        _, calls = self._routed('GET', '/css/styles.css')
+        self.assertEqual(calls, ['static'])
+
+    def test_get_js_routes_to_static(self) -> None:
+        """GET /js/* should route to the static handler."""
+        _, calls = self._routed('GET', '/js/app.js')
+        self.assertEqual(calls, ['static'])
+
+    def test_get_query_params_passed_to_handler(self) -> None:
+        """The parsed query string should reach the tasks-list handler."""
+        handler = cast(Any, _make_handler())
+        handler.path = '/tasks?project=p&status=open'
+        seen: dict = {}
+        handler._handle_tasks_list = lambda p: seen.update(p)
+        handler._proxy('GET')
+        self.assertEqual(seen.get('project'), ['p'])
+        self.assertEqual(seen.get('status'), ['open'])
+
+    # --- POST ------------------------------------------------------------------
+
+    def test_post_tasks_routes(self) -> None:
+        """POST /tasks should route to the task-create handler."""
+        _, calls = self._routed('POST', '/tasks')
+        self.assertEqual(calls, ['task_create'])
+
+    def test_post_projects_routes(self) -> None:
+        """POST /projects should route to the project-create handler."""
+        _, calls = self._routed('POST', '/projects')
+        self.assertEqual(calls, ['projects_create'])
+
+    def test_post_on_non_collection_path_returns_404(self) -> None:
+        """POST /ui (whitelisted but not a POST route) should return not found."""
+        handler, calls = self._routed('POST', '/ui')
+        self.assertEqual(calls, [])
+        data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(data['error'], 'not found')
+
+    # --- PATCH / DELETE ----------------------------------------------------------
+
+    def test_patch_task_routes_with_id(self) -> None:
+        """PATCH /tasks/{id} should pass the parsed id."""
+        _, calls = self._routed('PATCH', '/tasks/7')
+        self.assertEqual(calls, ['task_update:7'])
+
+    def test_patch_without_id_returns_404(self) -> None:
+        """PATCH /tasks (no id) should return not found."""
+        handler, calls = self._routed('PATCH', '/tasks')
+        self.assertEqual(calls, [])
+        data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(data['error'], 'not found')
+
+    def test_delete_task_routes_with_id(self) -> None:
+        """DELETE /tasks/{id} should pass the parsed id."""
+        _, calls = self._routed('DELETE', '/tasks/9')
+        self.assertEqual(calls, ['task_delete:9'])
+
+    def test_delete_without_id_returns_404(self) -> None:
+        """DELETE /tasks (no id) should return not found."""
+        handler, calls = self._routed('DELETE', '/tasks')
+        self.assertEqual(calls, [])
+        data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(data['error'], 'not found')
+
+    # --- HEAD --------------------------------------------------------------------
+
+    def _head(self, path: str) -> tuple[int, str]:
+        """Send a HEAD through _proxy; return (status, content-type)."""
+        handler = cast(Any, _make_handler())
+        handler.path = path
+        status: dict = {}
+        headers: dict = {}
+        handler.send_response = lambda s: status.update(s=s)
+        handler.send_header = lambda k, v: headers.update({k: v})
+        handler.end_headers = lambda: None
+        handler._proxy('HEAD')
+        return status.get('s', 0), headers.get('Content-Type', '')
+
+    def test_head_tasks_returns_200_json(self) -> None:
+        """HEAD /tasks should return 200 with a JSON content-type and no body."""
+        status, ct = self._head('/tasks')
+        self.assertEqual(status, 200)
+        self.assertEqual(ct, 'application/json')
+
+    def test_head_ui_returns_200_html(self) -> None:
+        """HEAD /ui should advertise the HTML content-type."""
+        status, ct = self._head('/ui')
+        self.assertEqual(status, 200)
+        self.assertIn('text/html', ct)
+
+    def test_head_css_returns_200_css_type(self) -> None:
+        """HEAD /css/* should advertise the CSS content-type."""
+        status, ct = self._head('/css/styles.css')
+        self.assertEqual(status, 200)
+        self.assertIn('text/css', ct)
+
+    def test_head_js_returns_200_js_type(self) -> None:
+        """HEAD /js/* should advertise the JavaScript content-type."""
+        status, ct = self._head('/js/app.js')
+        self.assertEqual(status, 200)
+        self.assertIn('javascript', ct)
+
+    def test_head_task_id_returns_200(self) -> None:
+        """HEAD /tasks/{id} should return 200."""
+        status, _ = self._head('/tasks/1')
+        self.assertEqual(status, 200)
+
+    def test_head_projects_returns_200(self) -> None:
+        """HEAD /projects should return 200."""
+        status, _ = self._head('/projects')
+        self.assertEqual(status, 200)
+
+    def test_head_blocked_path_returns_404(self) -> None:
+        """HEAD on a non-whitelisted path should return a bare 404."""
+        handler = cast(Any, _make_handler())
+        handler.path = '/unknown'
+        status: dict = {}
+        handler.send_response = lambda s: status.update(s=s)
+        handler.end_headers = lambda: None
+        handler._proxy('HEAD')
+        self.assertEqual(status.get('s'), 404)
+
+    # --- methods -----------------------------------------------------------------
+
+    def test_unsupported_method_returns_405(self) -> None:
+        """PUT on a whitelisted path should return method not allowed."""
+        handler, calls = self._routed('PUT', '/tasks')
+        self.assertEqual(calls, [])
+        data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(data['error'], 'method not allowed')
+
+    def test_http_methods_delegate_to_proxy(self) -> None:
+        """Each do_* should call _proxy with its method name."""
+        handler = cast(Any, _make_handler())
+        handler.path = '/tasks'
+        calls: list[str] = []
+        handler._proxy = calls.append
+        handler.do_GET()
+        handler.do_HEAD()
+        handler.do_POST()
+        handler.do_PATCH()
+        handler.do_PUT()
+        handler.do_DELETE()
+        self.assertEqual(calls, ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'])
+
+
+class TestTaskUpdateEdgeCases(unittest.TestCase):
+    """Test remaining handler edge cases."""
+
+    def setUp(self) -> None:
+        """Use a temporary tasks directory."""
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+
+    def tearDown(self) -> None:
+        """Restore the tasks directory."""
+        config.TASKS_DIR = self._orig_tasks_dir
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_patch_invalid_json_returns_400(self) -> None:
+        """PATCH with an unparseable body should return 400."""
+        handler = cast(Any, _make_handler())
+        handler.path = '/tasks/1'
+        raw = b'nope{{}'
+        del handler.headers['Content-Length']  # HTTPMessage assignment appends, not replaces
+        handler.headers['Content-Length'] = str(len(raw))
+        handler.rfile = io.BytesIO(raw)
+        handler._handle_task_update(1)
+        data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(data['error'], 'invalid JSON body')
+
+    def test_task_create_defaults(self) -> None:
+        """Creating with only a title should apply documented defaults."""
+        handler = cast(Any, _make_handler())
+        handler.path = '/tasks'
+        body = json.dumps({'title': 'Minimal'}).encode()
+        del handler.headers['Content-Length']
+        handler.headers['Content-Length'] = str(len(body))
+        handler.rfile = io.BytesIO(body)
+        handler._handle_task_create()
+        task = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])['task']
+        self.assertEqual(task['project'], 'default')
+        self.assertEqual(task['status'], 'open')
+        self.assertEqual(task['priority'], 'medium')
+
+
+class TestStorageEdgeCases(unittest.TestCase):
+    """Test uncovered storage-layer branches."""
+
+    def setUp(self) -> None:
+        """Use a temporary tasks directory."""
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+
+    def tearDown(self) -> None:
+        """Restore the tasks directory."""
+        config.TASKS_DIR = self._orig_tasks_dir
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # --- _parse_value -------------------------------------------------------------
+
+    def test_parse_value_null_and_empty(self) -> None:
+        """Empty and 'null' strings should parse to None."""
+        self.assertIsNone(storage._parse_value(''))
+        self.assertIsNone(storage._parse_value('null'))
+        self.assertIsNone(storage._parse_value('NULL'))
+
+    def test_parse_value_booleans(self) -> None:
+        """true/false (any case) should parse to booleans."""
+        self.assertIs(storage._parse_value('true'), True)
+        self.assertIs(storage._parse_value('False'), False)
+
+    def test_parse_value_float(self) -> None:
+        """A decimal value should parse to float."""
+        self.assertEqual(storage._parse_value('3.5'), 3.5)
+
+    # --- frontmatter round-trips ----------------------------------------------------
+
+    def test_parse_frontmatter_blank_line_and_explicit_none(self) -> None:
+        """Blank lines are skipped and 'key: None' parses to None."""
+        content = '---\nid: 1\n\ndue_date: None\nflag: true\n---\nbody\n'
+        fm, body = storage.parse_frontmatter(content)
+        self.assertIsNone(fm['due_date'])
+        self.assertIs(fm['flag'], True)
+        self.assertEqual(body.strip(), 'body')
+
+    def test_format_frontmatter_boolean(self) -> None:
+        """Booleans should serialize as lowercase true/false."""
+        text = storage.format_frontmatter({'a': True, 'b': False})
+        self.assertIn('a: true', text)
+        self.assertIn('b: false', text)
+
+    def test_bool_roundtrip(self) -> None:
+        """A bool field should survive format → parse unchanged."""
+        text = storage.format_frontmatter({'flag': False})
+        fm, _ = storage.parse_frontmatter(f'---\n{text}\n---\n')
+        self.assertIs(fm['flag'], False)
+
+    # --- helpers ---------------------------------------------------------------------
+
+    def test_task_file_path_with_title(self) -> None:
+        """With a title the filename is derived from it."""
+        path = storage._task_file_path('proj', 5, 'Fix login bug')
+        self.assertTrue(path.endswith(os.path.join('proj', '005_fix-login-bug.md')))
+
+    def test_task_file_path_without_title(self) -> None:
+        """Without a title the filename falls back to the id."""
+        path = storage._task_file_path('proj', 5)
+        self.assertTrue(path.endswith(os.path.join('proj', '005_5.md')))
+
+    def test_internal_keys(self) -> None:
+        """Internal keys are excluded from persistence."""
+        self.assertEqual(storage._internal_keys(), {'filename', 'project'})
+
+    # --- scanning robustness ------------------------------------------------------------
+
+    def _write_stray_file(self) -> None:
+        """Create a project with one real task and one non-task file."""
+        storage.create_task(title='Real task', project='proj')
+        with open(os.path.join(self.tmpdir, 'proj', 'README.md'), 'w') as f:
+            f.write('not a task\n')
+
+    def test_list_tasks_skips_non_task_files(self) -> None:
+        """Non-task files inside a project dir must not break listing."""
+        self._write_stray_file()
+        tasks = storage.list_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]['title'], 'Real task')
+
+    def test_list_tasks_missing_project_returns_empty(self) -> None:
+        """Filtering by a nonexistent project should return no tasks."""
+        storage.create_task(title='T', project='proj')
+        self.assertEqual(storage.list_tasks(project='ghost'), [])
+
+    def test_get_task_skips_non_task_files(self) -> None:
+        """get_task must ignore stray files when scanning."""
+        self._write_stray_file()
+        task = storage.get_task(1)
+        self.assertIsNotNone(task)
+        self.assertEqual(task['title'], 'Real task')  # type: ignore[index]
+
+    def test_delete_task_skips_non_task_files(self) -> None:
+        """delete_task must ignore stray files and still find the task."""
+        self._write_stray_file()
+        self.assertTrue(storage.delete_task(1))
+        self.assertIsNone(storage.get_task(1))
+
+    def test_delete_nonexistent_id_with_stray_files_returns_false(self) -> None:
+        """Deleting an absent id must skip every scanned file and report False."""
+        self._write_stray_file()
+        self.assertFalse(storage.delete_task(99))
+        self.assertIsNotNone(storage.get_task(1))
+
+
 if __name__ == '__main__':
     unittest.main()

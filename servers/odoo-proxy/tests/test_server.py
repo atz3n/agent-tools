@@ -448,5 +448,601 @@ class TestQueryParameterStripping(unittest.TestCase):
         self.assertTrue(whitelist.is_allowed_endpoint('/task/data?'))
 
 
+class TestSessionLogin(unittest.TestCase):
+    """Test the two-step Odoo login flow in OdooSession._login()."""
+
+    def setUp(self) -> None:
+        """Set up a session with a patched HTTPSConnection."""
+        self.config: session.Config = {
+            'db': 'test-db',
+            'url': 'https://test.odoo.com',
+            'user': 'test@example.com',
+            'password': 'secret123',
+        }
+        self.sess = session.OdooSession(self.config)
+        self._patcher = patch('odoo_proxy.session.http.client.HTTPSConnection')
+        self.mock_conn_cls = self._patcher.start()
+
+    def tearDown(self) -> None:
+        """Stop the connection patch."""
+        self._patcher.stop()
+
+    @staticmethod
+    def _resp(status: int, body: bytes = b'', cookie: str | None = None) -> MagicMock:
+        """Build a fake HTTPResponse."""
+        resp = MagicMock()
+        resp.status = status
+        resp.read.return_value = body
+        resp.getheader.return_value = cookie
+        return resp
+
+    def _conn(self, resp: MagicMock) -> MagicMock:
+        """Build a fake connection returning the given response."""
+        conn = MagicMock()
+        conn.getresponse.return_value = resp
+        return conn
+
+    def _two_step(self, step1: MagicMock, step2: MagicMock) -> tuple[MagicMock, MagicMock]:
+        """Queue two connections for the two login steps."""
+        c1, c2 = self._conn(step1), self._conn(step2)
+        self.mock_conn_cls.side_effect = [c1, c2]
+        return c1, c2
+
+    def test_login_success(self) -> None:
+        """Successful login should store the session cookie and timestamp."""
+        step1 = self._resp(
+            200, b'<input name="csrf_token" value="TOK123">', 'session_id=init; Path=/'
+        )
+        step2 = self._resp(303, b'', 'session_id=final; Path=/; HttpOnly')
+        _, c2 = self._two_step(step1, step2)
+        self.sess._login()
+        self.assertEqual(self.sess._cookie, 'session_id=final')
+        self.assertGreater(self.sess._last_login, 0)
+        args, kwargs = c2.request.call_args
+        self.assertEqual(args[1], '/web/login')
+        self.assertIn('csrf_token=TOK123', kwargs['body'])
+        self.assertIn('login=test@example.com', kwargs['body'])
+        self.assertIn('password=secret123', kwargs['body'])
+
+    def test_login_step1_sends_initial_cookie(self) -> None:
+        """Step 2 should replay the session cookie received in step 1."""
+        step1 = self._resp(
+            200, b'name="csrf_token" value="T"', 'session_id=init; Path=/'
+        )
+        step2 = self._resp(303, b'', 'session_id=final; Path=/')
+        _, c2 = self._two_step(step1, step2)
+        self.sess._login()
+        _, kwargs = c2.request.call_args
+        self.assertEqual(kwargs['headers']['Cookie'], 'session_id=init')
+
+    def test_login_step1_gets_login_page(self) -> None:
+        """Step 1 should GET the login page (with base path)."""
+        step1 = self._resp(200, b'name="csrf_token" value="T"', None)
+        step2 = self._resp(200, b'', 'session_id=c; Path=/')
+        c1, _ = self._two_step(step1, step2)
+        self.sess._login()
+        self.assertEqual(c1.request.call_args[0], ('GET', '/web/login'))
+
+    def test_login_alt_csrf_pattern(self) -> None:
+        """CSRF token should also be found in the json-style pattern."""
+        step1 = self._resp(200, b'csrf_token: "ALT456"', None)
+        step2 = self._resp(303, b'', 'session_id=final; Path=/')
+        _, c2 = self._two_step(step1, step2)
+        self.sess._login()
+        _, kwargs = c2.request.call_args
+        self.assertIn('csrf_token=ALT456', kwargs['body'])
+
+    def test_login_step1_failure(self) -> None:
+        """A non-200/302 step 1 should raise with the HTTP status."""
+        step1 = self._resp(500)
+        step2 = self._resp(303, b'', 'session_id=x')
+        self._two_step(step1, step2)
+        with self.assertRaisesRegex(RuntimeError, 'Login step 1 failed: HTTP 500'):
+            self.sess._login()
+
+    def test_login_no_csrf_token(self) -> None:
+        """A login page without a CSRF token should raise."""
+        step1 = self._resp(200, b'<html>no token here</html>', None)
+        step2 = self._resp(303, b'', 'session_id=x')
+        self._two_step(step1, step2)
+        with self.assertRaisesRegex(RuntimeError, 'Could not extract CSRF token'):
+            self.sess._login()
+
+    def test_login_step2_failure(self) -> None:
+        """A rejected credentials POST should raise with the HTTP status."""
+        step1 = self._resp(200, b'name="csrf_token" value="T"', None)
+        step2 = self._resp(400)
+        self._two_step(step1, step2)
+        with self.assertRaisesRegex(RuntimeError, 'Login step 2 failed: HTTP 400'):
+            self.sess._login()
+
+    def test_login_no_session_cookie(self) -> None:
+        """A successful login POST without a session cookie should raise."""
+        step1 = self._resp(200, b'name="csrf_token" value="T"', None)
+        step2 = self._resp(200, b'', None)
+        self._two_step(step1, step2)
+        with self.assertRaisesRegex(RuntimeError, 'No session cookie received'):
+            self.sess._login()
+
+    def test_extract_session_cookie_none(self) -> None:
+        """No Set-Cookie header should yield an empty cookie string."""
+        resp = self._resp(200, b'', None)
+        self.assertEqual(session._extract_session_cookie(resp), '')
+
+    def test_extract_session_cookie_filters_session_id_only(self) -> None:
+        """Only session_id parts of Set-Cookie should be kept."""
+        resp = self._resp(200, b'', 'session_id=abc; other=1; Path=/')
+        self.assertEqual(session._extract_session_cookie(resp), 'session_id=abc')
+
+
+class TestSessionLifecycle(unittest.TestCase):
+    """Test _ensure_session / _reauthenticate / _connection."""
+
+    def setUp(self) -> None:
+        """Set up a test session."""
+        self.config: session.Config = {
+            'db': 'test-db',
+            'url': 'https://test.odoo.com',
+            'user': 'u',
+            'password': 'p',
+        }
+        self.sess = session.OdooSession(self.config)
+
+    def test_ensure_session_logs_in_when_expired(self) -> None:
+        """_ensure_session should trigger a login when there is no cookie."""
+        with patch.object(self.sess, '_login') as mock_login:
+            self.sess._ensure_session()
+            mock_login.assert_called_once()
+
+    def test_ensure_session_noop_when_fresh(self) -> None:
+        """_ensure_session should not re-login for a fresh session."""
+        self.sess._cookie = 'session_id=x'
+        self.sess._last_login = time.monotonic()
+        with patch.object(self.sess, '_login') as mock_login:
+            self.sess._ensure_session()
+            mock_login.assert_not_called()
+
+    def test_reauthenticate_clears_cookie_and_logs_in(self) -> None:
+        """_reauthenticate should drop the old cookie before logging in."""
+        self.sess._cookie = 'session_id=old'
+        login_order: list[str | None] = []
+        with patch.object(self.sess, '_login', side_effect=lambda: login_order.append(self.sess._cookie)):
+            self.sess._reauthenticate()
+        self.assertEqual(login_order, [None])
+
+    def test_connection_https(self) -> None:
+        """https URLs should use HTTPSConnection with host/port/timeout."""
+        with patch('odoo_proxy.session.http.client.HTTPSConnection') as https_cls, \
+             patch('odoo_proxy.session.http.client.HTTPConnection') as http_cls:
+            self.sess._connection()
+            https_cls.assert_called_once_with('test.odoo.com', 443, timeout=30)
+            http_cls.assert_not_called()
+
+    def test_connection_http(self) -> None:
+        """http URLs should use plain HTTPConnection."""
+        sess = session.OdooSession(dict(self.config, url='http://localhost:8069'))
+        with patch('odoo_proxy.session.http.client.HTTPSConnection') as https_cls, \
+             patch('odoo_proxy.session.http.client.HTTPConnection') as http_cls:
+            sess._connection()
+            http_cls.assert_called_once_with('localhost', 8069, timeout=30)
+            https_cls.assert_not_called()
+
+
+class TestCallOdoo(unittest.TestCase):
+    """Test the low-level _call_odoo response handling."""
+
+    def setUp(self) -> None:
+        """Set up a session with a patched connection factory."""
+        self.config: session.Config = {
+            'db': 'test-db', 'url': 'https://test.odoo.com', 'user': 'u', 'password': 'p',
+        }
+        self.sess = session.OdooSession(self.config)
+        self.sess._cookie = 'session_id=x'
+        self._patcher = patch('odoo_proxy.session.http.client.HTTPSConnection')
+        self.mock_conn_cls = self._patcher.start()
+        self.conn = MagicMock()
+        self.mock_conn_cls.return_value = self.conn
+
+    def tearDown(self) -> None:
+        """Stop the connection patch."""
+        self._patcher.stop()
+
+    def _respond(self, status: int, data: bytes) -> None:
+        resp = MagicMock()
+        resp.status = status
+        resp.read.return_value = data
+        self.conn.getresponse.return_value = resp
+
+    def _call(self) -> dict:
+        return self.sess._call_odoo('/web/dataset/call_kw', b'{}', {})
+
+    def test_success_returns_result(self) -> None:
+        """A JSON-RPC envelope should unwrap to its result."""
+        self._respond(200, b'{"result": {"x": 1}}')
+        self.assertEqual(self._call(), {'x': 1})
+
+    def test_403_raises_session_expired(self) -> None:
+        """403 should signal session expiry for the retry logic."""
+        self._respond(403, b'')
+        with self.assertRaises(session.SessionExpiredError):
+            self._call()
+
+    def test_302_raises_session_expired(self) -> None:
+        """A redirect (re-login page) should signal session expiry."""
+        self._respond(302, b'')
+        with self.assertRaises(session.SessionExpiredError):
+            self._call()
+
+    def test_empty_response_raises(self) -> None:
+        """An empty body should raise with status and path context."""
+        self._respond(200, b'')
+        with self.assertRaisesRegex(RuntimeError, 'Empty response'):
+            self._call()
+
+    def test_non_json_response_raises(self) -> None:
+        """Non-JSON bodies should raise with a snippet of the body."""
+        self._respond(200, b'<html>oops</html>')
+        with self.assertRaisesRegex(RuntimeError, 'Non-JSON response'):
+            self._call()
+
+    def test_rpc_error_key_raises(self) -> None:
+        """A JSON-RPC error envelope should raise with the error detail."""
+        self._respond(200, b'{"error": {"message": "boom"}}')
+        with self.assertRaisesRegex(RuntimeError, 'Odoo RPC error'):
+            self._call()
+
+
+class TestRpcWrappers(unittest.TestCase):
+    """Test call_rpc / get_messages / post_message payloads and retry logic."""
+
+    def setUp(self) -> None:
+        """Set up a session with session management stubbed out."""
+        self.config: session.Config = {
+            'db': 'test-db', 'url': 'https://test.odoo.com', 'user': 'u', 'password': 'p',
+        }
+        self.sess = session.OdooSession(self.config)
+        self._ensure = patch.object(self.sess, '_ensure_session').start()
+        self._reauth = patch.object(self.sess, '_reauthenticate').start()
+        self._call = patch.object(self.sess, '_call_odoo').start()
+        self.addCleanup(patch.stopall)
+
+    def test_call_rpc_payload_and_path(self) -> None:
+        """call_rpc should POST a jsonrpc envelope to /web/dataset/call_kw."""
+        self._call.return_value = {'ok': True}
+        result = self.sess.call_rpc('project.task', 'web_read', args=[[1]], kwargs={'k': 2})
+        self.assertEqual(result, {'ok': True})
+        path, body, headers = self._call.call_args[0]
+        self.assertEqual(path, '/web/dataset/call_kw')
+        self.assertEqual(headers['Content-Type'], 'application/json')
+        payload = json.loads(body)
+        self.assertEqual(payload['jsonrpc'], '2.0')
+        self.assertEqual(payload['params']['model'], 'project.task')
+        self.assertEqual(payload['params']['method'], 'web_read')
+        self.assertEqual(payload['params']['args'], [[1]])
+        self.assertEqual(payload['params']['kwargs'], {'k': 2})
+
+    def test_call_rpc_retries_after_reauth(self) -> None:
+        """A session-expired first attempt should re-auth and retry exactly once."""
+        self._call.side_effect = [session.SessionExpiredError('403'), {'ok': True}]
+        result = self.sess.call_rpc('project.task', 'web_read', args=[[1]])
+        self.assertEqual(result, {'ok': True})
+        self._reauth.assert_called_once()
+        self.assertEqual(self._call.call_count, 2)
+
+    def test_call_rpc_does_not_retry_twice(self) -> None:
+        """A second session-expired error should propagate, not loop."""
+        self._call.side_effect = session.SessionExpiredError('403')
+        with self.assertRaises(session.SessionExpiredError):
+            self.sess.call_rpc('project.task', 'web_read')
+        self.assertEqual(self._call.call_count, 2)
+
+    def test_get_messages_payload_and_path(self) -> None:
+        """get_messages should POST thread params to /mail/thread/messages."""
+        self._call.return_value = {'messages': []}
+        self.sess.get_messages(3807, limit=5)
+        path, body, _ = self._call.call_args[0]
+        self.assertEqual(path, '/mail/thread/messages')
+        payload = json.loads(body)
+        self.assertEqual(payload['params']['thread_id'], 3807)
+        self.assertEqual(payload['params']['thread_model'], 'project.task')
+        self.assertEqual(payload['params']['limit'], 5)
+
+    def test_get_messages_retries_after_reauth(self) -> None:
+        """get_messages should also survive a session refresh."""
+        self._call.side_effect = [session.SessionExpiredError('302'), {'messages': [1]}]
+        self.assertEqual(self.sess.get_messages(1), {'messages': [1]})
+        self._reauth.assert_called_once()
+
+    def test_post_message_payload(self) -> None:
+        """post_message should call message_post with the note kwargs."""
+        self._call.return_value = {'id': 9}
+        self.sess.post_message(3807, '<p>hi</p>')
+        path, body, _ = self._call.call_args[0]
+        self.assertEqual(path, '/web/dataset/call_kw')
+        payload = json.loads(body)
+        self.assertEqual(payload['params']['method'], 'message_post')
+        self.assertEqual(payload['params']['args'], [3807])
+        self.assertEqual(payload['params']['kwargs']['body'], '<p>hi</p>')
+        self.assertEqual(payload['params']['kwargs']['message_type'], 'comment')
+        self.assertEqual(payload['params']['kwargs']['subtype_xmlid'], 'mail.mt_note')
+
+    def test_post_message_retries_after_reauth(self) -> None:
+        """post_message should also survive a session refresh."""
+        self._call.side_effect = [session.SessionExpiredError('403'), {'id': 9}]
+        self.assertEqual(self.sess.post_message(1, 'x'), {'id': 9})
+        self._reauth.assert_called_once()
+
+
+class TestGetSessionSingleton(unittest.TestCase):
+    """Test the global session singleton."""
+
+    def setUp(self) -> None:
+        """Reset the module-level singleton."""
+        session._session = None
+        session._session_config = None
+
+    def tearDown(self) -> None:
+        """Reset the module-level singleton."""
+        session._session = None
+        session._session_config = None
+
+    def test_same_config_returns_same_session(self) -> None:
+        """Repeated calls with the same config object reuse the session."""
+        cfg: session.Config = {
+            'db': 'd', 'url': 'https://x.odoo.com', 'user': 'u', 'password': 'p',
+        }
+        s1 = session.get_session(cfg)
+        self.assertIs(session.get_session(cfg), s1)
+
+    def test_new_config_creates_new_session(self) -> None:
+        """A different config object should build a fresh session."""
+        cfg1: session.Config = {
+            'db': 'd', 'url': 'https://x.odoo.com', 'user': 'u', 'password': 'p',
+        }
+        cfg2: session.Config = {
+            'db': 'd2', 'url': 'https://y.odoo.com', 'user': 'u', 'password': 'p',
+        }
+        s1 = session.get_session(cfg1)
+        self.assertIsNot(session.get_session(cfg2), s1)
+
+
+class TestTaskDataHandler(unittest.TestCase):
+    """Test GET /task/data handler logic."""
+
+    def setUp(self) -> None:
+        """Point the module-level config at a fake Odoo."""
+        self._orig = _server._session_config
+        _server._session_config = {
+            'db': 'test-db', 'url': 'https://test.odoo.com',
+            'user': 'u', 'password': 'p',
+        }
+
+    def tearDown(self) -> None:
+        """Restore module-level config."""
+        _server._session_config = self._orig
+
+    @staticmethod
+    def _make_handler(path: str, body: bytes = b'{}') -> ProxyHandler:
+        """Create a handler without a real socket."""
+        handler: ProxyHandler = object.__new__(ProxyHandler)
+        handler.path = path
+        handler.requestline = f'GET {path} HTTP/1.1'
+        handler.request_version = 'HTTP/1.1'
+        handler.client_address = ('192.168.1.1', 54321)
+        headers: http.client.HTTPMessage = http.client.HTTPMessage()
+        headers['Content-Length'] = str(len(body))
+        handler.headers = headers
+        handler.rfile = io.BytesIO(body)
+        handler.wfile = MagicMock()
+        return handler
+
+    @staticmethod
+    def _response(handler: ProxyHandler) -> dict:
+        """Parse the JSON body written by _send_json."""
+        return cast(dict, json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0]))
+
+    def test_success_returns_first_task(self) -> None:
+        """A web_read result list should be unwrapped to a single task."""
+        with patch('odoo_proxy.server.get_session') as mock_get:
+            mock_get.return_value.call_rpc.return_value = [{'id': 7, 'name': 'T'}]
+            handler = self._make_handler('/task/data?id=7')
+            handler._handle_task_data(parse_qs('id=7'))
+            self.assertEqual(self._response(handler), {'task': {'id': 7, 'name': 'T'}})
+            kwargs = mock_get.return_value.call_rpc.call_args[1]
+            self.assertEqual(kwargs['model'], 'project.task')
+            self.assertEqual(kwargs['method'], 'web_read')
+            self.assertEqual(kwargs['args'], [[7]])
+
+    def test_empty_result_returns_null_task(self) -> None:
+        """An empty web_read result should return task: None."""
+        with patch('odoo_proxy.server.get_session') as mock_get:
+            mock_get.return_value.call_rpc.return_value = []
+            handler = self._make_handler('/task/data?id=999')
+            handler._handle_task_data(parse_qs('id=999'))
+            self.assertIsNone(self._response(handler)['task'])
+
+    def test_missing_id_returns_400(self) -> None:
+        """Missing id parameter should return 400."""
+        handler = self._make_handler('/task/data')
+        handler._handle_task_data({})
+        self.assertEqual(self._response(handler)['error'], 'missing required parameter: id')
+
+    def test_invalid_id_returns_400(self) -> None:
+        """Non-numeric id should return 400 with the offending value."""
+        handler = self._make_handler('/task/data?id=abc')
+        handler._handle_task_data(parse_qs('id=abc'))
+        self.assertEqual(self._response(handler)['error'], "invalid id parameter: 'abc'")
+
+    def test_rpc_failure_returns_502(self) -> None:
+        """A backend RuntimeError should surface as 502 with the message."""
+        with patch('odoo_proxy.server.get_session') as mock_get:
+            mock_get.return_value.call_rpc.side_effect = RuntimeError('Odoo down')
+            handler = self._make_handler('/task/data?id=1')
+            handler._handle_task_data(parse_qs('id=1'))
+            self.assertEqual(self._response(handler)['error'], 'Odoo down')
+
+
+class TestTaskMessagesHandler(unittest.TestCase):
+    """Test GET /task/messages handler logic."""
+
+    def setUp(self) -> None:
+        """Point the module-level config at a fake Odoo."""
+        self._orig = _server._session_config
+        _server._session_config = {
+            'db': 'test-db', 'url': 'https://test.odoo.com',
+            'user': 'u', 'password': 'p',
+        }
+
+    def tearDown(self) -> None:
+        """Restore module-level config."""
+        _server._session_config = self._orig
+
+    @staticmethod
+    def _make_handler(path: str) -> ProxyHandler:
+        handler: ProxyHandler = object.__new__(ProxyHandler)
+        handler.path = path
+        handler.requestline = f'GET {path} HTTP/1.1'
+        handler.request_version = 'HTTP/1.1'
+        handler.client_address = ('192.168.1.1', 54321)
+        headers: http.client.HTTPMessage = http.client.HTTPMessage()
+        handler.headers = headers
+        handler.rfile = io.BytesIO(b'')
+        handler.wfile = MagicMock()
+        return handler
+
+    @staticmethod
+    def _response(handler: ProxyHandler) -> dict:
+        return cast(dict, json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0]))
+
+    def test_success_returns_messages(self) -> None:
+        """The messages list should be relayed unchanged."""
+        with patch('odoo_proxy.server.get_session') as mock_get:
+            mock_get.return_value.get_messages.return_value = {'messages': [{'id': 3}]}
+            handler = self._make_handler('/task/messages?id=3')
+            handler._handle_task_messages(parse_qs('id=3'))
+            self.assertEqual(self._response(handler), {'messages': [{'id': 3}]})
+            mock_get.return_value.get_messages.assert_called_once_with(thread_id=3)
+
+    def test_missing_messages_key_yields_empty_list(self) -> None:
+        """A result without 'messages' should normalize to an empty list."""
+        with patch('odoo_proxy.server.get_session') as mock_get:
+            mock_get.return_value.get_messages.return_value = {}
+            handler = self._make_handler('/task/messages?id=3')
+            handler._handle_task_messages(parse_qs('id=3'))
+            self.assertEqual(self._response(handler), {'messages': []})
+
+    def test_missing_id_returns_400(self) -> None:
+        """Missing id parameter should return 400."""
+        handler = self._make_handler('/task/messages')
+        handler._handle_task_messages({})
+        self.assertEqual(self._response(handler)['error'], 'missing required parameter: id')
+
+    def test_invalid_id_returns_400(self) -> None:
+        """Non-numeric id should return 400."""
+        handler = self._make_handler('/task/messages?id=x')
+        handler._handle_task_messages(parse_qs('id=x'))
+        self.assertEqual(self._response(handler)['error'], "invalid id parameter: 'x'")
+
+    def test_rpc_failure_returns_502(self) -> None:
+        """Backend failures should surface as 502."""
+        with patch('odoo_proxy.server.get_session') as mock_get:
+            mock_get.return_value.get_messages.side_effect = RuntimeError('Odoo down')
+            handler = self._make_handler('/task/messages?id=1')
+            handler._handle_task_messages(parse_qs('id=1'))
+            self.assertEqual(self._response(handler)['error'], 'Odoo down')
+
+
+class TestProxyRouting(unittest.TestCase):
+    """Test _proxy() routing, whitelist rejection, and method handling."""
+
+    @staticmethod
+    def _make_handler(method: str, path: str) -> ProxyHandler:
+        handler: ProxyHandler = object.__new__(ProxyHandler)
+        handler.path = path
+        handler.command = method
+        handler.requestline = f'{method} {path} HTTP/1.1'
+        handler.request_version = 'HTTP/1.1'
+        handler.client_address = ('192.168.1.1', 54321)
+        headers: http.client.HTTPMessage = http.client.HTTPMessage()
+        handler.headers = headers
+        handler.rfile = io.BytesIO(b'')
+        handler.wfile = MagicMock()
+        return handler
+
+    @staticmethod
+    def _response(handler: ProxyHandler) -> dict:
+        return cast(dict, json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0]))
+
+    def _routed(self, method: str, path: str) -> tuple[ProxyHandler, list[str]]:
+        """Run _proxy with all sub-handlers stubbed; return handler and call log."""
+        handler = self._make_handler(method, path)
+        calls: list[str] = []
+        handler._handle_task_data = lambda p: calls.append('data')  # type: ignore[method-assign]
+        handler._handle_task_messages = lambda p: calls.append('messages')  # type: ignore[method-assign]
+        handler._handle_task_message_post = lambda p: calls.append('message_post')  # type: ignore[method-assign]
+        handler._proxy(method)
+        return handler, calls
+
+    def test_blocked_path_returns_404(self) -> None:
+        """Non-whitelisted paths should get a JSON 404, never touch Odoo."""
+        handler, calls = self._routed('GET', '/web/dataset/call_kw')
+        self.assertEqual(self._response(handler)['error'], 'endpoint not found')
+        self.assertEqual(calls, [])
+
+    def test_get_task_data_routes(self) -> None:
+        """GET /task/data should route to the task-data handler."""
+        _, calls = self._routed('GET', '/task/data?id=1')
+        self.assertEqual(calls, ['data'])
+
+    def test_get_task_messages_routes(self) -> None:
+        """GET /task/messages should route to the messages handler."""
+        _, calls = self._routed('GET', '/task/messages?id=1')
+        self.assertEqual(calls, ['messages'])
+
+    def test_post_task_message_routes(self) -> None:
+        """POST /task/message should route to the message-post handler."""
+        _, calls = self._routed('POST', '/task/message?id=1')
+        self.assertEqual(calls, ['message_post'])
+
+    def test_get_on_post_only_endpoint_returns_404(self) -> None:
+        """GET /task/message (POST-only path) should return not found."""
+        handler, calls = self._routed('GET', '/task/message')
+        self.assertEqual(self._response(handler)['error'], 'not found')
+        self.assertEqual(calls, [])
+
+    def test_post_on_get_only_endpoint_returns_404(self) -> None:
+        """POST /task/data (GET-only path) should return not found."""
+        handler, calls = self._routed('POST', '/task/data')
+        self.assertEqual(self._response(handler)['error'], 'not found')
+        self.assertEqual(calls, [])
+
+    def test_unsupported_method_returns_405(self) -> None:
+        """PATCH/PUT/DELETE on an allowed path should return 405."""
+        for method in ('PATCH', 'PUT', 'DELETE'):
+            handler = self._make_handler(method, '/task/data')
+            handler._proxy(method)
+            self.assertEqual(self._response(handler)['error'], 'method not allowed', method)
+
+    def test_query_params_parsed_for_handlers(self) -> None:
+        """The query string should be parsed and passed to the sub-handler."""
+        handler = self._make_handler('GET', '/task/data?id=42&x=1')
+        seen: dict = {}
+        handler._handle_task_data = lambda p: seen.update(p)  # type: ignore[method-assign]
+        handler._proxy('GET')
+        self.assertEqual(seen.get('id'), ['42'])
+
+    def test_http_methods_delegate_to_proxy(self) -> None:
+        """do_GET/POST/PATCH/PUT/DELETE should each call _proxy with their method."""
+        handler = self._make_handler('GET', '/task/data')
+        calls: list[str] = []
+        handler._proxy = calls.append  # type: ignore[method-assign]
+        handler.do_GET()
+        handler.do_POST()
+        handler.do_PATCH()
+        handler.do_PUT()
+        handler.do_DELETE()
+        self.assertEqual(calls, ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'])
+
+
 if __name__ == '__main__':
     unittest.main()

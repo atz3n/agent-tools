@@ -102,7 +102,7 @@ To run the Pi agent container itself, see the [Pi harness](#pi-harness-harnesspi
 
 ## Development
 
-Each server ships scripts for its whole lifecycle — `build-docker.sh`, `run-docker.sh`, `pause-docker.sh`, `stop-docker.sh`, `lint-project.sh` (ruff/pyright), `test-project.sh` (unittest), `clean-project.sh`. Tests are plain `unittest` and import the server module directly; no server needs to be running:
+Each server ships scripts for its whole lifecycle — `build-docker.sh`, `run-docker.sh`, `pause-docker.sh`, `stop-docker.sh`, `lint-project.sh` (ruff/pyright), `test-project.sh` (unittest), `coverage-project.sh` (coverage.py with a per-server `fail_under` gate), `clean-project.sh`. Tests are plain `unittest` and import the server module directly; no server needs to be running:
 
 ```bash
 cd servers/github-proxy && python3 -m unittest tests.test_server -v
