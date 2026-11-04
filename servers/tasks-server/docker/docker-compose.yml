@@ -1,0 +1,16 @@
+networks:
+  tasks-server-network:
+    external: false
+services:
+  tasks-server:
+    image: tasks-server
+    container_name: tasks-server
+    networks:
+      - tasks-server-network
+    ports:
+      - 127.0.0.1:8088:8088
+    environment:
+      - PROXY_PORT=8088
+      - TASKS_DIR=/data/tasks/
+    volumes:
+      - ./../data:/data/tasks/

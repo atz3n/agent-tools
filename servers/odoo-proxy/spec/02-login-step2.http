@@ -1,0 +1,66 @@
+# Odoo Proxy — Login Step 2
+# Authenticates using credentials. Copy the session_id from this response
+# into the Cookie header of steps 3 and 4.
+
+POST my.odoo.url/web/login HTTP/1.1
+Cookie: session_id=session_id_from_step_1
+Content-Type: application/x-www-form-urlencoded
+Host: my.odoo.url
+Content-Length: 82
+
+csrf_token=csrf_token_from_step_1&login=user%40example.com&password=your-password
+
+### Response
+# HTTP/1.1 200 OK
+# Date: Wed, 22 Jul 2026 20:06:20 GMT
+# Content-Type: text/html; charset=utf-8
+# Transfer-Encoding: chunked
+# Connection: close
+# X-Frame-Options: DENY
+# Set-Cookie: session_id=session_id_from_step_2; Expires=Thu, 22 Jul 2027 20:06:20 GMT; Max-Age=604800; HttpOnly; Path=/; Secure; SameSite=Lax
+# X-Content-Type-Options: nosniff, nosniff
+# Server: Odoo.sh
+# Strict-Transport-security: max-age=31536000; includeSubDomains
+# Content-Encoding: gzip
+
+# <!DOCTYPE html>
+# <html>
+#     <head>
+#         <meta charset="utf-8"/>
+#         <meta http-equiv="X-UA-Compatible" content="IE=edge"/>
+#         <title>Odoo</title>
+#         <link type="image/x-icon" rel="shortcut icon" href="/web/static/img/favicon.ico"/>
+#         <script id="web.layout.odooscript" type="text/javascript">
+#             var odoo = {
+#                 csrf_token: "csrf_token_from_step_2",
+#                 debug: "",
+#             };
+#         </script>
+#                 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no"/>
+#                 <meta name="theme-color" content="#714B67"/>
+#         <link rel="manifest" href="/web/manifest.webmanifest" crossorigin="use-credentials"/>
+#                 <link rel="apple-touch-icon" href="/web/static/img/odoo-icon-ios.png"/>
+#         <script type="text/javascript">
+#             // Block to avoid leaking variables in the script scope
+#             {
+#                 odoo.__session_info__ = {"uid": 25, "is_system": false, "is_admin": false, "is_public": false, "is_internal_user": true, "user_context": {"lang": "en_GB", "tz": "Europe/Berlin", "uid": 25}, "db": "example-example-12131505", "user_settings": {"id": 28, "user_id": {"id": 25}, "is_discuss_sidebar_category_channel_open": true, "is_discuss_sidebar_category_chat_open": true, "push_to_talk_key": false, "use_push_to_talk": false, "voice_active_duration": 200, "volume_settings_ids": [["ADD", []]], "homemenu_config": false}, "server_version": "17.0+e", "server_version_info": [17, 0, 0, "final", 0, "e"], "support_url": "https://www.odoo.com/help", "name": "Alex Doe", "username": "alex@example.com", "partner_display_name": "Alex Doe", "partner_id": 164, "web.base.url": "https://my.odoo.url", "active_ids_limit": 20000, "profile_session": null, "profile_collectors": null, "profile_params": null, "max_file_upload_size": 134217728, "home_action_id": false, "cache_hashes": {"translations": "bde47003b39992a69011f4e50688c8ad1ef425d6", "load_menus": "b696ecaf189e7e3abdea1244325b37e15a62827ef2aaae3ed5e0aca52ea8db55"}, "currencies": {"125": {"symbol": "\u20ac", "position": "after", "digits": [69, 2]}, "1": {"symbol": "$", "position": "before", "digits": [69, 2]}}, "bundle_params": {"lang": "en_GB"}, "user_companies": {"current_company": 1, "allowed_companies": {"1": {"id": 1, "name": "Example GmbH", "sequence": 0, "child_ids": [], "parent_id": false, "timesheet_uom_id": 4, "timesheet_uom_factor": 1.0}}, "disallowed_ancestor_companies": {}}, "show_effect": true, "display_switch_company_menu": false, "user_id": [25], "max_time_between_keys_in_ms": 100, "websocket_worker_version": "17.0-3", "notification_type": "email", "warning": "user", "expiration_date": false, "expiration_reason": false, "map_box_token": false, "odoobot_initialized": true, "ocn_token_key": false, "fcm_project_id": false, "inbox_action": 123, "is_quick_edit_mode_enabled": false, "uom_ids": {"4": {"id": 4, "name": "Hours", "rounding": 0.01, "timesheet_widget": "float_time"}}};
+#                         const { user_context,  cache_hashes } = odoo.__session_info__;
+#                         const lang = new URLSearchParams(document.location.search).get("lang");
+#                         let menuURL = `/web/webclient/load_menus/${cache_hashes.load_menus}`;
+#                         if (lang) {
+#                             user_context.lang = lang;
+#                             menuURL += `?lang=${lang}`
+#                         }
+#                         odoo.reloadMenus = () => fetch(menuURL).then(res => res.json());
+#                         odoo.loadMenusPromise = odoo.reloadMenus();
+#                         // Prefetch translations to speedup webclient. This is done in JS because link rel="prefetch"
+#                         // is not yet supported on safari.
+#                         fetch(`/web/webclient/translations/${cache_hashes.translations}?lang=${user_context.lang}`);
+#                     }
+#                 </script>
+#                     <link type="text/css" rel="stylesheet" href="/web/assets/c27c765/web.assets_web.min.css"/>
+#         <script type="text/javascript" src="/web/assets/d979ae7/web.assets_web.min.js" onerror="__odooAssetError=1"></script>
+#     </head>
+#     <body class="o_web_client">
+#     </body>
+# </html>

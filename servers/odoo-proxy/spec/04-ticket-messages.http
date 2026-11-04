@@ -1,0 +1,458 @@
+# Odoo Proxy — Ticket Messages
+# Fetches thread messages for a given task.
+# Replace thread_id with your task ID.
+
+POST my.odoo.url/mail/thread/messages HTTP/1.1
+Cookie: session_id=session_id_from_step_2
+Content-Type: application/json
+Host: my.odoo.url
+
+{
+  "id": 21,
+  "jsonrpc": "2.0",
+  "method": "call",
+  "params": {
+    "thread_id": 123,
+    "thread_model": "project.task",
+    "limit": 30
+  }
+}
+
+### Response
+# HTTP/1.1 200 OK
+# Date: Wed, 22 Jul 2026 20:11:51 GMT
+# Content-Type: application/json; charset=utf-8
+# Transfer-Encoding: chunked
+# Connection: close
+# X-Content-Type-Options: nosniff, nosniff
+# Server: Odoo.sh
+# Content-Encoding: gzip
+
+# {
+#   "jsonrpc": "2.0",
+#   "id": 21,
+#   "result": {
+#     "messages": [
+#       {
+#         "id": 62263,
+#         "body": "<p>Hello world</p>",
+#         "date": "2026-07-22 11:12:54",
+#         "email_from": "\"Sam Roe\" <sam@example.com>",
+#         "message_type": "comment",
+#         "subtype_id": [
+#           2,
+#           "Note"
+#         ],
+#         "subject": false,
+#         "model": "project.task",
+#         "res_id": 123,
+#         "record_name": "Hello World",
+#         "starred_partner_ids": [],
+#         "author": {
+#           "id": 45,
+#           "name": "Sam Roe",
+#           "is_company": false,
+#           "user": {
+#             "id": 15,
+#             "isInternalUser": true
+#           },
+#           "type": "partner"
+#         },
+#         "default_subject": "Hello World",
+#         "notifications": [],
+#         "attachments": [],
+#         "trackingValues": [],
+#         "linkPreviews": [],
+#         "reactions": [],
+#         "pinned_at": false,
+#         "create_date": "2026-07-22 11:12:54",
+#         "write_date": "2026-07-22 11:13:11",
+#         "needaction_partner_ids": [],
+#         "history_partner_ids": [],
+#         "is_note": true,
+#         "is_discussion": false,
+#         "subtype_description": false,
+#         "recipients": [
+#           {
+#             "id": 164,
+#             "name": "Alex Doe",
+#             "type": "partner"
+#           }
+#         ],
+#         "scheduledDatetime": false,
+#         "module_icon": "/project/static/description/icon.png",
+#         "sms_ids": []
+#       },
+#       {
+#         "id": 62262,
+#         "body": "<p>Hello world</p>",
+#         "date": "2026-07-22 11:10:52",
+#         "email_from": "\"Alex Doe\" <alex@example.com>",
+#         "message_type": "comment",
+#         "subtype_id": [
+#           2,
+#           "Note"
+#         ],
+#         "subject": false,
+#         "model": "project.task",
+#         "res_id": 123,
+#         "record_name": "Hello World",
+#         "starred_partner_ids": [],
+#         "author": {
+#           "id": 164,
+#           "name": "Alex Doe",
+#           "is_company": false,
+#           "user": {
+#             "id": 25,
+#             "isInternalUser": true
+#           },
+#           "type": "partner"
+#         },
+#         "default_subject": "Hello World",
+#         "notifications": [
+#           {
+#             "id": 10333,
+#             "notification_type": "inbox",
+#             "notification_status": "sent",
+#             "failure_type": false,
+#             "persona": {
+#               "id": 45,
+#               "displayName": "Example GmbH, Sam Roe",
+#               "type": "partner"
+#             }
+#           }
+#         ],
+#         "attachments": [],
+#         "trackingValues": [],
+#         "linkPreviews": [],
+#         "reactions": [],
+#         "pinned_at": false,
+#         "create_date": "2026-07-22 11:10:52",
+#         "write_date": "2026-07-22 11:10:52",
+#         "needaction_partner_ids": [],
+#         "history_partner_ids": [
+#           45
+#         ],
+#         "is_note": true,
+#         "is_discussion": false,
+#         "subtype_description": false,
+#         "recipients": [
+#           {
+#             "id": 45,
+#             "name": "Sam Roe",
+#             "type": "partner"
+#           }
+#         ],
+#         "scheduledDatetime": false,
+#         "module_icon": "/project/static/description/icon.png",
+#         "sms_ids": []
+#       },
+#       {
+#         "id": 62261,
+#         "body": "<p>Hello world</p>",
+#         "date": "2026-07-22 11:10:21",
+#         "email_from": "\"Alex Doe\" <alex@example.com>",
+#         "message_type": "comment",
+#         "subtype_id": [
+#           2,
+#           "Note"
+#         ],
+#         "subject": false,
+#         "model": "project.task",
+#         "res_id": 123,
+#         "record_name": "Hello World",
+#         "starred_partner_ids": [],
+#         "author": {
+#           "id": 164,
+#           "name": "Alex Doe",
+#           "is_company": false,
+#           "user": {
+#             "id": 25,
+#             "isInternalUser": true
+#           },
+#           "type": "partner"
+#         },
+#         "default_subject": "Hello World",
+#         "notifications": [
+#           {
+#             "id": 10332,
+#             "notification_type": "inbox",
+#             "notification_status": "sent",
+#             "failure_type": false,
+#             "persona": {
+#               "id": 45,
+#               "displayName": "Example GmbH, Sam Roe",
+#               "type": "partner"
+#             }
+#           }
+#         ],
+#         "attachments": [],
+#         "trackingValues": [],
+#         "linkPreviews": [],
+#         "reactions": [],
+#         "pinned_at": false,
+#         "create_date": "2026-07-22 11:10:21",
+#         "write_date": "2026-07-22 11:10:21",
+#         "needaction_partner_ids": [],
+#         "history_partner_ids": [
+#           45
+#         ],
+#         "is_note": true,
+#         "is_discussion": false,
+#         "subtype_description": false,
+#         "recipients": [
+#           {
+#             "id": 45,
+#             "name": "Sam Roe",
+#             "type": "partner"
+#           }
+#         ],
+#         "scheduledDatetime": false,
+#         "module_icon": "/project/static/description/icon.png",
+#         "sms_ids": []
+#       },
+#       {
+#         "id": 62254,
+#         "body": "<p>Hello world</p>",
+#         "date": "2026-07-22 07:11:54",
+#         "email_from": "\"Sam Roe\" <sam@example.com>",
+#         "message_type": "comment",
+#         "subtype_id": [
+#           2,
+#           "Note"
+#         ],
+#         "subject": false,
+#         "model": "project.task",
+#         "res_id": 123,
+#         "record_name": "Hello World",
+#         "starred_partner_ids": [],
+#         "author": {
+#           "id": 45,
+#           "name": "Sam Roe",
+#           "is_company": false,
+#           "user": {
+#             "id": 15,
+#             "isInternalUser": true
+#           },
+#           "type": "partner"
+#         },
+#         "default_subject": "Hello World",
+#         "notifications": [],
+#         "attachments": [],
+#         "trackingValues": [],
+#         "linkPreviews": [],
+#         "reactions": [],
+#         "pinned_at": false,
+#         "create_date": "2026-07-22 07:11:54",
+#         "write_date": "2026-07-22 07:11:54",
+#         "needaction_partner_ids": [],
+#         "history_partner_ids": [],
+#         "is_note": true,
+#         "is_discussion": false,
+#         "subtype_description": false,
+#         "recipients": [],
+#         "scheduledDatetime": false,
+#         "module_icon": "/project/static/description/icon.png",
+#         "sms_ids": []
+#       },
+#       {
+#         "id": 62253,
+#         "body": "",
+#         "date": "2026-07-22 07:11:46",
+#         "email_from": "\"Sam Roe\" <sam@example.com>",
+#         "message_type": "notification",
+#         "subtype_id": [
+#           19,
+#           "Stage Changed"
+#         ],
+#         "subject": false,
+#         "model": "project.task",
+#         "res_id": 123,
+#         "record_name": "Hello World",
+#         "starred_partner_ids": [],
+#         "author": {
+#           "id": 45,
+#           "name": "Sam Roe",
+#           "is_company": false,
+#           "user": {
+#             "id": 15,
+#             "isInternalUser": true
+#           },
+#           "type": "partner"
+#         },
+#         "default_subject": "Hello World",
+#         "notifications": [],
+#         "attachments": [],
+#         "trackingValues": [
+#           {
+#             "changedField": "Stage",
+#             "id": 38904,
+#             "fieldName": "stage_id",
+#             "fieldType": "many2one",
+#             "newValue": {
+#               "currencyId": false,
+#               "floatPrecision": null,
+#               "value": "Example Project"
+#             },
+#             "oldValue": {
+#               "currencyId": false,
+#               "floatPrecision": null,
+#               "value": "Backlog"
+#             }
+#           }
+#         ],
+#         "linkPreviews": [],
+#         "reactions": [],
+#         "pinned_at": false,
+#         "create_date": "2026-07-22 07:11:46",
+#         "write_date": "2026-07-22 07:11:46",
+#         "needaction_partner_ids": [],
+#         "history_partner_ids": [],
+#         "is_note": false,
+#         "is_discussion": false,
+#         "subtype_description": "Stage changed",
+#         "recipients": [],
+#         "scheduledDatetime": false,
+#         "module_icon": "/project/static/description/icon.png",
+#         "sms_ids": []
+#       },
+#       {
+#         "id": 62252,
+#         "body": "",
+#         "date": "2026-07-22 07:11:40",
+#         "email_from": "\"Sam Roe\" <sam@example.com>",
+#         "message_type": "notification",
+#         "subtype_id": [
+#           2,
+#           "Note"
+#         ],
+#         "subject": false,
+#         "model": "project.task",
+#         "res_id": 123,
+#         "record_name": "Hello World",
+#         "starred_partner_ids": [],
+#         "author": {
+#           "id": 45,
+#           "name": "Sam Roe",
+#           "is_company": false,
+#           "user": {
+#             "id": 15,
+#             "isInternalUser": true
+#           },
+#           "type": "partner"
+#         },
+#         "default_subject": "Hello World",
+#         "notifications": [],
+#         "attachments": [],
+#         "trackingValues": [
+#           {
+#             "changedField": "Deadline",
+#             "id": 38903,
+#             "fieldName": "date_deadline",
+#             "fieldType": "datetime",
+#             "newValue": {
+#               "currencyId": false,
+#               "floatPrecision": null,
+#               "value": "2026-07-27 07:00:00Z"
+#             },
+#             "oldValue": {
+#               "currencyId": false,
+#               "floatPrecision": null,
+#               "value": false
+#             }
+#           },
+#           {
+#             "changedField": "Title",
+#             "id": 38902,
+#             "fieldName": "name",
+#             "fieldType": "char",
+#             "newValue": {
+#               "currencyId": false,
+#               "floatPrecision": null,
+#               "value": "Hello World"
+#             },
+#             "oldValue": {
+#               "currencyId": false,
+#               "floatPrecision": null,
+#               "value": "Hello World"
+#             }
+#           },
+#           {
+#             "changedField": "Start date",
+#             "id": 38901,
+#             "fieldName": "planned_date_begin",
+#             "fieldType": "datetime",
+#             "newValue": {
+#               "currencyId": false,
+#               "floatPrecision": null,
+#               "value": "2026-07-27 07:00:00Z"
+#             },
+#             "oldValue": {
+#               "currencyId": false,
+#               "floatPrecision": null,
+#               "value": false
+#             }
+#           }
+#         ],
+#         "linkPreviews": [],
+#         "reactions": [],
+#         "pinned_at": false,
+#         "create_date": "2026-07-22 07:11:40",
+#         "write_date": "2026-07-22 07:11:40",
+#         "needaction_partner_ids": [],
+#         "history_partner_ids": [],
+#         "is_note": true,
+#         "is_discussion": false,
+#         "subtype_description": false,
+#         "recipients": [],
+#         "scheduledDatetime": false,
+#         "module_icon": "/project/static/description/icon.png",
+#         "sms_ids": []
+#       },
+#       {
+#         "id": 62250,
+#         "body": "",
+#         "date": "2026-07-22 07:06:34",
+#         "email_from": "\"Sam Roe\" <sam@example.com>",
+#         "message_type": "notification",
+#         "subtype_id": [
+#           18,
+#           "Task Created"
+#         ],
+#         "subject": false,
+#         "model": "project.task",
+#         "res_id": 123,
+#         "record_name": "Hello World",
+#         "starred_partner_ids": [],
+#         "author": {
+#           "id": 45,
+#           "name": "Sam Roe",
+#           "is_company": false,
+#           "user": {
+#             "id": 15,
+#             "isInternalUser": true
+#           },
+#           "type": "partner"
+#         },
+#         "default_subject": "Hello World",
+#         "notifications": [],
+#         "attachments": [],
+#         "trackingValues": [],
+#         "linkPreviews": [],
+#         "reactions": [],
+#         "pinned_at": false,
+#         "create_date": "2026-07-22 07:06:34",
+#         "write_date": "2026-07-22 07:06:34",
+#         "needaction_partner_ids": [],
+#         "history_partner_ids": [],
+#         "is_note": false,
+#         "is_discussion": false,
+#         "subtype_description": "Task Created",
+#         "recipients": [],
+#         "scheduledDatetime": false,
+#         "module_icon": "/project/static/description/icon.png",
+#         "sms_ids": []
+#       }
+#     ]
+#   }
+# }

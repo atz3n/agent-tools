@@ -1,0 +1,11 @@
+run.sh
+review.md
+**/secrets/*
+!**/secrets/.gitkeep
+.qwen
+__pycache__
+.ruff_cache
+.DS_Store
+.playwright
+# Playwright CLI output (may contain credentials)
+.playwright-cli/

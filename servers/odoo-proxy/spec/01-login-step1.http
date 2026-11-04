@@ -1,0 +1,86 @@
+# Odoo Proxy — Login Step 1
+# Fetches the login page, extracts session_id (step 1) and csrf_token.
+# After running, copy the Set-Cookie value into the Cookie header of step 2
+# and the csrf_token from the HTML into the POST body of step 2.
+
+GET my.odoo.url/web/login HTTP/1.1
+Host: my.odoo.url
+
+### Response:
+# HTTP/1.1 200 OK
+# Date: Wed, 22 Jul 2026 20:05:25 GMT
+# Content-Type: text/html; charset=utf-8
+# Transfer-Encoding: chunked
+# Connection: close
+# Cache-Control: no-cache
+# X-Frame-Options: SAMEORIGIN
+# Content-Security-Policy: frame-ancestors 'self'
+# Set-Cookie: session_id=session_id_from_step_1; Expires=Thu, 22 Jul 2027 20:05:25 GMT; Max-Age=604800; HttpOnly; Path=/
+# X-Content-Type-Options: nosniff, nosniff
+# Server: Odoo.sh
+# Content-Encoding: gzip
+
+# <!DOCTYPE html>
+# <html style="height: 100%;">
+#     <head>
+#         <meta charset="utf-8"/>
+#         <meta http-equiv="X-UA-Compatible" content="IE=edge"/>
+#         <meta name="viewport" content="width=device-width, initial-scale=1"/>
+#         <title>Odoo</title>
+#         <link type="image/x-icon" rel="shortcut icon" href="/web/static/img/favicon.ico"/>
+#         <link rel="preload" href="/web/static/src/libs/fontawesome/fonts/fontawesome-webfont.woff2?v=4.7.0" as="font" crossorigin=""/>
+#         <link type="text/css" rel="stylesheet" href="/web/assets/b56d9b7/web.assets_frontend.min.css"/>
+#         <script id="web.layout.odooscript" type="text/javascript">
+#             var odoo = {
+#                 csrf_token: "csrf_token_from_step_1",
+#                 debug: "",
+#             };
+#         </script>
+#         <script type="text/javascript">
+#             odoo.__session_info__ = {"is_admin": false, "is_system": false, "is_public": true, "is_website_user": false, "user_id": false, "is_frontend": true, "profile_session": null, "profile_collectors": null, "profile_params": null, "show_effect": true, "currencies": {"125": {"symbol": "\u20ac", "position": "after", "digits": [69, 2]}, "1": {"symbol": "$", "position": "before", "digits": [69, 2]}}, "bundle_params": {"lang": "en_US"}, "websocket_worker_version": "17.0-3", "translationURL": "/website/translations", "cache_hashes": {"translations": "77e6cb25eef2193c65e2806e7d0c8d52dd103b35"}};
+#             if (!/(^|;\s)tz=/.test(document.cookie)) {
+#                 const userTZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+#                 document.cookie = `tz=${userTZ}; path=/`;
+#             }
+#         </script>
+#         <script type="text/javascript" defer="defer" src="/web/assets/f821033/web.assets_frontend_minimal.min.js" onerror="__odooAssetError=1"></script>
+#         <script type="text/javascript" defer="defer" data-src="/web/assets/d36b983/web.assets_frontend_lazy.min.js" onerror="__odooAssetError=1"></script>
+#     </head>
+#     <body class="o_home_menu_background">
+#         <div id="wrapwrap" class="  ">
+#                 <main>
+#             <div class="container py-5">
+#                 <div style="max-width: 300px;" class="card border-0 mx-auto bg-100 rounded-0 shadow-sm bg-white o_database_list">
+#                     <div class="card-body">
+#                         <div class="text-center pb-3 border-bottom mb-4">
+#                             <img alt="Logo" style="max-height:120px; max-width: 100%; width:auto" src="/web/binary/company_logo"/>
+#                         </div>
+#             <form class="oe_login_form" role="form" method="post" onsubmit="this.action = &#39;/web/login&#39; + location.hash" action="/web/login">
+#                 <input type="hidden" name="csrf_token" value="csrf_token_from_step_1"/>
+#                 <div class="mb-3 field-login">
+#                     <label for="login" class="form-label">Email</label>
+#                     <input type="text" placeholder="Email" name="login" id="login" required="required" autocomplete="username" autofocus="autofocus" autocapitalize="off" class="form-control "/>
+#                 </div>
+#                 <div class="mb-3">
+#                     <label for="password" class="form-label">Password</label>
+#                     <input type="password" placeholder="Password" name="password" id="password" required="required" autocomplete="current-password" maxlength="4096" class="form-control "/>
+#                 </div>
+#                 <div class="clearfix oe_login_buttons text-center gap-1 d-grid mb-1 pt-3">
+#                     <button type="submit" class="btn btn-primary">Log in</button>
+#                     <div class="justify-content-between mt-2 d-flex small">
+#                         <a href="/web/reset_password?">Reset Password</a>
+#                     </div>
+#                     <div class="o_login_auth"></div>
+#                 </div>
+#                 <input type="hidden" name="redirect"/>
+#             </form>
+#                         <div class="text-center small mt-4 pt-3 border-top">
+#                             <a href="https://www.odoo.com?utm_source=db&amp;utm_medium=auth" target="_blank">Powered by <span>Odoo</span></a>
+#                         </div>
+#                     </div>
+#                 </div>
+#             </div>
+#                 </main>
+#             </div>
+#         </body>
+# </html>

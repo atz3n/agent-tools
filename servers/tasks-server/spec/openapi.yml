@@ -1,0 +1,330 @@
+openapi: "3.0.3"
+info:
+  title: Tasks Server API
+  description: REST API for managing tasks stored as markdown files with YAML frontmatter.
+  version: "0.1.0"
+servers:
+  - url: http://localhost:8088
+    description: Local tasks server
+
+paths:
+  /tasks:
+    get:
+      summary: List all tasks
+      description: |
+        Returns all tasks, optionally filtered by project and/or status.
+      parameters:
+        - name: project
+          in: query
+          description: Filter by project folder name
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Filter by task status
+          required: false
+          schema:
+            type: string
+            enum: ["open", "in-progress", "closed"]
+      responses:
+        "200":
+          description: List of tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Task"
+                  count:
+                    type: integer
+                    description: Number of tasks returned
+        "405":
+          description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      summary: Create a new task
+      description: Creates a new task with an auto-incrementing ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - title
+              properties:
+                title:
+                  type: string
+                  description: Task title
+                project:
+                  type: string
+                  description: "Project folder name (default: \"default\")"
+                status:
+                  type: string
+                  description: "Task status (default: \"open\")"
+                  enum: ["open", "in-progress", "closed"]
+                priority:
+                  type: string
+                  description: "Priority level (default: \"medium\")"
+                  enum: ["low", "medium", "high"]
+                due_date:
+                  type: string
+                  nullable: true
+                  description: Due date in ISO format
+                tags:
+                  type: array
+                  items:
+                    type: string
+                  description: List of tags
+                description:
+                  type: string
+                  description: Task description
+      responses:
+        "201":
+          description: Task created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task:
+                    $ref: "#/components/schemas/Task"
+        "400":
+          description: Invalid request (missing title, bad JSON)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "405":
+          description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /tasks/{id}:
+    get:
+      summary: Get a task by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Task found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task:
+                    $ref: "#/components/schemas/Task"
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "405":
+          description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    patch:
+      summary: Update a task
+      description: Partial update of any task field.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                status:
+                  type: string
+                  enum: ["open", "in-progress", "closed"]
+                priority:
+                  type: string
+                  enum: ["low", "medium", "high"]
+                due_date:
+                  type: string
+                  nullable: true
+                tags:
+                  type: array
+                  items:
+                    type: string
+                description:
+                  type: string
+      responses:
+        "200":
+          description: Task updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task:
+                    $ref: "#/components/schemas/Task"
+        "400":
+          description: Invalid request (bad JSON body)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "405":
+          description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      summary: Delete a task
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Task deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                  id:
+                    type: integer
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "405":
+          description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /projects:
+    get:
+      summary: List all projects
+      description: Returns all project directories (folders containing task files).
+      responses:
+        "200":
+          description: List of projects
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      type: string
+                  count:
+                    type: integer
+        "405":
+          description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /ui:
+    get:
+      summary: Serve the web UI
+      description: Serves the HTML-based task management UI.
+      responses:
+        "200":
+          description: HTML page
+          content:
+            text/html; charset=utf-8:
+              schema:
+                type: string
+        "405":
+          description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+components:
+  schemas:
+    Task:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Auto-incrementing task ID
+        title:
+          type: string
+          description: Task title
+        status:
+          type: string
+          description: Current status
+          enum: ["open", "in-progress", "closed"]
+        priority:
+          type: string
+          description: Priority level
+          enum: ["low", "medium", "high"]
+        due_date:
+          type: string
+          nullable: true
+          description: Due date in ISO format
+        tags:
+          type: array
+          items:
+            type: string
+          description: List of tags
+        created_at:
+          type: string
+          format: date-time
+          description: Creation timestamp (UTC ISO 8601)
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp (UTC ISO 8601)
+        description:
+          type: string
+          description: Task description (from markdown body)
+        project:
+          type: string
+          description: Project folder name
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message

@@ -1,0 +1,571 @@
+# Odoo Proxy — Ticket Data
+# Reads task fields via project.task.web_read RPC endpoint.
+# Replace thread_id with your task ID.
+
+POST my.odoo.url/web/dataset/call_kw/project.task/web_read HTTP/1.1
+Cookie: session_id=session_id_from_step_2
+Content-Type: application/json
+Host: my.odoo.url
+
+{
+  "id": 14,
+  "jsonrpc": "2.0",
+  "method": "call",
+  "params": {
+    "model": "project.task",
+    "method": "web_read",
+    "args": [
+      [
+        123
+      ]
+    ],
+    "kwargs": {
+      "context": {
+        "lang": "en_GB",
+        "tz": "Europe/Berlin",
+        "uid": 25,
+        "allowed_company_ids": [
+          1
+        ],
+        "bin_size": true,
+        "params": {
+          "action": 1042,
+          "model": "project.task",
+          "view_type": "kanban",
+          "cids": 1,
+          "menu_id": 713
+        },
+        "action_id": 992
+      },
+      "specification": {
+        "recurrence_id": {
+          "fields": {}
+        },
+        "allow_task_dependencies": {},
+        "rating_last_value": {},
+        "rating_count": {},
+        "allow_milestones": {},
+        "parent_id": {
+          "fields": {}
+        },
+        "company_id": {
+          "fields": {
+            "display_name": {}
+          }
+        },
+        "project_id": {
+          "fields": {
+            "display_name": {}
+          },
+          "context": {
+            "default_is_fsm": null
+          }
+        },
+        "display_timesheet_timer": {},
+        "timer_pause": {},
+        "display_timer_start_primary": {},
+        "display_timer_start_secondary": {},
+        "display_timer_stop": {},
+        "display_timer_pause": {},
+        "display_timer_resume": {},
+        "allow_timesheets": {},
+        "is_fsm": {},
+        "fsm_done": {},
+        "display_enabled_conditions_count": {},
+        "display_satisfied_conditions_count": {},
+        "display_mark_as_done_primary": {},
+        "display_mark_as_done_secondary": {},
+        "fsm_is_sent": {},
+        "worksheet_signature": {},
+        "display_sign_report_primary": {},
+        "display_sign_report_secondary": {},
+        "display_send_report_primary": {},
+        "display_send_report_secondary": {},
+        "timer_start": {},
+        "stage_id": {
+          "fields": {
+            "display_name": {}
+          }
+        },
+        "duration_tracking": {},
+        "state": {},
+        "personal_stage_type_id": {
+          "fields": {
+            "display_name": {}
+          }
+        },
+        "planning_overlap": {},
+        "dependency_warning": {},
+        "rating_avg": {},
+        "rating_active": {},
+        "worksheet_count": {},
+        "recurring_count": {},
+        "subtask_count": {},
+        "closed_subtask_count": {},
+        "dependent_tasks_count": {},
+        "project_use_documents": {},
+        "document_count": {},
+        "total_hours_spent": {},
+        "priority": {},
+        "name": {},
+        "display_in_project": {},
+        "allow_worksheets": {},
+        "worksheet_template_id": {
+          "fields": {
+            "display_name": {}
+          },
+          "context": {
+            "form_view_ref": "industry_fsm_report.worksheet_template_view_form_no_design_button",
+            "default_res_model": "project.task"
+          }
+        },
+        "milestone_id": {
+          "fields": {
+            "display_name": {}
+          }
+        },
+        "user_ids": {
+          "fields": {
+            "display_name": {}
+          },
+          "context": {
+            "active_test": false
+          }
+        },
+        "x_studio_project_task_priority": {},
+        "is_project_map_empty": {},
+        "has_multi_sol": {},
+        "tag_ids": {
+          "fields": {
+            "display_name": {},
+            "color": {}
+          }
+        },
+        "x_studio_many2one_project_phase_id": {
+          "fields": {
+            "display_name": {}
+          }
+        },
+        "active": {},
+        "partner_id": {
+          "fields": {
+            "display_name": {}
+          },
+          "context": {
+            "show_address_if_fsm": 1,
+            "res_partner_search_mode": "customer"
+          }
+        },
+        "is_task_phone_update": {},
+        "partner_phone": {},
+        "project_sale_order_id": {
+          "fields": {}
+        },
+        "sale_line_id": {
+          "fields": {
+            "display_name": {}
+          },
+          "context": {
+            "create": false,
+            "edit": false,
+            "delete": false
+          }
+        },
+        "allow_billable": {},
+        "pricing_type": {},
+        "encode_uom_in_days": {},
+        "allocated_hours": {},
+        "subtask_allocated_hours": {},
+        "progress": {},
+        "date_deadline": {},
+        "planned_date_begin": {},
+        "recurring_task": {},
+        "repeat_interval": {},
+        "repeat_unit": {},
+        "repeat_type": {},
+        "repeat_until": {},
+        "task_properties": {},
+        "description": {},
+        "analytic_account_active": {},
+        "timesheet_ids": {
+          "fields": {
+            "readonly_timesheet": {},
+            "date": {},
+            "user_id": {
+              "fields": {}
+            },
+            "employee_id": {
+              "fields": {
+                "display_name": {}
+              },
+              "context": {
+                "active_test": true
+              }
+            },
+            "name": {},
+            "timesheet_invoice_id": {
+              "fields": {}
+            },
+            "so_line": {
+              "fields": {
+                "display_name": {}
+              },
+              "context": {
+                "with_remaining_hours": true,
+                "with_price_unit": true
+              }
+            },
+            "unit_amount": {},
+            "project_id": {
+              "fields": {}
+            },
+            "task_id": {
+              "fields": {}
+            },
+            "company_id": {
+              "fields": {}
+            },
+            "is_so_line_edited": {}
+          },
+          "limit": 40,
+          "order": "date ASC",
+          "context": {
+            "default_name": ""
+          }
+        },
+        "effective_hours": {},
+        "subtask_effective_hours": {},
+        "remaining_hours": {},
+        "sale_order_id": {
+          "fields": {}
+        },
+        "remaining_hours_available": {},
+        "remaining_hours_so": {},
+        "child_ids": {
+          "fields": {
+            "allow_milestones": {},
+            "display_in_project": {},
+            "sequence": {},
+            "id": {},
+            "parent_id": {
+              "fields": {}
+            },
+            "priority": {},
+            "state": {},
+            "project_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "name": {},
+            "subtask_count": {},
+            "closed_subtask_count": {},
+            "worksheet_template_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "milestone_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "partner_id": {
+              "fields": {
+                "display_name": {}
+              },
+              "context": {
+                "res_partner_search_mode": "customer"
+              }
+            },
+            "is_fsm": {},
+            "sale_line_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "allow_billable": {},
+            "user_ids": {
+              "fields": {
+                "display_name": {}
+              },
+              "context": {
+                "active_test": false
+              }
+            },
+            "allocated_hours": {},
+            "effective_hours": {},
+            "subtask_effective_hours": {},
+            "total_hours_spent": {},
+            "remaining_hours": {},
+            "progress": {},
+            "company_id": {
+              "fields": {}
+            },
+            "date_deadline": {},
+            "planned_date_begin": {},
+            "activity_ids": {
+              "fields": {}
+            },
+            "activity_exception_decoration": {},
+            "activity_exception_icon": {},
+            "activity_state": {},
+            "activity_summary": {},
+            "activity_type_icon": {},
+            "activity_type_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "my_activity_date_deadline": {},
+            "tag_ids": {
+              "fields": {
+                "display_name": {},
+                "color": {}
+              }
+            },
+            "stage_id": {
+              "fields": {
+                "display_name": {}
+              }
+            }
+          },
+          "limit": 40,
+          "order": "sequence ASC, id ASC",
+          "context": {
+            "default_display_in_project": false
+          }
+        },
+        "depend_on_ids": {
+          "fields": {
+            "allow_milestones": {},
+            "parent_id": {
+              "fields": {}
+            },
+            "subtask_count": {},
+            "closed_subtask_count": {},
+            "id": {},
+            "priority": {},
+            "state": {},
+            "project_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "name": {},
+            "worksheet_template_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "milestone_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "partner_id": {
+              "fields": {
+                "display_name": {}
+              },
+              "context": {
+                "res_partner_search_mode": "customer"
+              }
+            },
+            "is_fsm": {},
+            "sale_line_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "allow_billable": {},
+            "user_ids": {
+              "fields": {
+                "display_name": {}
+              },
+              "context": {
+                "active_test": false
+              }
+            },
+            "progress": {},
+            "allocated_hours": {},
+            "effective_hours": {},
+            "subtask_effective_hours": {},
+            "total_hours_spent": {},
+            "remaining_hours": {},
+            "company_id": {
+              "fields": {}
+            },
+            "date_deadline": {},
+            "planned_date_begin": {},
+            "activity_ids": {
+              "fields": {}
+            },
+            "activity_exception_decoration": {},
+            "activity_exception_icon": {},
+            "activity_state": {},
+            "activity_summary": {},
+            "activity_type_icon": {},
+            "activity_type_id": {
+              "fields": {
+                "display_name": {}
+              }
+            },
+            "my_activity_date_deadline": {},
+            "tag_ids": {
+              "fields": {
+                "display_name": {},
+                "color": {}
+              }
+            },
+            "stage_id": {
+              "fields": {
+                "display_name": {}
+              }
+            }
+          },
+          "limit": 40,
+          "order": "",
+          "context": {
+            "search_view_ref": "project.view_task_search_form",
+            "tree_view_ref": "project.open_view_all_tasks_list_view",
+            "search_default_open_tasks": 1
+          }
+        },
+        "display_name": {}
+      }
+    }
+  }
+}
+
+### Response
+# HTTP/1.1 200 OK
+# Date: Wed, 22 Jul 2026 20:07:07 GMT
+# Content-Type: application/json; charset=utf-8
+# Transfer-Encoding: chunked
+# Connection: close
+# X-Content-Type-Options: nosniff, nosniff
+# Server: Odoo.sh
+# Content-Encoding: gzip
+
+# {
+#   "jsonrpc": "2.0",
+#   "id": 14,
+#   "result": [
+#     {
+#       "id": 123,
+#       "recurrence_id": false,
+#       "allow_task_dependencies": true,
+#       "rating_last_value": 0.0,
+#       "rating_count": 0,
+#       "allow_milestones": true,
+#       "parent_id": false,
+#       "company_id": false,
+#       "project_id": {
+#         "id": 205,
+#         "display_name": "Example Project 2026"
+#       },
+#       "display_timesheet_timer": true,
+#       "timer_pause": false,
+#       "display_timer_start_primary": true,
+#       "display_timer_start_secondary": false,
+#       "display_timer_stop": false,
+#       "display_timer_pause": false,
+#       "display_timer_resume": false,
+#       "allow_timesheets": true,
+#       "is_fsm": false,
+#       "fsm_done": false,
+#       "display_enabled_conditions_count": 1,
+#       "display_satisfied_conditions_count": 0,
+#       "display_mark_as_done_primary": false,
+#       "display_mark_as_done_secondary": false,
+#       "fsm_is_sent": false,
+#       "worksheet_signature": false,
+#       "display_sign_report_primary": false,
+#       "display_sign_report_secondary": false,
+#       "display_send_report_primary": false,
+#       "display_send_report_secondary": false,
+#       "timer_start": false,
+#       "stage_id": {
+#         "id": 87,
+#         "display_name": "Example Project"
+#       },
+#       "duration_tracking": {
+#         "86": 312,
+#         "87": 46520
+#       },
+#       "state": "01_in_progress",
+#       "personal_stage_type_id": {
+#         "id": 195,
+#         "display_name": "Inbox"
+#       },
+#       "planning_overlap": "<p>Sam Roe has 1 tasks at the same time.</p>",
+#       "dependency_warning": false,
+#       "rating_avg": 0.0,
+#       "rating_active": false,
+#       "worksheet_count": 0,
+#       "recurring_count": 0,
+#       "subtask_count": 0,
+#       "closed_subtask_count": 0,
+#       "dependent_tasks_count": 0,
+#       "project_use_documents": true,
+#       "document_count": 0,
+#       "total_hours_spent": 0.0,
+#       "priority": "0",
+#       "name": "Hello World",
+#       "display_in_project": true,
+#       "allow_worksheets": false,
+#       "worksheet_template_id": false,
+#       "milestone_id": false,
+#       "user_ids": [
+#         {
+#           "id": 25,
+#           "display_name": "Alex Doe"
+#         },
+#         {
+#           "id": 15,
+#           "display_name": "Sam Roe"
+#         }
+#       ],
+#       "x_studio_project_task_priority": false,
+#       "is_project_map_empty": true,
+#       "has_multi_sol": false,
+#       "tag_ids": [],
+#       "x_studio_many2one_project_phase_id": false,
+#       "active": true,
+#       "partner_id": {
+#         "id": 1023,
+#         "display_name": "Example Customer GmbH, Frankfurt"
+#       },
+#       "is_task_phone_update": false,
+#       "partner_phone": false,
+#       "project_sale_order_id": false,
+#       "sale_line_id": false,
+#       "allow_billable": true,
+#       "pricing_type": "task_rate",
+#       "encode_uom_in_days": false,
+#       "allocated_hours": 0.0,
+#       "subtask_allocated_hours": 0.0,
+#       "progress": 0.0,
+#       "date_deadline": "2026-07-27 07:00:00",
+#       "planned_date_begin": "2026-07-27 07:00:00",
+#       "recurring_task": false,
+#       "repeat_interval": 0,
+#       "repeat_unit": false,
+#       "repeat_type": false,
+#       "repeat_until": false,
+#       "task_properties": [],
+#       "description": "<p>Hello world</p>",
+#       "analytic_account_active": true,
+#       "timesheet_ids": [],
+#       "effective_hours": 0.0,
+#       "subtask_effective_hours": 0.0,
+#       "remaining_hours": 0.0,
+#       "sale_order_id": false,
+#       "remaining_hours_available": false,
+#       "remaining_hours_so": 0.0,
+#       "child_ids": [],
+#       "depend_on_ids": [],
+#       "display_name": "Hello World"
+#     }
+#   ]
+# }

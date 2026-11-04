@@ -1,0 +1,19 @@
+[project]
+name = "tasks-server"
+version = "0.1.0"
+description = "REST API for managing tasks stored as markdown files with YAML frontmatter"
+requires-python = ">=3.14"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

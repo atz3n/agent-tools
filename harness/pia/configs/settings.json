@@ -1,0 +1,6 @@
+{
+  "theme": "dark",
+  "defaultProvider": "mlx-serve",
+  "defaultModel": "Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-4.7bpw",
+  "hideThinkingBlock": true
+}

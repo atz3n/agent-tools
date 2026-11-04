@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tasks</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✓</text></svg>">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────── -->
+<header class="header">
+  <h1>Tasks</h1>
+  <div class="header-actions">
+    <button class="btn-icon" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+      <svg id="theme-icon-sun" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+      <svg id="theme-icon-moon" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+    <button class="btn btn-primary" onclick="openCreateModal()">
+      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      New Task
+    </button>
+  </div>
+</header>
+
+<!-- ── Layout ──────────────────────────────────────────── -->
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">Views</div>
+      <div class="sidebar-item active" data-view="all" onclick="setView('all')">
+        <span>All Tasks</span>
+        <span class="sidebar-count" id="count-all">0</span>
+      </div>
+      <div class="sidebar-item" data-view="open" onclick="setView('open')">
+        <span>Open</span>
+        <span class="sidebar-count" id="count-open">0</span>
+      </div>
+      <div class="sidebar-item" data-view="on-hold" onclick="setView('on-hold')">
+        <span>On Hold</span>
+        <span class="sidebar-count" id="count-on-hold">0</span>
+      </div>
+      <div class="sidebar-item" data-view="in-progress" onclick="setView('in-progress')">
+        <span>In Progress</span>
+        <span class="sidebar-count" id="count-in-progress">0</span>
+      </div>
+      <div class="sidebar-item" data-view="done" onclick="setView('done')">
+        <span>Done</span>
+        <span class="sidebar-count" id="count-done">0</span>
+      </div>
+      <div class="sidebar-item" data-view="closed" onclick="setView('closed')">
+        <span>Closed</span>
+        <span class="sidebar-count" id="count-closed">0</span>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">Projects</div>
+      <div id="project-list"></div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <!-- Filters -->
+    <div class="filters">
+      <input type="text" class="search-input" id="search-input" placeholder="Search tasks…" oninput="renderTasks()">
+      <select class="filter-select" id="filter-project" onchange="saveFilter('project', this.value); syncSidebarFromDropdown(); renderTasks()">
+        <option value="">All Projects</option>
+      </select>
+      <select class="filter-select" id="filter-status" onchange="saveFilter('status', this.value); syncSidebarFromDropdown(); renderTasks()">
+        <option value="">All Statuses</option>
+        <option value="open">Open</option>
+        <option value="on-hold">On Hold</option>
+        <option value="in-progress">In Progress</option>
+        <option value="done">Done</option>
+        <option value="closed">Closed</option>
+      </select>
+      <select class="filter-select" id="filter-due" onchange="saveFilter('due', this.value); renderTasks()">
+        <option value="">All Dates</option>
+        <option value="overdue">Overdue</option>
+        <option value="today">Due Today</option>
+        <option value="7d">Due Within 7 Days</option>
+        <option value="later">Due Later</option>
+        <option value="none">No Due Date</option>
+      </select>
+      <span class="task-count" id="task-count"></span>
+    </div>
+
+    <!-- Task list -->
+    <div class="task-list" id="task-list"></div>
+  </main>
+</div>
+
+<!-- ── Task view modal (expanded) ────────────────────────── -->
+<div class="view-overlay" id="view-overlay" onclick="closeViewModal(event)">
+  <div class="view-modal" onclick="event.stopPropagation()">
+    <div class="view-header">
+      <h2 id="view-title">Task</h2>
+      <button class="btn-icon" onclick="closeViewModal()">
+        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="view-body" id="view-body"></div>
+  </div>
+</div>
+
+<!-- ── Task detail panel ───────────────────────────────── -->
+<div class="detail-overlay" id="detail-overlay" onclick="closeDetail(event)">
+  <div class="detail-panel" onclick="event.stopPropagation()">
+    <div class="detail-resize-handle" id="detail-resize-handle"></div>
+    <div class="detail-header">
+      <h2 id="detail-title">Task</h2>
+      <button class="btn-icon" onclick="closeDetail()">
+        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="detail-body" id="detail-body"></div>
+    <div class="detail-footer" id="detail-footer"></div>
+  </div>
+</div>
+
+<!-- ── Create modal ────────────────────────────────────── -->
+<div class="modal-overlay" id="create-overlay" onclick="closeCreateModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h2>Create Task</h2>
+      <button class="btn-icon" onclick="closeCreateModal()">
+        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label for="create-title">Title *</label>
+        <input type="text" id="create-title" placeholder="What needs to be done?">
+      </div>
+      <div class="form-group">
+        <label for="create-project">Project</label>
+        <div style="display:flex;gap:6px">
+          <select id="create-project" style="flex:1"></select>
+          <button type="button" class="btn btn-sm" onclick="openCreateProjectModal()" title="Create new project">
+            <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px">
+        <div class="form-group" style="flex:1">
+          <label for="create-status">Status</label>
+          <select id="create-status">
+            <option value="open">Open</option>
+            <option value="on-hold">On Hold</option>
+            <option value="in-progress">In Progress</option>
+            <option value="done">Done</option>
+            <option value="closed">Closed</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1">
+          <label for="create-priority">Priority</label>
+          <select id="create-priority">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="create-due">Due Date</label>
+        <input type="date" id="create-due">
+      </div>
+      <div class="form-group">
+        <label for="create-tags">Tags (comma-separated)</label>
+        <input type="text" id="create-tags" placeholder="bug, frontend, urgent">
+      </div>
+      <div class="form-group">
+        <label for="create-desc">Description</label>
+        <textarea id="create-desc" placeholder="Additional details…"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeCreateModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="createTask()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Create project modal ────────────────────────────── -->
+<div class="modal-overlay" id="create-project-overlay" onclick="closeCreateProjectModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h2>New Project</h2>
+      <button class="btn-icon" onclick="closeCreateProjectModal()">
+        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label for="create-project-name">Project Name</label>
+        <input type="text" id="create-project-name" placeholder="my-project"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();createProject()}">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeCreateProjectModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="createProject()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Confirm dialog ──────────────────────────────────── -->
+<div class="confirm-overlay" id="confirm-overlay">
+  <div class="confirm-box">
+    <h3 id="confirm-title">Delete Task?</h3>
+    <p id="confirm-message">This action cannot be undone.</p>
+    <div class="confirm-actions">
+      <button class="btn" onclick="closeConfirm()">Cancel</button>
+      <button class="btn btn-danger" id="confirm-ok">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast container ─────────────────────────────────── -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="js/app.js"></script>
+</body>
+</html>

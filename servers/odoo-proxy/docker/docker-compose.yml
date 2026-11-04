@@ -1,0 +1,17 @@
+networks:
+  odoo-proxy-network:
+    external: false
+services:
+  odoo-proxy:
+    image: odoo-proxy
+    container_name: odoo-proxy
+    networks:
+      - odoo-proxy-network
+    ports:
+      - 127.0.0.1:8087:8087
+    environment:
+      - ODOO_DB=${ODOO_DB}
+      - ODOO_URL=${ODOO_URL}
+      - ODOO_USER=${ODOO_USER}
+      - ODOO_PASSWORD=${ODOO_PASSWORD}
+      - PROXY_PORT=8087
