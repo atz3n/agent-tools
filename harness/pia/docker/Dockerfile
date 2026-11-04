@@ -1,12 +1,14 @@
 FROM node:24-bookworm
 
-# Install python, pip, ripgrep, fd-find, htop and tshark.
+# Install python, pip, ripgrep, fd-find, htop, jq and tshark.
+# jq is used by the agent skills (and agents themselves) to parse JSON API
+# responses, e.g. the github-proxy and tasks-server skills pipe curl into jq.
 # tshark backs 'pia monitor': it reads the TLS ServerNameIndication and the
 # cleartext HTTP requests leaving the container. Capture only needs CAP_NET_RAW,
 # which Docker grants by default, so no extra capabilities are required.
 RUN apt-get update && \
     apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends python3 python3-pip ripgrep fd-find htop tshark && \
+    apt-get install -y --no-install-recommends python3 python3-pip ripgrep fd-find htop jq tshark && \
     rm -rf /var/lib/apt/lists/*
 
 # Debian ships python3 only; symlink 'python' (and 'pip') to python3/pip3 so
