@@ -19,7 +19,7 @@ RUN ln -s "$(command -v python3)" /usr/local/bin/python && \
 
 # Install Docker CLI (client only). No daemon runs in this image: with
 # 'pia run --docker' the host Docker socket is mounted and the CLI talks to
-# the host daemon (see harness/pia/README.md).
+# the host daemon (see harnesses/pia/README.md).
 ARG DOCKER_CLI_VERSION=29.9.2
 RUN set -eux; \
     darch="$(dpkg --print-architecture)"; \
@@ -72,9 +72,9 @@ RUN mkdir -p /root/.playwright
 RUN playwright-cli install-browser chromium
 
 # Add config
-COPY harness/pia/configs/settings.json /root/.pi/agent/settings.json
-COPY harness/pia/configs/models.json /root/.pi/agent/models.json
-COPY harness/pia/configs/cli.config.json /root/.playwright/cli.config.json
+COPY harnesses/pia/configs/settings.json /root/.pi/agent/settings.json
+COPY harnesses/pia/configs/models.json /root/.pi/agent/models.json
+COPY harnesses/pia/configs/cli.config.json /root/.playwright/cli.config.json
 
 # Copy agent skills
 COPY skills/ /root/.pi/agent/skills/
@@ -84,11 +84,11 @@ COPY skills/ /root/.pi/agent/skills/
 # This lets 'pia rs' revive a stopped container (docker start takes no
 # arguments) and continue the last pi session. Direct docker usage: 'docker
 # run -it pia pi [args]'.
-COPY harness/pia/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY harnesses/pia/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Traffic + resource sampler used by 'pia monitor' (called via docker exec).
-COPY harness/pia/docker/monitor-inside.sh /usr/local/bin/pia-monitor
+COPY harnesses/pia/docker/monitor-inside.sh /usr/local/bin/pia-monitor
 RUN chmod +x /usr/local/bin/pia-monitor
 
 # Create workspace directory

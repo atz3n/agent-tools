@@ -934,7 +934,7 @@ if [ ! -e "$SCRIPT_DIR/../docker/docker-compose.yml" ]; then
     PASS=$((PASS + 1))
 else
     TOTAL=$((TOTAL + 1))
-    echo -e "  ${RED}FAIL${NC}: harness/pia/docker/docker-compose.yml should not exist"
+    echo -e "  ${RED}FAIL${NC}: harnesses/pia/docker/docker-compose.yml should not exist"
     FAIL=$((FAIL + 1))
 fi
 

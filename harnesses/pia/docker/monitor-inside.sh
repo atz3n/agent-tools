@@ -73,7 +73,7 @@ trap stop_capture INT TERM
 
 if ! command -v tshark > /dev/null 2>&1; then
     echo "[ERROR] tshark is not installed in this image." >&2
-    echo "[ERROR] Rebuild it: cd harness/pia && ./scripts/build-docker.sh" >&2
+    echo "[ERROR] Rebuild it: cd harnesses/pia && ./scripts/build-docker.sh" >&2
     exit 2
 fi
 

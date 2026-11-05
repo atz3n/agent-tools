@@ -17,7 +17,7 @@ This repo provides **agent-facing tools** — small, focused services that expos
 | **tasks-server** | 8088 | REST API for managing tasks stored as markdown files with YAML frontmatter. Includes a zero-dependency web UI. |
 | **skills/** | — | Agent skill markdown files organized by feature. |
 | **templates/llm-wiki/** | — | Template for LLM-assisted knowledge bases (idea file + format spec + init prompt). |
-| **harness/** | — | Pi agent harness with Docker setup and `pia` multi-instance manager.
+| **harnesses/** | — | Isolated agent runtimes — currently `pia`: Pi agent harness with Docker setup and `pia` multi-instance manager.
 
 ### Architecture
 
@@ -96,7 +96,7 @@ agent-tools/
 │       ├── README.md
 │       ├── spec.md
 │       └── wiki.md
-├── harness/                       # Pi agent harness and multi-instance manager
+├── harnesses/                     # Isolated agent runtimes (harnesses)
 │   └── pia/                       # Pi agent container setup and `pia` CLI
 │       ├── configs/               # models.json, settings.json, cli.config.json
 │       ├── docker/                # Dockerfile, entrypoint.sh, monitor-inside.sh (pia-monitor)
@@ -299,14 +299,14 @@ To use: copy the template into a project and run the initialization prompt from 
 
 ---
 
-## harness/pia — Pi Harness
+## harnesses/pia — Pi Harness
 
-A containerized [Pi Coding Agent](https://pi.dev) for isolated, interactive operation — like talking to an agent in your terminal. Full documentation: [harness/pia/README.md](harness/pia/README.md).
+A containerized [Pi Coding Agent](https://pi.dev) for isolated, interactive operation — like talking to an agent in your terminal. Full documentation: [harnesses/pia/README.md](harnesses/pia/README.md).
 
 ### Building
 
 ```bash
-cd harness/pia
+cd harnesses/pia
 bash scripts/build-docker.sh
 ```
 
@@ -338,7 +338,7 @@ The `pia` CLI lets you run multiple Pi agent containers in parallel, each with i
 | `pia monitor [NAME]` | Live view of the container's request destinations (TLS SNI / cleartext HTTP URLs) plus CPU, memory and net I/O — terminal only, the monitor itself logs nothing (`--raw` streams destinations only) |
 | `pia urls [NAME]` | Every destination/URL the container has called since its creation, with counts — the entrypoint keeps a `tshark` request log (`/var/log/pia-urls.log`) for the container's whole life; `--all` prints every logged request |
 
-Containers are grouped under the `pia` project by plain `docker --label` stamping (`com.docker.compose.project=pia`, plus a per-container `config-hash` that project views require) — compose is never called and no compose file is used, so `docker ps --filter label=com.docker.compose.project=pia` and Docker Desktop show all agent instances as one project. Containers are named with the `pia-` prefix. If no `NAME` is provided, a random name is generated (e.g., `pia-k3m9x2p1`). Install the CLI globally with `bash harness/pia/scripts/install-pia.sh`. The test suite supports filtering to specific commands via `bash harness/pia/scripts/run-tests.sh run stop` to skip slow Docker-based tests.
+Containers are grouped under the `pia` project by plain `docker --label` stamping (`com.docker.compose.project=pia`, plus a per-container `config-hash` that project views require) — compose is never called and no compose file is used, so `docker ps --filter label=com.docker.compose.project=pia` and Docker Desktop show all agent instances as one project. Containers are named with the `pia-` prefix. If no `NAME` is provided, a random name is generated (e.g., `pia-k3m9x2p1`). Install the CLI globally with `bash harnesses/pia/scripts/install-pia.sh`. The test suite supports filtering to specific commands via `bash harnesses/pia/scripts/run-tests.sh run stop` to skip slow Docker-based tests.
 
 ---
 
