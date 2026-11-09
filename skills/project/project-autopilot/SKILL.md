@@ -22,7 +22,7 @@ Work from the project root (`PLAN.md`, `features/` relative to it).
 
 If the user named a model, cost limit, or tool restriction, carry it onto **every** launch (`--model <pattern>`, `--tools …`).
 
-**Session budget:** cap the run at 12 launched sessions unless the user gave a number. Every launch counts — steps, retries, and cross-skill interventions. When the cap is reached, stop cleanly at the current feature boundary and report what remains.
+**Session budget:** cap the run at 16 launched sessions unless the user gave a number. Every launch counts — steps, retries, and cross-skill interventions. When the cap is reached, stop cleanly at the current feature boundary and report what remains.
 
 Resolve the build set, then **topologically sort it** using the PLAN.md Dependencies column. Features outside the set that a set member depends on must already be Approved (checked in step 2), not built by you.
 
@@ -67,8 +67,8 @@ For each feature, read its spec `## Status:` (authoritative; no spec file = star
 | Planned | architecture → implement → qa |
 | Architected | implement → qa |
 | Implemented | qa |
-| In Review, open High/Critical bugs | implement (bugfix) → qa — repeat (max 3 rounds) |
-| In Review, only Low/Medium open bugs | qa (run the accept-or-defer pass, then verdict) |
+| In Review, open Medium/High/Critical bugs | implement (bugfix) → qa — repeat (max 4 rounds) |
+| In Review, only Low open bugs | qa (run the defer pass, then verdict) |
 | In Review, no open bugs | qa (finalize verdict) |
 | Approved | skip, log "already approved" |
 
@@ -121,9 +121,9 @@ You are running UNATTENDED. Never ask the user questions, and never end your tur
 ```
 Append to the QA step (with the two placeholders substituted as described below):
 ```
-Bug severity policy (user decision): every Low- and Medium-severity bug is recorded with Status "Deferred (user decision — autopilot run <branch>, AUTOPILOT_DATE)" plus a suggested follow-up feature, never left open, and the spec's Last Updated date is bumped. High and Critical bugs stay Open as normal and are fixed in the implement↔qa loop. When no bug in the latest run block is still Open, set the spec Status to Approved.
+Bug severity policy (user decision): every Low-severity bug is recorded with Status "Deferred (user decision — autopilot run <branch>, AUTOPILOT_DATE)" plus a suggested follow-up feature, never left open, and the spec's Last Updated date is bumped. Medium, High and Critical bugs stay Open as normal and are fixed in the implement↔qa loop. When no bug in the latest run block is still Open, set the spec Status to Approved.
 ```
-Deferring Low **and** Medium is what makes approval reachable: `/skill:project-qa` never sets Approved while any bug in the latest run is Open, so deferring only Low would leave every Medium bug cycling the fix loop to its cap and aborting the run. Use the canonical `Deferred (user decision — <when/where>, <date>)` form verbatim — the bare prefix without the when/where and date breaks `/skill:project-doctor` and `/skill:project-help` bug parsing and loses the follow-up trail.
+Only Low bugs are deferred (user decision): every Medium bug is a real blocker and must reach `Fixed (Run N)` before approval. Expect more fix rounds and more aborted runs than with Medium deferral — a Medium bug still Open after round 4 leaves the feature at In Review and stops the pipeline, by design: the user prefers a stopped pipeline to shipping known Medium bugs. Use the canonical `Deferred (user decision — <when/where>, <date>)` form verbatim — the bare prefix without the when/where and date breaks `/skill:project-doctor` and `/skill:project-help` bug parsing and loses the follow-up trail.
 
 **The date is never typed from memory or guessed.** A wrong date silently desyncs the deferral records from the QA Run blocks and Last Updated date the child stamps with its own `date`, and poisons every later `Deferred (… <date>)` parse. Make it mechanical: leave the literal tokens `AUTOPILOT_DATE` and `<branch>` in the quoted heredoc, then substitute both from the real clock and the pre-flight branch name — and assert the canonical stamp line — with one script, before launching:
 ```sh
@@ -138,7 +138,7 @@ python3 <skill-dir>/scripts/fill-date.py "$prompt_file" <branch>
 ```
 The quoted heredoc keeps everything else unexpanded; `fill-date.py` substitutes only the two tokens, using the same ISO date the child's `date +%F` produces on the same host, so the stamp matches the dates the child computes itself, and refuses to pass (leaving the file untouched) unless `autopilot run <branch>, <today>` is present in the finished prompt.
 
-(If the user explicitly said "fix all bugs", drop the deferral sentence instead — the user's instruction in this conversation always overrides this default. Note that this makes every Medium bug a blocker: expect more fix rounds.)
+(If the user explicitly said "defer all bugs" or "fix only the blockers", also defer Medium — the user's instruction in this conversation always overrides this default. Note the inverse: "fix all bugs" drops the deferral sentence entirely, making even Low bugs blockers: expect still more fix rounds.)
 
 ### After every step — verify, don't trust
 - `/tmp/autopilot-<id>-<step>-<n>.rc` exists and contains `0`, the log ends with `agent_settled` and `"aborted":false`, and the final text is real completion — not a stop/"please confirm" message. (Child logs habitually end in a cheerful handoff paragraph, so confirm against the commit and Status line below, not the prose.) A vanished process with no `.rc` means the wrapper itself was killed: treat the step as failed.
@@ -155,12 +155,12 @@ The quoted heredoc keeps everything else unexpanded; `fill-date.py` substitutes 
 
 Otherwise: retry the step ONCE with the same prompt plus a one-line note of what's missing. Second failure → stop the whole pipeline (later features may depend on it), report where and why.
 
-### Implement↔QA loop (High/Critical bugs)
+### Implement↔QA loop (Medium/High/Critical bugs)
 After each qa step, read the newest `### QA Run` block — don't guess the block number:
 ```sh
 python3 <skill-dir>/scripts/latest-qa-run.py features/{id}-*.md
 ```
-Any bug whose Status is not `Fixed (Run N)` and not `Deferred (user decision…)` (any when/where/date suffix) = open → run an implement step ("fix these open QA bugs: …list them…", commit `fix({id}):`), then a new qa step. **Cap: 3 rounds per feature.** Still failing after round 3 → leave the feature at In Review, stop the pipeline, report the bug history.
+Any bug whose Status is not `Fixed (Run N)` and not `Deferred (user decision…)` (any when/where/date suffix) = open → run an implement step ("fix these open QA bugs: …list them…", commit `fix({id}):`), then a new qa step. **Cap: 4 rounds per feature.** Still failing after round 4 → leave the feature at In Review, stop the pipeline, report the bug history.
 
 ## 4. Final report & review handoff
 Stay on the run branch — do NOT merge or push (the user reviews first; push/PR only if they explicitly ask). Print a summary table and stop — do not start features outside the requested set:
@@ -169,7 +169,7 @@ Stay on the run branch — do NOT merge or push (the user reviews first; push/PR
 |---|---|---|---|---|
 | 1.4 | spec→arch→impl→qa | 1 | Approved | e436d53..cb2c48b |
 
-List: deferred Low/Medium bugs (with their follow-up features), any aborted feature and reason, and the next roadmap action (e.g. which features are now unblocked).
+List: deferred Low bugs (with their follow-up features), any aborted feature and reason (including Medium bugs that outlived the 4-round cap), and the next roadmap action (e.g. which features are now unblocked).
 
 Then print the review handoff:
 ```sh
@@ -196,7 +196,7 @@ State: branch name ready for review; to open a PR, use `/skill:github-create-pul
 - [ ] Every step launched through the verbatim preamble (written to a prompt file) via `scripts/launch-step.py` in a fresh, detached `--mode json` session; the QA step's date/branch tokens stamped via `scripts/fill-date.py` (substitutes from the real clock and asserts), never typed from memory
 - [ ] Every step's real exit code read from the `.rc` sentinel; polled via `scripts/step-status.py` (never `kill -0`, which lies about zombies) with fast early / sparse later cadence
 - [ ] Every step verified (commit, `^## Status:`, test command re-run by the orchestrator, clean tree; logs read via `scripts/extract-final.py` / `scripts/extract-test-runs.py`) with at most one retry / cross-skill intervention
-- [ ] Implement↔qa loop capped at 3 rounds per feature, latest block read via `scripts/latest-qa-run.py`; Low/Medium bugs deferred in the canonical form
+- [ ] Implement↔qa loop capped at 4 rounds per feature, latest block read via `scripts/latest-qa-run.py`; Low bugs deferred in the canonical form, Medium/High/Critical fixed, never deferred
 - [ ] Session budget respected; no features outside the requested set touched
 - [ ] Final report printed: summary table, deferred bugs, aborted feature + reason, next roadmap action
 - [ ] Review handoff printed (`run_base`/`review_base` diffs); nothing merged or pushed
