@@ -45,7 +45,7 @@ Cover these topics through natural conversation (not as a checklist):
 ### Scope & Constraints
 - Must-have features for MVP vs. nice-to-have later
 - Non-goals: what are you explicitly NOT building in this version?
-- Constraints: timeline, budget, team size, technical limitations
+- Technical constraints or limitations, if any (do not ask about timeline, budget, or team size unless the user raises them)
 
 ### Architecture Decisions (ask in natural order)
 
@@ -58,7 +58,7 @@ Cover these topics through natural conversation (not as a checklist):
 - This becomes an early Phase 1 feature (e.g. "Set up database schema" or "Configure backend service")
 
 **If the project is frontend-only or stateless:**
-- Note this in the constraints section
+- Note this in the Tech Stack section
 
 #### Design / UI
 > "Does this project have a user interface? If so, do you have brand guidelines or a design system I should follow?"
@@ -130,10 +130,7 @@ Nice-to-haves, performance, and future-proofing.
 
 ## Constraints
 
-- Timeline: ...
-- Team: ...
-- Budget: ...
-- Technical: ...
+- Technical: ... (only if any; omit this section otherwise)
 
 ## Non-Goals
 
@@ -199,7 +196,7 @@ Apply feedback, then save `PLAN.md`.
 - [ ] Dependencies between features are explicit and respect phase order
 - [ ] Every feature has verifiable acceptance criteria
 - [ ] Phases are logically ordered (Foundation → Core → Polish)
-- [ ] Constraints and non-goals documented
+- [ ] Technical constraints (if any) and non-goals documented
 - [ ] Success metrics defined
 - [ ] User has reviewed and approved PLAN.md
 
