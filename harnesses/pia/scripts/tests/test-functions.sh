@@ -323,6 +323,66 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# Test --openrouter flag is accepted (not an invalid option)
+result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options --openrouter my-container)
+if [ "$(echo "$result" | cut -d'|' -f3)" = "0" ] && [ "$(extract_name_only "$result")" = "my-container" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: extract_name_and_options accepts --openrouter flag"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: extract_name_and_options should accept --openrouter (got '$result')"
+    FAIL=$((FAIL + 1))
+fi
+
+# Test OPENROUTER_FLAG (field 9) is set with --openrouter
+result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options --openrouter my-container)
+if [ "$(echo "$result" | cut -d'|' -f9)" = "yes" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: extract_name_and_options sets OPENROUTER_FLAG field (field 9) with --openrouter"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: extract_name_and_options OPENROUTER_FLAG field wrong (got '$(echo "$result" | cut -d'|' -f9)')"
+    FAIL=$((FAIL + 1))
+fi
+
+# Test the -o shorthand: accepted and sets OPENROUTER_FLAG (field 9)
+result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options -o my-container)
+if [ "$(echo "$result" | cut -d'|' -f3)" = "0" ] && [ "$(extract_name_only "$result")" = "my-container" ] && [ "$(echo "$result" | cut -d'|' -f9)" = "yes" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: extract_name_and_options -o shorthand sets OPENROUTER_FLAG"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: extract_name_and_options -o shorthand wrong (got '$result')"
+    FAIL=$((FAIL + 1))
+fi
+
+# Test OPENROUTER_FLAG is empty when no --openrouter flag
+result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options my-container)
+if [ "$(echo "$result" | cut -d'|' -f9)" = "" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: extract_name_and_options OPENROUTER_FLAG is empty without --openrouter"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: extract_name_and_options OPENROUTER_FLAG should be empty (got '$(echo "$result" | cut -d'|' -f9)')"
+    FAIL=$((FAIL + 1))
+fi
+
+# Test help text documents the --openrouter option and its -o shorthand
+help_out="$(bash "$AGENTS" --help 2>/dev/null)"
+if echo "$help_out" | grep -qF -- "-o, --openrouter"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: help text includes -o, --openrouter option"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: help text should document -o, --openrouter"
+    FAIL=$((FAIL + 1))
+fi
+
 # =============================================================================
 # SECTION 11: Container state check functions
 # =============================================================================
@@ -360,9 +420,11 @@ echo -e "${YELLOW}=== SECTION 12: build_docker_args function ===${NC}"
 eval "$(sed -n '/^IMAGE_NAME=/,/^}/p' "$AGENTS")"
 eval "$(sed -n '/^config_hash/,/^}/p' "$AGENTS")"
 eval "$(sed -n '/^project_labels/,/^}/p' "$AGENTS")"
+eval "$(sed -n '/^openrouter_key_file/,/^}/p' "$AGENTS")"
+eval "$(sed -n '/^resolve_openrouter_key/,/^}/p' "$AGENTS")"
 eval "$(sed -n '/^build_docker_args/,/^}/p' "$AGENTS")"
 
-MOUNT_DIR="" SSH_FLAG=""
+MOUNT_DIR="" SSH_FLAG="" OPENROUTER_FLAG=""
 result=$(build_docker_args "test-container")
 if echo "$result" | grep -q "^--name$" && echo "$result" | grep -q "^test-container$"; then
     TOTAL=$((TOTAL + 1))
@@ -383,6 +445,205 @@ else
     echo -e "  ${RED}FAIL${NC}: build_docker_args missing image name (got '$result')"
     FAIL=$((FAIL + 1))
 fi
+
+# OPENROUTER_API_KEY: not forwarded when unset on the host and no key file
+# exists (HOME is isolated so a real ~/.pia/secrets/openrouter-key.txt on the test
+# machine cannot leak into the expectation). Also without '--openrouter':
+# forwarding is opt-in, even when a key IS available.
+OPENROUTER_FLAG=""
+unset OPENROUTER_API_KEY PIA_OPENROUTER_KEY_FILE
+REAL_HOME="$HOME"
+HOME="$(mktemp -d)"
+result=$(build_docker_args "test-container" 2>/dev/null)
+if echo "$result" | grep -q "OPENROUTER_API_KEY"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: build_docker_args must not forward OPENROUTER_API_KEY when unset (got '$result')"
+    FAIL=$((FAIL + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: build_docker_args omits OPENROUTER_API_KEY when unset"
+    PASS=$((PASS + 1))
+fi
+
+# An exported key on the host is still NOT forwarded without '--openrouter' —
+# the default must be "no credentials in the container".
+OPENROUTER_API_KEY="DUMMY-KEY-NOT-A-SECRET"
+result=$(build_docker_args "test-container" 2>/dev/null)
+if echo "$result" | grep -q "OPENROUTER_API_KEY"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: build_docker_args must not forward OPENROUTER_API_KEY without --openrouter (got '$result')"
+    FAIL=$((FAIL + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: build_docker_args omits OPENROUTER_API_KEY without --openrouter"
+    PASS=$((PASS + 1))
+fi
+
+# ...and with '--openrouter' it is forwarded by NAME only (never with '=value').
+OPENROUTER_FLAG="yes"
+result=$(build_docker_args "test-container" 2>/dev/null)
+if echo "$result" | grep -q "^OPENROUTER_API_KEY$" && ! echo "$result" | grep -q "DUMMY-KEY-NOT-A-SECRET"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: build_docker_args forwards OPENROUTER_API_KEY by name only (with --openrouter)"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: build_docker_args should forward OPENROUTER_API_KEY by name without value when --openrouter is set (got '$result')"
+    FAIL=$((FAIL + 1))
+fi
+unset OPENROUTER_API_KEY
+
+# resolve_openrouter_key is a NO-OP without the flag: a key file on disk and
+# an exported key on the host must not leak into the container.
+OPENROUTER_API_KEY="DUMMY-KEY-NOT-A-SECRET"
+OPENROUTER_FLAG=""
+resolve_openrouter_key
+result=$(build_docker_args "test-container" 2>/dev/null)
+if ! echo "$result" | grep -q "OPENROUTER_API_KEY"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: resolve_openrouter_key is a no-op without --openrouter"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: resolve must not forward without --openrouter (got '$result')"
+    FAIL=$((FAIL + 1))
+fi
+unset OPENROUTER_API_KEY
+
+# Key file via PIA_OPENROUTER_KEY_FILE: resolve_openrouter_key exports the
+# trimmed key in the CURRENT shell, and the caller pattern (build_docker_args
+# through a process substitution, then docker) still sees everything —
+# regression test for the export-in-subshell bug that gave containers a
+# valueless OPENROUTER_API_KEY.
+KEYDIR="$(mktemp -d)"
+printf 'DUMMY-KEY-NOT-A-SECRET\n' > "$KEYDIR/openrouter-key.txt"
+unset OPENROUTER_API_KEY
+OPENROUTER_FLAG="yes"
+PIA_OPENROUTER_KEY_FILE="$KEYDIR/openrouter-key.txt"
+resolve_openrouter_key
+ca_args=()
+while IFS= read -r a; do ca_args+=("$a"); done < <(build_docker_args "test-container" 2>/dev/null)
+ca_joined="${ca_args[*]}"
+child_sees="$(env | grep '^OPENROUTER_API_KEY=')"
+if [ "${OPENROUTER_API_KEY:-}" = "DUMMY-KEY-NOT-A-SECRET" ] \
+    && printf '%s\n' "${ca_args[@]}" | grep -q "^OPENROUTER_API_KEY$" \
+    && ! printf '%s' "$ca_joined" | grep -q "DUMMY-KEY-NOT-A-SECRET" \
+    && [ "$child_sees" = "OPENROUTER_API_KEY=DUMMY-KEY-NOT-A-SECRET" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: resolve_openrouter_key exports key; survives process substitution (docker sees value)"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: resolve should export key in main shell (args '$ca_joined', env '${OPENROUTER_API_KEY:-}', child '$child_sees')"
+    FAIL=$((FAIL + 1))
+fi
+
+# An exported OPENROUTER_API_KEY wins over the key file.
+OPENROUTER_API_KEY="DUMMY-ENV-WINS-NOT-A-SECRET"
+OPENROUTER_FLAG="yes"
+resolve_openrouter_key
+if [ "${OPENROUTER_API_KEY:-}" = "DUMMY-ENV-WINS-NOT-A-SECRET" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: OPENROUTER_API_KEY env var takes priority over key file"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: env var should win over key file (got '${OPENROUTER_API_KEY:-}')"
+    FAIL=$((FAIL + 1))
+fi
+
+# ~/.pia/secrets/openrouter-key.txt is found via HOME (isolated above).
+unset OPENROUTER_API_KEY PIA_OPENROUTER_KEY_FILE
+mkdir -p "$HOME/.pia/secrets"
+printf 'DUMMY-KEY-NOT-A-SECRET\n' > "$HOME/.pia/secrets/openrouter-key.txt"
+found="$(openrouter_key_file)"
+if [ "$found" = "$HOME/.pia/secrets/openrouter-key.txt" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: openrouter_key_file finds ~/.pia/secrets/openrouter-key.txt"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: openrouter_key_file should find the home key file (got '$found')"
+    FAIL=$((FAIL + 1))
+fi
+
+# A PIA_OPENROUTER_KEY_FILE that points at a missing file is a hard error:
+# openrouter_key_file returns non-zero, and resolve_openrouter_key aborts
+# (exit 1 in the main shell) instead of silently using the home key file
+# that exists right next door — no credential swap.
+PIA_OPENROUTER_KEY_FILE="$HOME/no-such-key-file.txt"
+override_out="$(openrouter_key_file 2>&1 1>/dev/null)"; override_status=$?
+resolve_out="$(resolve_openrouter_key 2>&1)"; resolve_status=$?
+if [ "$override_status" -ne 0 ] && echo "$override_out" | grep -qi "no such file exists" \
+    && [ "$resolve_status" -ne 0 ] && echo "$resolve_out" | grep -qi "no such file exists" \
+    && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: missing PIA_OPENROUTER_KEY_FILE is a hard error (no fallback)"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: missing override should error, not fall back (override status=$override_status '$override_out', resolve status=$resolve_status '$resolve_out', key '${OPENROUTER_API_KEY:-}')"
+    FAIL=$((FAIL + 1))
+fi
+unset PIA_OPENROUTER_KEY_FILE
+
+# An empty key file is skipped with a warning, not forwarded.
+: > "$HOME/.pia/secrets/openrouter-key.txt"
+OPENROUTER_FLAG="yes"
+unset OPENROUTER_API_KEY PIA_OPENROUTER_KEY_FILE
+resolve_out="$(resolve_openrouter_key 2>&1)"
+result=$(build_docker_args "test-container" 2>/dev/null)
+if ! echo "$result" | grep -q "^OPENROUTER_API_KEY$" && echo "$resolve_out" | grep -qi "empty" && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: empty OpenRouter key file is skipped with a warning"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: empty key file should warn and not forward (got '$result')"
+    FAIL=$((FAIL + 1))
+fi
+
+# resolve_openrouter_key must exit 0 when NO key exists anywhere — pia.sh runs
+# under 'set -euo pipefail', so a non-zero return (e.g. from a bare 'return'
+# after a failed [ -n ] test) would silently abort 'pia run' on every machine
+# without a key file. Regression test for that silent-exit bug.
+: > "$HOME/.pia/secrets/openrouter-key.txt" 2>/dev/null || true
+rm -f "$HOME/.pia/secrets/openrouter-key.txt" 2>/dev/null || true
+OPENROUTER_FLAG="yes"
+unset OPENROUTER_API_KEY PIA_OPENROUTER_KEY_FILE
+resolve_openrouter_key
+status=$?
+if [ "$status" -eq 0 ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: resolve_openrouter_key returns 0 when no key exists (set -e safe)"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: resolve_openrouter_key must return 0 without a key, set -e would abort run (status=$status)"
+    FAIL=$((FAIL + 1))
+fi
+
+# With '--openrouter' but no key anywhere: warn, return 0, forward nothing.
+unset OPENROUTER_API_KEY PIA_OPENROUTER_KEY_FILE
+OPENROUTER_FLAG="yes"
+resolve_out="$(resolve_openrouter_key 2>&1)"
+status=$?
+result=$(build_docker_args "test-container" 2>/dev/null)
+if [ "$status" -eq 0 ] && [ -z "${OPENROUTER_API_KEY:-}" ] \
+    && echo "$resolve_out" | grep -qi "no openrouter key found" \
+    && ! echo "$result" | grep -q "OPENROUTER_API_KEY"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: --openrouter without a key warns, returns 0, forwards nothing"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: --openrouter without a key should warn and forward nothing (status=$status, out '$resolve_out', args '$result')"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$KEYDIR" "$HOME" 2>/dev/null || true
+HOME="$REAL_HOME"
+OPENROUTER_FLAG=""
+unset OPENROUTER_API_KEY PIA_OPENROUTER_KEY_FILE
 
 mkdir -p /tmp/test-build-docker-args-$$
 MOUNT_DIR="/tmp/test-build-docker-args-$$" SSH_FLAG=""

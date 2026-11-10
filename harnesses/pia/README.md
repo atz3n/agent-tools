@@ -181,6 +181,7 @@ URL-history options (`pia urls`):
 - `pia remove` (alias `pia rm`) is the only command that removes a running container; `pia clean` removes only stopped ones, and never removes kept (`pia-keep-*`) containers
 - `pia keep` / `pia unkeep` / `pia rename` work on running and stopped containers alike (they only rename, never stop or remove)
 - Sessions are stored inside the container — deleting the container deletes the session
+- `pia` forwards the OpenRouter key into containers **only when you pass `--openrouter` (`-o`)** — by default containers start with no credentials, even when a key is available on the host (see [Inference via OpenRouter](#inference-via-openrouter))
 - Options can be placed before or after the name (e.g., `pia run -m /path myproj` or `pia run myproj -m /path`)
 - Containers are labelled with the `pia` project (see [Container Project](#container-project)); `pia list`, `pia clean`, and `pia rs` match them by the `pia-` name prefix or by that label
 
@@ -342,6 +343,63 @@ Caveats:
   skip the logger — it starts on the pia-managed keep-alive path only.
 - If the logger is `SIGKILLed` its capture lingers until the container stops;
   the next container start brings it back. Nothing else restarts it mid-run.
+
+## Inference via OpenRouter
+
+Pi ships OpenRouter as a **built-in provider** — nothing has to be added to
+`configs/models.json` (which only defines the local `lm-studio` and `mlx-serve`
+providers). Pi only needs the API key in its environment — but `pia` does **not**
+forward it by default: containers should not carry credentials they do not use
+(e.g. when inference runs against a local model). Pass `--openrouter` (`-o`) to
+`pia run` / `pia create` / `pia restart` to opt in; `pia` then resolves the key
+for you — put it in an `openrouter-key.txt` file once and you never export
+anything.
+
+```bash
+# one-time setup — plain key, nothing else.
+mkdir -p ~/.pia/secrets && chmod 700 ~/.pia/secrets
+# replace YOUR_KEY_HERE with your key first, then run:
+echo 'YOUR_KEY_HERE' > ~/.pia/secrets/openrouter-key.txt && chmod 600 ~/.pia/secrets/openrouter-key.txt
+
+pia run myproj -o             # forwards the key; without the flag the container gets none
+# inside pi: /model → openrouter → e.g. anthropic/claude-sonnet-4.5
+```
+
+With `--openrouter`, `pia` looks for the key, in this order:
+
+1. `OPENROUTER_API_KEY` in the environment (wins if set)
+2. `$PIA_OPENROUTER_KEY_FILE`, if you point it at a file explicitly (if that
+   file does not exist, `pia` **stops with an error** — it never falls back
+   to a different key behind your back)
+3. `~/.pia/secrets/openrouter-key.txt` — the standard location. `install-pia.sh`
+   creates the `~/.pia/secrets/` folder; you place the key file there yourself
+
+Without `--openrouter`/`-o` none of this happens — no key is read, exported or
+forwarded, even when `OPENROUTER_API_KEY` is set on the host. `pia ask` takes
+no flags and never forwards the key; to ask an OpenRouter-powered container,
+`pia create myproj --openrouter` first, then `pia ask myproj <PROMPT>`.
+
+The key is passed to docker **by name only** (never as `-e VAR=value`), so it
+never appears in the `docker run` command line in `ps` or the debug log. Inside
+the container, pick a model with `/model` (OpenRouter models look like
+`openrouter/anthropic/claude-sonnet-4.5`); with a key, Pi lists only the models
+that key may use.
+
+Alternatives, and caveats:
+
+- **`/login openrouter`** inside a container stores the key in the container's
+  `auth.json`. It survives `pia stop` / `pia rs` of that same container, but a
+  **new** container starts clean — the key-file route works for every instance.
+- **Default model**: to make OpenRouter the default instead of the local
+  `mlx-serve` model, set `defaultProvider`/`defaultModel` in
+  `configs/settings.json` (e.g. `"openrouter"` +
+  `"anthropic/claude-sonnet-4.5"`) and rebuild the image — or just pick it with
+  `/model` per session.
+- The key lives in the container's environment, so it is visible in
+  `docker inspect` output for that container — another reason forwarding stays
+  opt-in (`--openrouter`).
+- With `pia monitor`/`pia urls` you can verify the agent only talks to
+  `openrouter.ai` when using this provider.
 
 ## Docker Access (`--docker`)
 
