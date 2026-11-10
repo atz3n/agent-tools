@@ -416,6 +416,13 @@ container_is_running() {
     docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null | grep -q "true"
 }
 
+# Resolve a container name to its ID. Sessions pin to the ID so that a
+# 'pia rename'/'pia keep' during a live session cannot orphan the container
+# when the session ends and the container is stopped again.
+container_id() {
+    docker container inspect -f '{{.Id}}' "$1" 2>/dev/null
+}
+
 # Add the keep marker to a (prefixed) name: pia-zzz -> pia-keep-zzz.
 # Idempotent: names that are already kept are returned unchanged.
 add_keep() {
@@ -479,7 +486,17 @@ exec_tty_args() {
 start_session() {
     local name="$1"
 
-    if ! wait_running "$name"; then
+    # Pin the session to the container ID: the container may be renamed
+    # ('pia rename', 'pia keep') while pi runs, and the stop below must still
+    # find it when the session ends.
+    local id
+    id="$(container_id "$name")"
+    if [ -z "$id" ]; then
+        log_error "Container '${name}' does not exist."
+        return 1
+    fi
+
+    if ! wait_running "$id"; then
         log_warn "Container '${name}' did not report running — trying to attach anyway."
     fi
 
@@ -487,11 +504,11 @@ start_session() {
     exec_args="$(exec_tty_args)"
     log_cmd "docker exec ${exec_args} ${name} pi"
     local rc=0
-    docker exec ${exec_args} "$name" pi || rc=$?
+    docker exec ${exec_args} "$id" pi || rc=$?
 
-    if container_is_running "$name"; then
+    if container_is_running "$id"; then
         log_cmd "docker stop ${name}"
-        docker stop "$name" > /dev/null 2>&1
+        docker stop "$id" > /dev/null 2>&1
     fi
 
     return $rc
@@ -528,12 +545,22 @@ attach_session() {
         exit 1
     fi
 
+    # Pin the session to the container ID: the container may be renamed
+    # ('pia rename', 'pia keep') while pi runs, and the stop below must still
+    # find it when the session ends.
+    local id
+    id="$(container_id "$name")"
+    if [ -z "$id" ]; then
+        log_error "Container '${name}' disappeared after starting."
+        exit 1
+    fi
+
     local exec_args
     exec_args="$(exec_tty_args)"
 
     log_cmd "docker exec ${exec_args} ${name} pi --continue"
     local rc=0
-    docker exec ${exec_args} "$name" pi --continue || rc=$?
+    docker exec ${exec_args} "$id" pi --continue || rc=$?
 
     # Session ended — stop the container, as when pi used to be the entrypoint.
     # Exit codes 125-127 mean the exec itself could not run pi; leave the
@@ -541,9 +568,9 @@ attach_session() {
     case "$rc" in
         125|126|127) ;;
         *)
-            if container_is_running "$name"; then
+            if container_is_running "$id"; then
                 log_cmd "docker stop ${name}"
-                docker stop "$name" > /dev/null 2>&1
+                docker stop "$id" > /dev/null 2>&1
             fi
             ;;
     esac
@@ -1489,16 +1516,28 @@ cmd_ask() {
         started_by_us="yes"
     fi
 
+    # Pin to the container ID so a rename during the run cannot orphan the
+    # cleanup below ('pia rename'/'pia keep' may run from another terminal).
+    # The container is guaranteed to exist here (just created, or checked and
+    # started above), so an empty ID means it vanished — abort instead of
+    # degrading to name-based cleanup, which is what this pinning prevents.
+    local id
+    id="$(container_id "$name")"
+    if [ -z "$id" ]; then
+        log_error "Container '${name}' disappeared before the session could run."
+        exit 1
+    fi
+
     log_cmd "docker exec ${name} pi --print <prompt>"
     local rc=0
-    docker exec "$name" pi --print "$prompt" || rc=$?
+    docker exec "$id" pi --print "$prompt" || rc=$?
 
     if [ -n "$ephemeral" ]; then
         log_cmd "docker rm -f ${name}"
-        docker rm -f "$name" > /dev/null 2>&1
-    elif [ -n "$started_by_us" ] && container_is_running "$name"; then
+        docker rm -f "$id" > /dev/null 2>&1
+    elif [ -n "$started_by_us" ] && container_is_running "$id"; then
         log_cmd "docker stop ${name}"
-        docker stop "$name" > /dev/null 2>&1
+        docker stop "$id" > /dev/null 2>&1
     fi
 
     exit $rc

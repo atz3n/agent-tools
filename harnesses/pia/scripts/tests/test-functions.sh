@@ -351,6 +351,33 @@ else
     PASS=$((PASS + 1))
 fi
 
+eval "$(sed -n '/^container_id/,/^}/p' "$AGENTS")"
+
+# Positive: stub 'docker' so the test does not depend on a live daemon —
+# container_id must call 'docker container inspect -f {{.Id}} <name>' and
+# return the ID from stdout.
+docker() {
+    if [ "$1" = "container" ] && [ "$2" = "inspect" ] && [ "$3" = "-f" ] && \
+       [ "$4" = "{{.Id}}" ] && [ "$5" = "pia-fake-name" ]; then
+        echo "deadbeefcafe0123456789"
+    fi
+}
+cid="$(container_id "pia-fake-name")"
+unset -f docker
+assert_output_contains "deadbeefcafe0123456789" "$cid" "container_id resolves a name to its container ID"
+
+# Negative: real docker (or no docker at all) — a non-existent container
+# must yield empty output so callers can detect the missing container.
+if [ -n "$(container_id "nonexistent-container-xyz-12345")" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: container_id should return empty for non-existent"
+    FAIL=$((FAIL + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: container_id returns empty for non-existent container"
+    PASS=$((PASS + 1))
+fi
+
 # =============================================================================
 # SECTION 12: build_docker_args function
 # =============================================================================
