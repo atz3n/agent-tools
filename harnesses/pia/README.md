@@ -10,6 +10,13 @@ Containerized [Pi Coding Agent](https://pi.dev) for isolated, interactive operat
 bash scripts/build-docker.sh
 ```
 
+To force a completely fresh build that ignores all cached Docker layers, pass
+`--force` (alias `--no-cache`):
+
+```bash
+bash scripts/build-docker.sh --force
+```
+
 ## Multi-Instance Manager (`pia`)
 
 The `pia` CLI lets you run multiple pi-agent containers in parallel, each with its own name.
