@@ -323,6 +323,7 @@ The `pia` CLI lets you run multiple Pi agent containers in parallel, each with i
 | `pia run -m /path` | Start with `/path` mounted into `/workspace` |
 | `pia run --ssh` | Start with host SSH agent socket mounted |
 | `pia run --docker` | Start with host Docker socket mounted (opt-in Docker CLI access) |
+| `pia run -o` / `--openrouter` | Forward the host OpenRouter API key into the container (opt-in; resolved from `OPENROUTER_API_KEY`, `$PIA_OPENROUTER_KEY_FILE`, or `~/.pia/secrets/openrouter-key.txt`) |
 | `pia stop [NAME]` | Stop a named container |
 | `pia remove [NAME]` / `pia rm [NAME]` | Stop and remove a named container |
 | `pia list` / `pia ls` | List all agent containers |
