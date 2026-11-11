@@ -179,7 +179,8 @@ $(docker ps -a --format '{{.Names}}' 2>/dev/null \
     # Temp files created by tests (modules are sourced, so $$ matches the same shell)
     rm -rf "/tmp/pia-test-sshsock-$$" "/tmp/test-build-docker-args-$$" \
            "/tmp/pia-test-monshim-$$" "/tmp/pia-test-monlive-$$" \
-           "/tmp/pia-test-urlshim-$$" "$TEST_CONTAINERS_FILE"
+           "/tmp/pia-test-urlshim-$$" "/tmp/pia-test-sessiontrap-$$" \
+           "$TEST_CONTAINERS_FILE"
 }
 trap cleanup_test_containers EXIT
 
@@ -193,6 +194,7 @@ trap cleanup_test_containers EXIT
 source "$SCRIPT_DIR/tests/test-commands.sh"
 source "$SCRIPT_DIR/tests/test-functions.sh"
 source "$SCRIPT_DIR/tests/test-debug-flag.sh"
+source "$SCRIPT_DIR/tests/test-session-trap.sh"
 
 # ─── Summary ─────────────────────────────────────────────────────────
 
