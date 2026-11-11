@@ -612,24 +612,11 @@ start_session() {
 # so it gets a real TTY and can be launched with '--continue' — 'docker start'
 # cannot pass arguments to the entrypoint. When the session ends the container
 # is stopped again, matching the previous 'pi exits, container exits' behavior.
-# Containers built from older images (ENTRYPOINT ['pi']) are detected via
-# 'docker inspect' and fall back to a plain 'docker start -i'.
+# Only images with the idling entrypoint are supported; containers built from
+# older images (ENTRYPOINT ['pi']) cannot host an exec'd session — remove them
+# and re-create them from the current image.
 attach_session() {
     local name="$1"
-
-    # Old images cannot host an exec'd session — start them the plain way.
-    local entrypoint
-    entrypoint="$(docker inspect -f '{{join .Config.Entrypoint " "}}' "$name" 2>/dev/null || true)"
-    case "$entrypoint" in
-        *entrypoint.sh*) ;;
-        *)
-            log_warn "Container image has no session-resume support — starting plain session."
-            log_cmd "docker start -i ${name}"
-            local rc=0
-            docker start -i "$name" || rc=$?
-            return $rc
-            ;;
-    esac
 
     log_cmd "docker start ${name}"
     if ! docker start "$name" > /dev/null 2>&1; then

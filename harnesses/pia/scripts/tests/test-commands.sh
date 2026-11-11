@@ -208,7 +208,7 @@ assert_exit_code 1 "$RUNNING_EXIT" "run should exit 1 when container already run
 assert_output_contains "already running" "$RUNNING_OUTPUT" "run should report already running"
 assert_output_contains "pia exec" "$RUNNING_OUTPUT" "run should suggest pia exec"
 
-# --- Happy path: run with stopped container (docker start -i) ---
+# --- Happy path: run with stopped container (docker start + exec) ---
 
 # Stop the running container
 docker stop "$RUN_RUNNING" > /dev/null 2>&1
@@ -224,15 +224,17 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Run again — should use docker start -i (timeout will kill it, but container should be running)
+# Run again — attach_session starts the stopped container with 'docker start'
+# and attaches pi via 'docker exec' (which fails on alpine, rc 127, leaving
+# the container running on purpose).
 RUNNING_OUTPUT=$()
 RUNNING_EXIT=0
 RUNNING_OUTPUT=$(timeout 3 bash "$AGENTS" run "$RUN_RUNNING" < /dev/null 2>&1) || RUNNING_EXIT=$?
 
-# Container should now be running (timeout killed the script)
+# Container should now be running (started before the session attach).
 if docker ps --filter "name=^${RUN_RUNNING}$" --format '{{.Status}}' 2>/dev/null | grep -qi "up"; then
     TOTAL=$((TOTAL + 1))
-    echo -e "  ${GREEN}PASS${NC}: run with stopped container used docker start -i (container is now running)"
+    echo -e "  ${GREEN}PASS${NC}: run with stopped container started it (container is now running)"
     PASS=$((PASS + 1))
 else
     TOTAL=$((TOTAL + 1))
@@ -1394,13 +1396,14 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Run resume — docker start -i will hang waiting for stdin, timeout kills it
-# but by then the container should already be running.
+# Run resume — attach_session starts the container detached ('docker start')
+# and then 'docker exec pi --continue' fails on alpine (rc 127), which
+# deliberately leaves the started container running.
 # Deterministic: TEST_CONTAINER was created now, so it is newer than any
 # container that existed before this section started.
 capture_output resume
 
-# Container should now be running (timeout killed the hanging script)
+# Container should now be running (started before the session attach)
 if docker ps --filter "name=^${TEST_CONTAINER}$" --format '{{.Status}}' 2>/dev/null | grep -qi "up"; then
     TOTAL=$((TOTAL + 1))
     echo -e "  ${GREEN}PASS${NC}: resume started the stopped container (container is now running)"
