@@ -572,6 +572,19 @@ exec_tty_args() {
     fi
 }
 
+# Last-resort cleanup while a blocking session command ('docker exec ... pi')
+# is running. Closing the terminal (or Ctrl+C / a plain kill) sends HUP/INT/TERM
+# to this script as well as to the docker client; without a handler the script
+# dies before the post-exec cleanup and the detached container is orphaned.
+# Trap those signals, run CLEANUP (shell code the caller built with the pinned
+# container ID, so a mid-session rename cannot defeat it), then die. SIGKILL
+# (kill -9) cannot be caught — that case stays a known gap; only an ENTRYPOINT
+# that is pi itself covers it.
+trap_session_signals() {
+    local cleanup="$1"
+    trap "$cleanup; exit 1" HUP INT TERM
+}
+
 # Start a fresh pi session in a newly created container and stop the
 # container when the session ends (matching the old 'ENTRYPOINT pi' lifecycle
 # where the container exited together with pi).
@@ -596,7 +609,9 @@ start_session() {
     exec_args="$(exec_tty_args)"
     log_cmd "docker exec ${exec_args} ${name} pi"
     local rc=0
+    trap_session_signals "docker stop '$id' > /dev/null 2>&1"
     docker exec ${exec_args} "$id" pi || rc=$?
+    trap - HUP INT TERM
 
     if container_is_running "$id"; then
         log_cmd "docker stop ${name}"
@@ -612,24 +627,11 @@ start_session() {
 # so it gets a real TTY and can be launched with '--continue' — 'docker start'
 # cannot pass arguments to the entrypoint. When the session ends the container
 # is stopped again, matching the previous 'pi exits, container exits' behavior.
-# Containers built from older images (ENTRYPOINT ['pi']) are detected via
-# 'docker inspect' and fall back to a plain 'docker start -i'.
+# Only images with the idling entrypoint are supported; containers built from
+# older images (ENTRYPOINT ['pi']) cannot host an exec'd session — remove them
+# and re-create them from the current image.
 attach_session() {
     local name="$1"
-
-    # Old images cannot host an exec'd session — start them the plain way.
-    local entrypoint
-    entrypoint="$(docker inspect -f '{{join .Config.Entrypoint " "}}' "$name" 2>/dev/null || true)"
-    case "$entrypoint" in
-        *entrypoint.sh*) ;;
-        *)
-            log_warn "Container image has no session-resume support — starting plain session."
-            log_cmd "docker start -i ${name}"
-            local rc=0
-            docker start -i "$name" || rc=$?
-            return $rc
-            ;;
-    esac
 
     log_cmd "docker start ${name}"
     if ! docker start "$name" > /dev/null 2>&1; then
@@ -652,7 +654,9 @@ attach_session() {
 
     log_cmd "docker exec ${exec_args} ${name} pi --continue"
     local rc=0
+    trap_session_signals "docker stop '$id' > /dev/null 2>&1"
     docker exec ${exec_args} "$id" pi --continue || rc=$?
+    trap - HUP INT TERM
 
     # Session ended — stop the container, as when pi used to be the entrypoint.
     # Exit codes 125-127 mean the exec itself could not run pi; leave the
@@ -1629,9 +1633,21 @@ cmd_ask() {
         exit 1
     fi
 
+    # Same signal guard as the session paths: a closed terminal must not
+    # leave an ephemeral container behind or a 'started_by_us' container
+    # running. Without a signal, cleanup still runs below after the exec.
+    local ask_cleanup="true"
+    if [ -n "$ephemeral" ]; then
+        ask_cleanup="docker rm -f '$id' > /dev/null 2>&1"
+    elif [ -n "$started_by_us" ]; then
+        ask_cleanup="docker stop '$id' > /dev/null 2>&1"
+    fi
+
     log_cmd "docker exec ${name} pi --print <prompt>"
     local rc=0
+    trap_session_signals "$ask_cleanup"
     docker exec "$id" pi --print "$prompt" || rc=$?
+    trap - HUP INT TERM
 
     if [ -n "$ephemeral" ]; then
         log_cmd "docker rm -f ${name}"

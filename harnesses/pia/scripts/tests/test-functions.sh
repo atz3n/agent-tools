@@ -1137,16 +1137,29 @@ echo -e "${YELLOW}=== SECTION 17: Container restart on second run ===${NC}"
 # Test: running with same name when container is stopped shows start message
 # We can't easily test the full flow (create + stop + run again) without
 # actually running docker, but we can verify the code path exists.
-# The key fix: cmd_run uses 'docker start -i' (not 'docker run -i')
-# when restarting a stopped container.
-if grep -q 'docker start -i' "$AGENTS"; then
+# The key fix: cmd_run restarts a stopped container via attach_session,
+# which starts it detached with 'docker start' (not 'docker run -i') and
+# attaches pi with 'docker exec'.
+if grep -q 'docker start "$name"' "$AGENTS"; then
     TOTAL=$((TOTAL + 1))
-    echo -e "  ${GREEN}PASS${NC}: cmd_run uses 'docker start -i' to restart stopped container"
+    echo -e "  ${GREEN}PASS${NC}: stopped containers are restarted with 'docker start' (via attach_session)"
     PASS=$((PASS + 1))
 else
     TOTAL=$((TOTAL + 1))
-    echo -e "  ${RED}FAIL${NC}: cmd_run should use 'docker start -i' for stopped containers"
+    echo -e "  ${RED}FAIL${NC}: stopped containers should be restarted with 'docker start'"
     FAIL=$((FAIL + 1))
+fi
+
+# Only the current (idling-entrypoint) image is supported — there must be no
+# leftover 'docker start -i' fallback for legacy images.
+if grep -q 'docker start -i' "$AGENTS"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: legacy 'docker start -i' session path must be gone"
+    FAIL=$((FAIL + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: no legacy 'docker start -i' session path"
+    PASS=$((PASS + 1))
 fi
 
 # Verify 'docker run -i' is NOT used for restart (that would try to create a new container)
