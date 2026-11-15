@@ -18,8 +18,9 @@ RUN ln -s "$(command -v python3)" /usr/local/bin/python && \
     ln -s "$(command -v pip3)" /usr/local/bin/pip
 
 # Install Docker CLI (client only). No daemon runs in this image: with
-# 'pia run --docker' the host Docker socket is mounted and the CLI talks to
-# the host daemon (see harnesses/pia/README.md).
+# 'pia run --docker' the CLI talks over TCP to the session's throwaway
+# sibling daemon (a 'NAME-dind' container; see harnesses/pia/README.md).
+# Only '--docker=socket' ever reaches the host daemon.
 ARG DOCKER_CLI_VERSION=29.9.2
 RUN set -eux; \
     darch="$(dpkg --print-architecture)"; \
@@ -35,8 +36,10 @@ RUN set -eux; \
     docker --version
 
 # Install Docker Compose v2 as a CLI plugin, so agents can run 'docker compose'
-# against the host daemon via 'pia run --docker' — e.g. to bring up a project's
-# own docker-compose.yml stack from /workspace.
+# against their session daemon via 'pia run --docker' — e.g. to bring up a
+# project's own docker-compose.yml stack from /workspace (named volumes with
+# plain --docker; bind mounts resolve in the daemon's filesystem, so stacks
+# that mount project files need 'pia run --docker=dind-dev').
 ARG DOCKER_COMPOSE_VERSION=5.6.1
 RUN set -eux; \
     carch="$(dpkg --print-architecture)"; \
@@ -84,11 +87,11 @@ COPY skills/ /root/.pi/agent/skills/
 # This lets 'pia rs' revive a stopped container (docker start takes no
 # arguments) and continue the last pi session. Direct docker usage: 'docker
 # run -it pia pi [args]'.
-COPY harnesses/pia/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY harnesses/pia/docker/pia/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Traffic + resource sampler used by 'pia monitor' (called via docker exec).
-COPY harnesses/pia/docker/monitor-inside.sh /usr/local/bin/pia-monitor
+COPY harnesses/pia/docker/pia/monitor-inside.sh /usr/local/bin/pia-monitor
 RUN chmod +x /usr/local/bin/pia-monitor
 
 # Create workspace directory
