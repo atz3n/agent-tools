@@ -358,20 +358,20 @@ if docker image inspect pia > /dev/null 2>&1; then
     fi
     [ -n "$AUTO_NAME" ] && docker rm -f "$AUTO_NAME" > /dev/null 2>&1 || true
 
-    # --- Options pass-through: --docker=socket mounts the host Docker socket ---
+    # --- Options pass-through: --docker-full mounts the host Docker socket ---
 
     CREATE_DOCKER="pia-test-create-docker-$$"
     register_test_container "$CREATE_DOCKER"
     docker rm -f "$CREATE_DOCKER" > /dev/null 2>&1 || true
-    capture_output create "$CREATE_DOCKER" --docker=socket
-    assert_exit_code 0 "$CAPTURED_EXIT" "create --docker=socket should exit 0"
+    capture_output create "$CREATE_DOCKER" --docker-full
+    assert_exit_code 0 "$CAPTURED_EXIT" "create --docker-full should exit 0"
     if docker container inspect "$CREATE_DOCKER" 2>/dev/null | grep -q '/var/run/docker.sock'; then
         TOTAL=$((TOTAL + 1))
         echo -e "  ${GREEN}PASS${NC}: created container has the Docker socket bind"
         PASS=$((PASS + 1))
     else
         TOTAL=$((TOTAL + 1))
-        echo -e "  ${RED}FAIL${NC}: create --docker=socket should bind /var/run/docker.sock"
+        echo -e "  ${RED}FAIL${NC}: create --docker-full should bind /var/run/docker.sock"
         FAIL=$((FAIL + 1))
     fi
     docker rm -f "$CREATE_DOCKER" > /dev/null 2>&1 || true

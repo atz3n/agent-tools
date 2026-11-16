@@ -42,10 +42,10 @@ set -euo pipefail
 #       --docker       Give the container a throwaway sibling Docker daemon
 #                      (a 'NAME-dind' container with NO host mounts; the host
 #                      socket is never visible inside the agent)
-#       --docker=MODE  dind (same as --docker) | dind-dev (also mount the
-#                      '-m' workspace into the daemon, so nested bind mounts
-#                      resolve) | socket (mount the HOST socket —
-#                      host-root-equivalent, loud banner, refused by 'pia ask')
+#       --docker-dev   Also mount the '-m' workspace into that daemon, so
+#                      nested bind mounts resolve (needs -m)
+#       --docker-full  Mount the HOST socket — host-root-equivalent, loud
+#                      banner, refused by 'pia ask'
 #   -o, --openrouter   Forward the host OpenRouter API key into the container
 #                      (opt-in; without it the container starts with no key)
 #   -h, --help         Display this help message
@@ -63,7 +63,7 @@ set -euo pipefail
 #   pia run -m /path/to/proj # Start with mount, auto name
 #   pia run proj -m . --ssh  # Start with name, mount, and SSH
 #   pia run proj --docker    # Start with a throwaway sibling Docker daemon
-#   pia run proj -m . --docker=dind-dev  # ... and the daemon sees the workspace
+#   pia run proj -m . --docker-dev  # ... and the daemon sees the workspace
 #   pia run proj -o           # Start with the OpenRouter key forwarded
 #   pia create proj -m /path # Create stopped container for a later 'pia ask'
 #   pia --debug run proj     # Show debug output (global flag)
@@ -90,7 +90,7 @@ MONITOR_CYCLE_SECONDS="3"  # default sample length for 'pia monitor' (see cmd_mo
 MONITOR_RAW_CHUNK="5"      # default capture chunk for 'pia monitor --raw'; '-i' overrides it
 DIND_SUFFIX="-dind"               # suffix of an agent's throwaway daemon container
 DIND_IMAGE_DEFAULT="pia-dind"     # built daemon image (tag = guard version); PIA_DIND_IMAGE overrides fully
-DIND_WS_TARGET="/workspace"       # where 'dind-dev' exposes the workspace inside the daemon
+DIND_WS_TARGET="/workspace"       # where 'dind-mount' exposes the workspace inside the daemon
 # guard policy version lives in docker/pia-dind/guard.sh (line 2 marker);
 # read it with dind_guard_version() — there is no second copy to drift.
 
@@ -274,18 +274,15 @@ Command options (run/create/restart):
                      (sibling container 'NAME-dind', NO host mounts, host
                      socket never visible; the agent talks to it over the
                      shared network namespace at tcp://127.0.0.1:2375)
-      --docker=MODE  Explicit daemon mode:
-                       dind      same as --docker (default with --docker)
-                       dind-dev  also mount the '-m' workspace into the
-                                 daemon at the same path, so nested bind
-                                 mounts (compose configs, live source) work.
-                                 Requires -m. The daemon — and every
-                                 container it runs — can then read and write
-                                 that one directory as root; nothing else on
-                                 the host becomes visible.
-                       socket    mount the HOST Docker socket; this is
-                                 host-root-equivalent by design: a loud banner
-                                 is shown and 'pia ask' refuses the mode
+      --docker-dev   Like --docker, but also mount the '-m' workspace into
+                     the daemon at the same path, so nested bind mounts
+                     (compose configs, live source) work. Requires -m. The
+                     daemon — and every container it runs — can then read
+                     and write that one directory as root; nothing else on
+                     the host becomes visible.
+      --docker-full  Mount the HOST Docker socket; this is
+                     host-root-equivalent by design: a loud banner
+                     is shown and 'pia ask' refuses the mode
   -o, --openrouter   Forward the host OpenRouter API key into the container
                      (opt-in; without it the container starts with no key,
                      even when OPENROUTER_API_KEY is set on the host)
@@ -309,8 +306,8 @@ Examples:
   $(basename "$0") run -m /path/to/proj # Start with mount, auto name
   $(basename "$0") run proj -m . --ssh  # Start with name, mount, and SSH
   $(basename "$0") run proj --docker    # Start with a throwaway sibling Docker daemon
-  $(basename "$0") run proj -m . --docker=dind-dev # ... daemon sees /workspace (bind mounts work)
-  $(basename "$0") run proj --docker=socket # Host socket (host-root-equivalent!)
+  $(basename "$0") run proj -m . --docker-dev # ... daemon sees /workspace (bind mounts work)
+  $(basename "$0") run proj --docker-full # Host socket (host-root-equivalent!)
   $(basename "$0") run proj -o          # Start with the OpenRouter key forwarded
   $(basename "$0") create proj -m /path # Create stopped container for a later 'pia ask'
   $(basename "$0") --debug run proj     # Show debug output (global flag)
@@ -344,8 +341,8 @@ EOF
 # The first non-option, non-flag-value arg is treated as the name.
 # If no non-option arg exists, name is empty (auto-generated).
 # Outputs: NAME|HELP_REQUESTED|INVALID_OPTION|MOUNT_DIR|SSH_FLAG|DEBUG_FLAG|DOCKER_MODE|MISSING_VALUE|OPENROUTER_FLAG
-# Field 7 is the --docker MODE string ('' | dind | dind-dev | socket), not a
-# yes/no flag: '--docker' is shorthand for '--docker=dind'.
+# Field 7 is the --docker MODE string ('' | dind | dind-mount | socket), not a
+# yes/no flag: --docker → dind, --docker-dev → dind-mount, --docker-full → socket.
 extract_name_and_options() {
     local name=""
     local in_mount_value=0
@@ -375,19 +372,14 @@ extract_name_and_options() {
                 ssh_flag="yes"
                 ;;
             --docker)
-                # shorthand for the safe default mode
+                # throwaway sibling daemon — the safe default mode
                 docker_mode="dind"
                 ;;
-            --docker=*)
-                case "${arg#--docker=}" in
-                    dind|dind-dev|socket)
-                        docker_mode="${arg#--docker=}"
-                        ;;
-                    *)
-                        log_error "INVALID_DOCKER_MODE: '${arg#--docker=}' — valid modes are dind, dind-dev and socket."
-                        invalid_option=1
-                        ;;
-                esac
+            --docker-dev)
+                docker_mode="dind-mount"
+                ;;
+            --docker-full)
+                docker_mode="socket"
                 ;;
             -o|--openrouter)
                 openrouter_flag="yes"
@@ -563,7 +555,7 @@ build_docker_args() {
                 log_warn "Docker socket '${docker_socket}' not found — Docker is not available in the container."
             fi
             ;;
-        dind|dind-dev)
+        dind|dind-mount)
             echo "--net"
             echo "container:${name}${DIND_SUFFIX}"
             printf '%s\n' "-e" "DOCKER_HOST=tcp://127.0.0.1:2375"
@@ -637,7 +629,7 @@ wait_running() {
 }
 
 ###################################################################################################
-# DOCKER MODES (--docker / --docker=dind|dind-dev|socket) — issues #1, #10
+# DOCKER MODES (--docker / --docker-dev / --docker-full)
 ###################################################################################################
 
 # Validate a --docker mode. Modes are the safe-by-default trio only; any
@@ -645,20 +637,20 @@ wait_running() {
 # of silently degrading into another mode.
 validate_docker_mode() {
     case "${1:-}" in
-        ""|dind|dind-dev|socket) return 0 ;;
+        ""|dind|dind-mount|socket) return 0 ;;
         *)
-            log_error "INVALID_DOCKER_MODE: '${1}' — valid modes are dind, dind-dev and socket."
+            log_error "INVALID_DOCKER_MODE: '${1}' — use one of --docker, --docker-dev or --docker-full."
             return 1 ;;
     esac
 }
 
 # True when the requested mode runs a throwaway sibling daemon. 'dind' and
-# 'dind-dev' differ ONLY in what that daemon may see; netns sharing, labels,
+# 'dind-mount' differ ONLY in what that daemon may see; netns sharing, labels,
 # lifecycle and cleanup are identical, so every lifecycle call site must ask
 # this instead of comparing against 'dind'.
 dind_mode_active() {
     case "${1:-${DOCKER_MODE:-}}" in
-        dind|dind-dev) return 0 ;;
+        dind|dind-mount) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -668,34 +660,34 @@ dind_mode_active() {
 # (unattended) refuses the mode outright.
 docker_socket_banner() {
     log_warn "────────────────────────────────────────────────────────"
-    log_warn "--docker=socket: THIS SESSION IS HOST-ROOT-EQUIVALENT."
+    log_warn "--docker-full: THIS SESSION IS HOST-ROOT-EQUIVALENT."
     log_warn "The agent (and any code it runs) controls the host Docker"
     log_warn "daemon and can escape to root on the host. Prefer '--docker'"
     log_warn "(throwaway sibling daemon). mode=socket name=${1}"
     log_warn "────────────────────────────────────────────────────────"
 }
 
-# Banner for 'dind-dev': the one mode that lets the daemon — and therefore
+# Banner for 'dind-mount': the one mode that lets the daemon — and therefore
 # every container it runs — write into a real host directory. Shorter and
 # calmer than the socket banner on purpose: exactly ONE directory becomes
 # visible and it is the one the user already handed the agent; everything
 # else on the host stays invisible to the daemon.
-dind_dev_banner() {
+dind_mount_banner() {
     log_warn "────────────────────────────────────────────────────────"
-    log_warn "--docker=dind-dev: the throwaway daemon can read and WRITE"
+    log_warn "--docker-dev: the throwaway daemon can read and WRITE"
     log_warn "'${2}'. Nested containers reach it as root, so files they"
     log_warn "leave there are root-owned on the host. That directory is"
     log_warn "the only thing mounted in the daemon — no other path is."
-    log_warn "mode=dind-dev ws=${2} name=${1}"
+    log_warn "mode=dind-mount ws=${2} name=${1}"
     log_warn "────────────────────────────────────────────────────────"
 }
 
-# Resolve the directory 'dind-dev' may mount into the daemon (prints the
+# Resolve the directory 'dind-mount' may mount into the daemon (prints the
 # absolute host path). The mode is meaningless without a '-m' workspace, so
 # it is refused rather than silently degrading into plain 'dind'.
 resolve_dind_workspace() {
     if [ -z "${MOUNT_DIR:-}" ]; then
-        log_error "--docker=dind-dev needs a workspace: pass -m <dir>."
+        log_error "--docker-dev needs a workspace: pass -m <dir>."
         return 1
     fi
     if [ ! -d "$MOUNT_DIR" ]; then
@@ -904,7 +896,7 @@ harden_dind_toolchain() {
 # the host is empty. (Reach is a separate question: with sysbox/gVisor the
 # two coincide; on plain runc the privileged fallback can mount host disks —
 # see the threat model in docs/docker.md.) The one mount exception is
-# 'dind-dev': its third argument is the resolved workspace path — exactly
+# 'dind-mount': its third argument is the resolved workspace path — exactly
 # one bind, at the same path the agent sees, and rprivate so mounts created
 # inside nested containers can never propagate back into the host mount
 # namespace.
@@ -953,7 +945,7 @@ dind_create_args() {
         echo "--privileged"
     fi
 
-    # 'dind-dev': the workspace, at the agent's own path, read-write.
+    # 'dind-mount': the workspace, at the agent's own path, read-write.
     if [ -n "$workspace" ]; then
         echo "-v"
         echo "${workspace}:${DIND_WS_TARGET}:rprivate"
@@ -970,7 +962,7 @@ dind_create_args() {
     printf '%s\n' "-e"
     echo "DOCKER_TLS_CERTDIR="
     # The bind whitelist the image entrypoint writes into the guard's conf:
-    # dind-dev passes the workspace target inside the daemon, plain dind
+    # dind-mount passes the workspace target inside the daemon, plain dind
     # nothing (Docker plumbing only). Mode is decided here, enforcement is
     # the guard's.
     printf '%s\n' "-e"
@@ -989,7 +981,7 @@ dind_create_args() {
 
 # Create (or revive) the throwaway daemon sibling of an agent and wait until
 # its API answers. Second argument is the workspace to bind into the daemon
-# ('dind-dev' only; empty = the daemon sees nothing of the host — see
+# ('dind-mount' only; empty = the daemon sees nothing of the host — see
 # dind_create_args). This is the pia CLI's job — the agent must never be
 # able to spawn its own daemon, and the entrypoint only ever waits for one
 # that already exists.
@@ -1090,13 +1082,13 @@ start_dind_sibling() {
 }
 
 # Validate the --docker MODE and its workspace argument, resolving the
-# 'dind-dev' workspace into DIND_WS. Called BEFORE any Docker work: a bad
+# 'dind-mount' workspace into DIND_WS. Called BEFORE any Docker work: a bad
 # mode or a missing '-m' is a usage error and must not be reported as a
 # missing image or a container conflict.
 validate_docker_request() {
     validate_docker_mode "${DOCKER_MODE:-}" || return 1
     DIND_WS=""
-    if [ "${DOCKER_MODE:-}" = "dind-dev" ]; then
+    if [ "${DOCKER_MODE:-}" = "dind-mount" ]; then
         DIND_WS="$(resolve_dind_workspace)" || return 1
     fi
     return 0
@@ -1112,8 +1104,8 @@ prepare_dind_daemon() {
         docker_socket_banner "$name"
         return 0
     fi
-    if [ "${DOCKER_MODE:-}" = "dind-dev" ]; then
-        dind_dev_banner "$name" "$DIND_WS"
+    if [ "${DOCKER_MODE:-}" = "dind-mount" ]; then
+        dind_mount_banner "$name" "$DIND_WS"
     fi
     if dind_mode_active; then
         start_dind_sibling "$name" "$DIND_WS" || return 1
@@ -1192,7 +1184,7 @@ ensure_dind_siblings_started() {
        docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null | \
        grep -q '^DOCKER_HOST=tcp://127\.0\.0\.1:2375$'; then
         log_warn "Container '${name}' expects a throwaway daemon but has none — docker calls will fail."
-        log_warn "Recreate it with 'pia restart ${name} --docker' (or --docker=dind-dev with a workspace)."
+        log_warn "Recreate it with 'pia restart ${name} --docker' (or --docker-dev with a workspace)."
     fi
 }
 
@@ -1534,7 +1526,12 @@ cmd_run() {
                 if { [ -n "$created_dind" ] && ! dind_mode_active; } || \
                    { [ -z "$created_dind" ] && [ -n "${DOCKER_MODE:-}" ]; }; then
                     log_warn "Container '${name}' was created with a different --docker mode — it is unchanged."
-                    log_warn "Recreate it with 'pia restart ${name} --docker=${DOCKER_MODE}'."
+                    local mode_flag="--docker"
+                    case "${DOCKER_MODE:-}" in
+                        dind-mount) mode_flag="--docker-dev" ;;
+                        socket)   mode_flag="--docker-full" ;;
+                    esac
+                    log_warn "Recreate it with 'pia restart ${name} ${mode_flag}'."
                 fi
             fi
             # A dind-mode agent shares its daemon's netns: the daemon must
@@ -2331,9 +2328,9 @@ cmd_ask() {
     local ask_mount=""
 
     # build_docker_args reads these globals; 'ask' takes no ssh/openrouter
-    # flags and no '-m' except for an ephemeral '--docker=dind-dev' session.
-    # --docker IS accepted, but only with the SAFE modes: 'socket' is refused
-    # below — an unattended session must never hold a host-root-equivalent
+    # flags and no '-m' except for an ephemeral '--docker-dev' session.
+    # --docker IS accepted, but only with the SAFE modes: '--docker-full' is
+    # refused below — an unattended session must never hold a host-root-equivalent
     # credential nobody is watching.
     MOUNT_DIR=""
     SSH_FLAG=""
@@ -2356,31 +2353,30 @@ cmd_ask() {
                 echo "Options:"
                 echo "  --docker        Run the prompt against a throwaway sibling"
                 echo "                  Docker daemon (same isolation as 'pia run --docker')"
-                echo "  --docker=dind-dev  ... and (ephemeral asks only) let that daemon"
+                echo "  --docker-dev    ... and (ephemeral asks only) let that daemon"
                 echo "                  see the '-m' workspace, so nested bind mounts work"
-                echo "  -m, --mount <dir>  Workspace for an ephemeral '--docker=dind-dev'"
+                echo "  -m, --mount <dir>  Workspace for an ephemeral '--docker-dev'"
                 echo "                  ask; a named container already has its own"
-                echo "  --docker=socket REFUSED: unattended sessions never get the"
+                echo "  --docker-full REFUSED: unattended sessions never get the"
                 echo "                  host Docker socket (host-root-equivalent)"
                 exit 0 ;;
             --docker)
                 ask_docker_mode="dind"
                 shift ;;
             --docker=*)
-                ask_docker_mode="${1#--docker=}"
-                case "$ask_docker_mode" in
-                    dind|dind-dev) ;;
-                    socket)
-                        log_error "Refusing '--docker=socket' for 'pia ask': an unattended"
-                        log_error "session with the host Docker socket is host-root-equivalent"
-                        log_error "and nobody is watching it. Use '--docker' (throwaway"
-                        log_error "daemon), or 'pia run' for an interactive socket session."
-                        exit 1 ;;
-                    *)
-                        log_error "INVALID_DOCKER_MODE: '${ask_docker_mode}' — valid modes are dind, dind-dev and socket."
-                        exit 1 ;;
-                esac
+                # The old '--docker=MODE' syntax. Refuse loudly instead of
+                # letting it slip into the prompt as harmless-looking text.
+                log_error "Option '--docker=…' no longer exists: use '--docker', '--docker-dev' or '--docker-full'."
+                exit 1 ;;
+            --docker-dev)
+                ask_docker_mode="dind-mount"
                 shift ;;
+            --docker-full)
+                log_error "Refusing '--docker-full' for 'pia ask': an unattended"
+                log_error "session with the host Docker socket is host-root-equivalent"
+                log_error "and nobody is watching it. Use '--docker' (throwaway"
+                log_error "daemon), or 'pia run' for an interactive socket session."
+                exit 1 ;;
             -m|--mount)
                 if [ $# -lt 2 ]; then
                     log_error "Option '$1' requires a value."
@@ -2431,24 +2427,24 @@ cmd_ask() {
         exit 1
     fi
 
-    # 'dind-dev' is allowed for an unattended ask (unlike 'socket'): the
+    # 'dind-mount' is allowed for an unattended ask (unlike 'socket'): the
     # session writes only into a directory the user explicitly handed it.
     # An ephemeral ask needs that '-m'; a NAMED container's workspace — and
     # its daemon's bind — were fixed when it was created, so accepting -m
     # there would silently do nothing.
     DIND_WS=""
-    if [ "${DOCKER_MODE:-}" = "dind-dev" ]; then
+    if [ "${DOCKER_MODE:-}" = "dind-mount" ]; then
         if [ -n "$ephemeral" ]; then
             MOUNT_DIR="$ask_mount"
             DIND_WS="$(resolve_dind_workspace)" || exit 1
-            dind_dev_banner "$name" "$DIND_WS"
+            dind_mount_banner "$name" "$DIND_WS"
         elif [ -n "$ask_mount" ]; then
             log_error "Container '${name}' already has its own workspace — '-m' would be ignored."
-            log_error "Recreate it instead: 'pia restart <NAME> -m <dir> --docker=dind-dev'."
+            log_error "Recreate it instead: 'pia restart <NAME> -m <dir> --docker-dev'."
             exit 1
         fi
     elif [ -n "$ask_mount" ]; then
-        log_error "Option '-m' is only accepted with '--docker=dind-dev'."
+        log_error "Option '-m' is only accepted with '--docker-dev'."
         exit 1
     fi
 

@@ -1,10 +1,10 @@
 #!/bin/sh
 # dind-escape-check.sh — run INSIDE a pia agent container started with
-# --docker (or --docker=dind-dev) and verify the escape chain is closed
+# --docker (or --docker-dev) and verify the escape chain is closed
 # from the agent's own seat: nested docker over DOCKER_HOST, no docker
 # socket, default caps.
 #
-# Usage:  sh dind-escape-check.sh            (dind-dev: full checks)
+# Usage:  sh dind-escape-check.sh            (--docker-dev: full checks)
 #         DOCKER_HOST + /workspace are taken as-is from the container.
 # Exit 0 = every vector closed; non-zero = a vector is open (see FAIL lines).
 set -u

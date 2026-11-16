@@ -57,7 +57,7 @@ refused "daemon-internal containerd bind"     -v /var/lib/docker/containerd:/x "
 # --- symlinked bind sources (TOCTOU) ------------------------------------
 # The literal source string is policed, but the kernel resolves symlink
 # components at mount time — 'ln -s / <ws>/link' can mount the daemon's
-# whole rootfs rw. Needs a workspace (dind-dev): only there is a source
+# whole rootfs rw. Needs a workspace (--docker-dev): only there is a source
 # allowed LITERALLY, which is what makes the resolution check meaningful.
 if docker exec "$DAEMON" test -d /workspace; then
     docker exec "$DAEMON" sh -c 'ln -sfn / /workspace/.kit-sym; mkdir -p /workspace/.kitdir && ln -sfn /etc /workspace/.kitdir/etc'

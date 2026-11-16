@@ -6,7 +6,7 @@
 # Why this runs at container start instead of image build:
 #   * the immutable flag (chattr +i) cannot survive image layer export — it
 #     has to be set inside the running container, on its own overlay upper;
-#   * the bind whitelist is per-mode (plain dind vs dind-dev workspace),
+#   * the bind whitelist is per-mode (plain dind vs the --docker-dev workspace),
 #     decided when 'pia' starts this daemon, passed in via $PIA_GUARD_WS.
 # Ordering guarantee: this runs BEFORE dockerd starts, so no nested
 # container can ever exist that was not created through the guard.
@@ -15,7 +15,7 @@ set -eu
 CONF=/usr/local/etc/pia-dind-guard.conf
 GUARD_SRC=/usr/local/lib/pia-dind/guard.sh
 
-# 1) Bind whitelist the guard enforces: dind-dev passes the workspace
+# 1) Bind whitelist the guard enforces: --docker-dev passes the workspace
 #    target, plain dind leaves it empty (Docker plumbing only). Rewriting
 #    after a restart needs the immutability cleared first.
 mkdir -p /usr/local/etc

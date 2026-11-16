@@ -35,7 +35,7 @@ The `pia` CLI lets you run multiple pi-agent containers in parallel, each with i
 | `pia run -m /path` | Start with `/path` mounted into `/workspace` |
 | `pia run --ssh` | Start with host SSH agent socket mounted |
 | `pia run --docker` | Start with a throwaway sibling Docker daemon (opt-in; no host socket) |
-| `pia run --docker=socket` | Start with the HOST Docker socket mounted (host-root-equivalent!) |
+| `pia run --docker-full` | Start with the HOST Docker socket mounted (host-root-equivalent!) |
 | `pia run myproj -m . --ssh` | Start with name, mount, and SSH |
 | `pia create [NAME] [OPTIONS]` | Create a stopped container without starting it (same options as `pia run`) |
 | `pia stop [NAME]` | Stop a named container |
@@ -109,10 +109,10 @@ pia run myproj -m /path/to/project --ssh
 
 # Start with Docker access (build/run/test images from inside the agent) —
 # a private, throwaway daemon per session; the host socket stays invisible.
-# '--docker=dind-dev' also mounts the workspace into that daemon, so bind
+# '--docker-dev' also mounts the workspace into that daemon, so bind
 # mounts and compose configs resolve (see the Docker Access section).
 pia run myproj -m /path/to/project --docker
-pia run myproj -m /path/to/project --docker=dind-dev
+pia run myproj -m /path/to/project --docker-dev
 
 # Create a stopped container now (name + mount set up), use it later with 'pia ask'
 pia create myproj -m /path/to/project
@@ -168,7 +168,8 @@ pia rename old-name new-name
 | `-m, --mount <dir>` | Mount the specified directory into `/workspace` |
 | `-s, --ssh` | Mount the host SSH agent socket into the container |
 | `--docker` | Throwaway sibling Docker daemon per session (safe default, see below). Grants the agent root over the session — use it for your own code only |
-| `--docker=dind\|dind-dev\|socket` | Explicit daemon mode (`dind-dev` also mounts the `-m` workspace into the daemon; `socket` is host-root-equivalent) |
+| `--docker-dev` | `--docker` plus the `-m` workspace mounted into the daemon at the same path (requires `-m`) |
+| `--docker-full` | Mount the raw **host** Docker socket — host-root-equivalent by design (loud banner, refused by `pia ask`) |
 | `-h, --help` | Display help message |
 
 Monitor options (`pia monitor`):
@@ -203,7 +204,7 @@ URL-history options (`pia urls`):
 - Sessions are stored inside the container — deleting the container deletes the session
 - `pia` forwards the OpenRouter key into containers **only when you pass `--openrouter` (`-o`)** — by default containers start with no credentials, even when a key is available on the host (see [Inference via OpenRouter](#inference-via-openrouter))
 - Options can be placed before or after the name (e.g., `pia run -m /path myproj` or `pia run myproj -m /path`)
-- `--docker=dind-dev` is `--docker` plus exactly one bind: it **requires** `-m`, mounts that directory into the *daemon* at the same path so nested bind mounts resolve, and recreates the daemon when the workspace changes. `pia ask` accepts it only for ephemeral sessions (see [docs/docker.md](docs/docker.md))
+- `--docker-dev` is `--docker` plus exactly one bind: it **requires** `-m`, mounts that directory into the *daemon* at the same path so nested bind mounts resolve, and recreates the daemon when the workspace changes. `pia ask` accepts it only for ephemeral sessions (see [docs/docker.md](docs/docker.md))
 - Containers are labelled with the `pia` project (see [Container Project](#container-project)); `pia list`, `pia clean`, and `pia rs` match them by the `pia-` name prefix or by that label
 
 ## Watching a Container (`pia monitor`)
@@ -429,7 +430,7 @@ The pia image ships the **Docker CLI and the Docker Compose plugin** (no daemon)
 build, run and test images — **without ever seeing the host Docker socket**.
 
 Full reference — architecture diagrams, plumbing, the nested-container guard,
-dind-dev, per-host threat model, configuration and troubleshooting:
+`--docker-dev`, per-host threat model, configuration and troubleshooting:
 **[docs/docker.md](docs/docker.md)**.
 
 ### Trust ladder (modes)
@@ -437,12 +438,12 @@ dind-dev, per-host threat model, configuration and troubleshooting:
 | Mode | What it is | Threat model it survives |
 |------|-----------|--------------------------|
 | no `--docker` | no Docker at all | hostile workload, fully contained |
-| `--docker` (= `--docker=dind`) | sibling throwaway daemon `NAME-dind`, one per session, with a nested-container guard | your own builds: credential isolation, and **with sysbox/gVisor** filesystem isolation too. On plain runc (Docker Desktop!) the daemon is privileged and the guard blocks the no-exploit escapes — hostile input still needs kernel/daemon CVEs, so keep it to trusted code |
-| `--docker=dind-dev` | same daemon, **plus** the `-m` workspace mounted into it at the same path | your own dev stacks: adds exactly one bind (the workspace); the runtime caveats of `--docker` apply unchanged |
-| `--docker=socket` | the raw **host** socket mounted (legacy) | **nothing — host root by design** |
+| `--docker` | sibling throwaway daemon `NAME-dind`, one per session, with a nested-container guard | your own builds: credential isolation, and **with sysbox/gVisor** filesystem isolation too. On plain runc (Docker Desktop!) the daemon is privileged and the guard blocks the no-exploit escapes — hostile input still needs kernel/daemon CVEs, so keep it to trusted code |
+| `--docker-dev` | same daemon, **plus** the `-m` workspace mounted into it at the same path | your own dev stacks: adds exactly one bind (the workspace); the runtime caveats of `--docker` apply unchanged |
+| `--docker-full` | the raw **host** socket mounted | **nothing — host root by design** |
 
 Decision rule: the danger of the input and the strength of the boundary move
-together. `--docker=socket` sits *below* "no `--docker`"; when in doubt, take
+together. `--docker-full` sits *below* "no `--docker`"; when in doubt, take
 the lower mode. In short:
 
 - `--docker` hands the agent **root inside the session** — the private
@@ -459,14 +460,14 @@ the lower mode. In short:
   plain runc (Docker Desktop included) → guard + privileged daemon, i.e.
   hostile input now needs a kernel/daemon CVE — untrusted code belongs in a
   session with **no `--docker`** there.
-- `--docker=dind-dev` is `--docker` plus exactly one bind: it **requires**
+- `--docker-dev` is `--docker` plus exactly one bind: it **requires**
   `-m`, mounts that directory into the *daemon* at the same path so nested
   bind mounts and compose configs resolve, and recreates the daemon when the
   workspace changes. `pia ask` accepts it only for ephemeral sessions.
 
 ```bash
 pia run myproj -m /path/to/project --docker            # named volumes only
-pia run myproj -m /path/to/project --docker=dind-dev   # bind mounts resolve
+pia run myproj -m /path/to/project --docker-dev   # bind mounts resolve
 docker exec pia-myproj-dind cat /var/log/pia-dind-guard.log   # guard refusals
 ```
 

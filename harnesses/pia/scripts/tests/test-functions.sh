@@ -824,7 +824,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# --- Docker socket tests ('--docker=socket' mode only — plain --docker is
+# --- Docker socket tests ('--docker-full' — the 'socket' mode — only; plain --docker is
 # dind and must NEVER mount a socket; see the docker-mode section) ---
 
 # Test Docker socket is NOT included without --docker flag

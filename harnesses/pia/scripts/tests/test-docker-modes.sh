@@ -1,5 +1,5 @@
 # =============================================================================
-# Docker modes (--docker / --docker=dind|dind-dev|socket) — issues #1, #10
+# Docker modes (--docker / --docker-dev / --docker-full) — static + live checks
 #
 # General sections test CLI parsing (always run). The 'docker' section runs
 # the real throwaway-daemon lifecycle and needs both the 'pia' image and the
@@ -65,36 +65,37 @@ else
     TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: --docker shorthand (got '$(echo "$result" | cut -d'|' -f7)')"; FAIL=$((FAIL + 1))
 fi
 
-# every explicit mode parses into field 7
-for mode in dind dind-dev socket; do
-    result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options "--docker=$mode" some-name)
+# every docker flag maps to its internal mode (field 7)
+for pair in "--docker:dind" "--docker-dev:dind-mount" "--docker-full:socket"; do
+    flag="${pair%%:*}"; mode="${pair##*:}"
+    result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options "$flag" some-name)
     if [ "$(echo "$result" | cut -d'|' -f7)" = "$mode" ] && [ "$(echo "$result" | cut -d'|' -f3)" = "0" ]; then
-        TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: --docker=$mode parses (field 7 = '$mode')"; PASS=$((PASS + 1))
+        TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: $flag parses (field 7 = '$mode')"; PASS=$((PASS + 1))
     else
-        TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: --docker=$mode (got '$result')"; FAIL=$((FAIL + 1))
+        TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: $flag (got '$result')"; FAIL=$((FAIL + 1))
     fi
 done
 
-# unknown mode is rejected with INVALID_DOCKER_MODE (error text + invalid flag);
-# 'vm' is v2 scope (own issue) and must not be accepted by v1 either
-for bad in bogus vm; do
-    result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options "--docker=$bad" some-name 2>&1)
-    if echo "$result" | grep -qF "INVALID_DOCKER_MODE" && [ "$(echo "$result" | tail -1 | cut -d'|' -f3)" = "1" ]; then
-        TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: --docker=$bad rejected with INVALID_DOCKER_MODE"; PASS=$((PASS + 1))
+# the retired '--docker=MODE' syntax and unknown --docker* spellings are
+# rejected as unknown options (field 3), never silently accepted
+for bad in --docker=dind --docker=socket --docker=bogus --docker=vm --docker-dev=x; do
+    result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options "$bad" some-name 2>&1)
+    if [ "$(echo "$result" | tail -1 | cut -d'|' -f3)" = "1" ]; then
+        TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: $bad rejected as unknown option"; PASS=$((PASS + 1))
     else
-        TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: --docker=$bad not rejected properly (got '$result')"; FAIL=$((FAIL + 1))
+        TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: $bad not rejected (got '$result')"; FAIL=$((FAIL + 1))
     fi
 done
 
-# validate_docker_mode: empty/dind/dind-dev/socket pass; everything else (incl.
-# the v2 'vm' mode and typos) fails with INVALID_DOCKER_MODE
-validate_docker_mode "" && validate_docker_mode "dind" && validate_docker_mode "dind-dev" && validate_docker_mode "socket" >/dev/null 2>&1
+# validate_docker_mode: empty/dind/dind-mount/socket pass; everything else
+# (the retired 'dind-dev' name, a future 'vm' mode, typos) fails with INVALID_DOCKER_MODE
+validate_docker_mode "" && validate_docker_mode "dind" && validate_docker_mode "dind-mount" && validate_docker_mode "socket" >/dev/null 2>&1
 if [ $? -eq 0 ]; then
-    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: validate accepts empty/dind/dind-dev/socket"; PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: validate accepts empty/dind/dind-mount/socket"; PASS=$((PASS + 1))
 else
     TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: validate rejected a valid mode"; FAIL=$((FAIL + 1))
 fi
-for bad in vm nonsense; do
+for bad in vm nonsense dind-dev; do
     msg="$(validate_docker_mode "$bad" 2>&1)"; rc=$?
     if [ $rc -ne 0 ] && echo "$msg" | grep -qF "INVALID_DOCKER_MODE"; then
         TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: validate rejects '$bad' with INVALID_DOCKER_MODE"; PASS=$((PASS + 1))
@@ -111,8 +112,8 @@ else
 fi
 
 # dind_mode_active is the single predicate every lifecycle call site must use:
-# 'dind' and 'dind-dev' share the daemon, 'socket' and '' do not.
-for m in dind dind-dev; do
+# 'dind' and 'dind-mount' share the daemon, 'socket' and '' do not.
+for m in dind dind-mount; do
     if dind_mode_active "$m"; then
         TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind_mode_active true for '$m'"; PASS=$((PASS + 1))
     else
@@ -131,13 +132,13 @@ done
 DM_WS_DIR="$(mktemp -d)"
 msg="$(MOUNT_DIR="" resolve_dind_workspace 2>&1)"; rc=$?
 if [ $rc -ne 0 ] && echo "$msg" | grep -qF "needs a workspace"; then
-    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-dev without -m is refused (no silent 'dind' fallback)"; PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-mount without -m is refused (no silent 'dind' fallback)"; PASS=$((PASS + 1))
 else
     TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: resolve_dind_workspace without -m (rc=$rc '$msg')"; FAIL=$((FAIL + 1))
 fi
 msg="$(MOUNT_DIR="/nonexistent/dir-$$" resolve_dind_workspace 2>&1)"; rc=$?
 if [ $rc -ne 0 ] && echo "$msg" | grep -qF "does not exist"; then
-    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-dev with a missing -m dir is refused"; PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-mount with a missing -m dir is refused"; PASS=$((PASS + 1))
 else
     TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: resolve_dind_workspace missing dir (rc=$rc '$msg')"; FAIL=$((FAIL + 1))
 fi
@@ -160,14 +161,14 @@ fi
 DM_ARGS_WS="$(MOUNT_DIR="$DM_WS_DIR" dind_create_args pia-x-dind pia-x "$DM_WS_DIR" "sysbox-runc")"
 DM_WS_BINDS="$(echo "$DM_ARGS_WS" | grep -c '^-v$' || true)"
 if [ "$DM_WS_BINDS" = "1" ] && echo "$DM_ARGS_WS" | grep -qxF "${DM_WS_DIR}:${DIND_WS_TARGET}:rprivate"; then
-    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-dev daemon gets exactly ONE bind: <ws>:/workspace:rprivate"; PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-mount daemon gets exactly ONE bind: <ws>:/workspace:rprivate"; PASS=$((PASS + 1))
 else
-    TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: dind-dev binds ($DM_WS_BINDS -v args; got '$DM_ARGS_WS')"; FAIL=$((FAIL + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: dind-mount binds ($DM_WS_BINDS -v args; got '$DM_ARGS_WS')"; FAIL=$((FAIL + 1))
 fi
 if echo "$DM_ARGS_WS" | grep -qxF "pia-dind-mounts=${DM_WS_DIR}"; then
-    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-dev records its view in pia-dind-mounts"; PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-mount records its view in pia-dind-mounts"; PASS=$((PASS + 1))
 else
-    TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: dind-dev missing pia-dind-mounts label"; FAIL=$((FAIL + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: dind-mount missing pia-dind-mounts label"; FAIL=$((FAIL + 1))
 fi
 # every flag survives the one-per-line contract — 'echo "-e"' silently
 # swallows itself, which left dockerd with a bare value and 'docker run'
@@ -195,18 +196,18 @@ else
     TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: daemon image position changed (want '$DIND_REF')"; FAIL=$((FAIL + 1))
 fi
 # the bind whitelist travels to the image entrypoint as $PIA_GUARD_WS:
-# dind-dev passes the daemon-side workspace target, plain dind passes empty
+# dind-mount passes the daemon-side workspace target, plain dind passes empty
 if echo "$DM_ARGS_WS" | grep -qxF "PIA_GUARD_WS=${DIND_WS_TARGET}" && \
    ! dind_create_args pia-x-dind pia-x "" "" | grep -q "^PIA_GUARD_WS=${DIND_WS_TARGET}$"; then
-    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: PIA_GUARD_WS set for dind-dev, empty for plain dind"; PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: PIA_GUARD_WS set for dind-mount, empty for plain dind"; PASS=$((PASS + 1))
 else
     TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: PIA_GUARD_WS whitelist env wiring changed"; FAIL=$((FAIL + 1))
 fi
-# runc fallback = PRIVILEGED, no host binds without dind-dev. The old
+# runc fallback = PRIVILEGED, no host binds without dind-mount. The old
 # enumerated-caps config could not start a single nested container on plain
 # runc / Docker Desktop (seccomp blocks the session-keyring call; /proc/sys
 # is read-only), so the fallback must be exactly '--privileged' — and still
-# must not leak a workspace unless dind-dev asked for one.
+# must not leak a workspace unless dind-mount asked for one.
 DM_ARGS_RUNC="$(dind_create_args pia-x-dind pia-x "" "")"
 if echo "$DM_ARGS_RUNC" | grep -qxF -- "--privileged" && \
    [ "$(echo "$DM_ARGS_RUNC" | grep -c '^-v$' || true)" = "0" ] && \
@@ -301,18 +302,18 @@ else
     TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: dind mode args (got '$result')"; FAIL=$((FAIL + 1))
 fi
 
-# dind-dev AGENT args are identical to dind (the extra bind goes to the
+# dind-mount AGENT args are identical to dind (the extra bind goes to the
 # DAEMON, never to the agent) — plus its own /workspace mount from -m
 DM_WS_DIR2="$(mktemp -d)"
-MOUNT_DIR="$DM_WS_DIR2" SSH_FLAG="" DOCKER_MODE="dind-dev"
+MOUNT_DIR="$DM_WS_DIR2" SSH_FLAG="" DOCKER_MODE="dind-mount"
 result=$(build_docker_args "pia-dinddev" 2>/dev/null)
 if echo "$result" | grep -qxF "container:pia-dinddev${DIND_SUFFIX}" \
    && echo "$result" | grep -qF "DOCKER_HOST=tcp://127.0.0.1:2375" \
    && echo "$result" | grep -qF "${DM_WS_DIR2}:/workspace" \
    && ! echo "$result" | grep -qF "docker.sock"; then
-    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-dev agent: same netns/DOCKER_HOST, workspace via -m"; PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-mount agent: same netns/DOCKER_HOST, workspace via -m"; PASS=$((PASS + 1))
 else
-    TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: dind-dev agent args (got '$result')"; FAIL=$((FAIL + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: dind-mount agent args (got '$result')"; FAIL=$((FAIL + 1))
 fi
 rm -rf "$DM_WS_DIR2"
 
@@ -326,38 +327,38 @@ else
     TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: plain mode leaked docker args (got '$result')"; FAIL=$((FAIL + 1))
 fi
 
-# pia ask refuses --docker=socket with an explanatory error (parse-time,
+# pia ask refuses --docker-full with an explanatory error (parse-time,
 # no docker needed) and likewise an unknown mode
-capture_output ask "hello there" --docker=socket
-assert_exit_code 1 "$CAPTURED_EXIT" "ask --docker=socket must refuse"
-assert_output_contains "Refusing '--docker=socket'" "$CAPTURED_OUTPUT" "ask --docker=socket explains the refusal"
+capture_output ask "hello there" --docker-full
+assert_exit_code 1 "$CAPTURED_EXIT" "ask --docker-full must refuse"
+assert_output_contains "Refusing '--docker-full'" "$CAPTURED_OUTPUT" "ask --docker-full explains the refusal"
 
 capture_output ask "hello there" --docker=bogus
-assert_exit_code 1 "$CAPTURED_EXIT" "ask --docker=bogus must refuse"
-assert_output_contains "INVALID_DOCKER_MODE" "$CAPTURED_OUTPUT" "ask --docker=bogus names the error"
+assert_exit_code 1 "$CAPTURED_EXIT" "ask --docker=bogus (retired syntax) must refuse"
+assert_output_contains "no longer exists" "$CAPTURED_OUTPUT" "ask --docker=bogus points at the new flags"
 
 # 'vm' is v2 scope: rejected at parse time, before any container work
 capture_output run pia-test-dm-vm-reject --docker=vm
-assert_exit_code 1 "$CAPTURED_EXIT" "run --docker=vm must be rejected in v1"
-assert_output_contains "INVALID_DOCKER_MODE" "$CAPTURED_OUTPUT" "run --docker=vm names the error"
+assert_exit_code 1 "$CAPTURED_EXIT" "run --docker=vm (retired syntax) must be rejected"
+assert_output_contains "Unknown option" "$CAPTURED_OUTPUT" "run --docker=vm names the unknown option"
 docker container inspect pia-test-dm-vm-reject > /dev/null 2>&1 && docker rm -f pia-test-dm-vm-reject > /dev/null 2>&1
 
-# 'dind-dev' without a workspace is refused rather than degraded to 'dind'
-capture_output run pia-test-dm-nows-reject --docker=dind-dev
-assert_exit_code 1 "$CAPTURED_EXIT" "run --docker=dind-dev without -m must refuse"
-assert_output_contains "needs a workspace" "$CAPTURED_OUTPUT" "run --docker=dind-dev without -m explains why"
+# 'dind-mount' without a workspace is refused rather than degraded to 'dind'
+capture_output run pia-test-dm-nows-reject --docker-dev
+assert_exit_code 1 "$CAPTURED_EXIT" "run --docker-dev without -m must refuse"
+assert_output_contains "needs a workspace" "$CAPTURED_OUTPUT" "run --docker-dev without -m explains why"
 docker container inspect pia-test-dm-nows-reject > /dev/null 2>&1 && docker rm -f pia-test-dm-nows-reject > /dev/null 2>&1
 
-# 'pia ask' accepts the safe dind-dev mode but needs the workspace it writes to
-capture_output ask "hello there" --docker=dind-dev
-assert_exit_code 1 "$CAPTURED_EXIT" "ask --docker=dind-dev without -m must refuse"
-assert_output_contains "needs a workspace" "$CAPTURED_OUTPUT" "ask --docker=dind-dev without -m explains why"
+# 'pia ask' accepts the safe dind-mount mode but needs the workspace it writes to
+capture_output ask "hello there" --docker-dev
+assert_exit_code 1 "$CAPTURED_EXIT" "ask --docker-dev without -m must refuse"
+assert_output_contains "needs a workspace" "$CAPTURED_OUTPUT" "ask --docker-dev without -m explains why"
 
 # '-m' is meaningless for any other docker mode in 'ask' (the agent's own
 # workspace is fixed at creation) — refuse instead of ignoring it
 capture_output ask "hello there" --docker -m /tmp
 assert_exit_code 1 "$CAPTURED_EXIT" "ask --docker -m must refuse"
-assert_output_contains "only accepted with '--docker=dind-dev'" "$CAPTURED_OUTPUT" "ask -m without dind-dev explains why"
+assert_output_contains "only accepted with '--docker-dev'" "$CAPTURED_OUTPUT" "ask -m without dind-mount explains why"
 
 fi  # should_run_section general
 
@@ -502,7 +503,7 @@ else
 fi
 docker rm -f "$LIVE" "$LIVEAGENT" > /dev/null 2>&1 || true
 
-# --- dind-dev: the workspace is the daemon's ENTIRE host view ----
+# --- dind-mount: the workspace is the daemon's ENTIRE host view ----
 
 DD_WS="$(mktemp -d)"; DD_WS_ABS="$(cd "$DD_WS" && pwd)"
 echo "pia-marker" > "$DD_WS/pia-marker.txt"
@@ -526,17 +527,17 @@ dd_src_matches() {
     esac
 }
 
-# create -m WS --docker=dind-dev: both halves get the workspace, and nothing
+# create -m WS --docker-dev: both halves get the workspace, and nothing
 # else is mounted anywhere
-capture_output create "$DD" -m "$DD_WS" --docker=dind-dev
-assert_exit_code 0 "$CAPTURED_EXIT" "create --docker=dind-dev should exit 0"
+capture_output create "$DD" -m "$DD_WS" --docker-dev
+assert_exit_code 0 "$CAPTURED_EXIT" "create --docker-dev should exit 0"
 DD_SIB_BINDS="$(docker container inspect -f '{{range .Mounts}}{{.Type}}:{{.Source}} {{end}}' "$DD_SIB" 2>/dev/null | tr ' ' '\n' | grep '^bind:' | grep -v '^bind:/sys/fs/cgroup$' | sed 's/^bind://' | tr '\n' ' ' | sed 's/ $//')"
 DD_AGENT_BINDS="$(docker container inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$DD" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | tr '\n' ' ' | sed 's/ $//')"
 DD_LABEL_WS="$(docker container inspect -f '{{ index .Config.Labels "pia-dind-mounts" }}' "$DD_SIB" 2>/dev/null)"
 if dd_src_matches "$DD_SIB_BINDS" "$DD_WS_ABS" && [ "$DD_AGENT_BINDS" = "$DD_WS_ABS" ] && [ "$DD_LABEL_WS" = "$DD_WS_ABS" ]; then
-    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-dev: ONE workspace bind on daemon AND agent, label recorded"; PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${GREEN}PASS${NC}: dind-mount: ONE workspace bind on daemon AND agent, label recorded"; PASS=$((PASS + 1))
 else
-    TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: dind-dev mounts (daemon='$DD_SIB_BINDS' agent='$DD_AGENT_BINDS' label='$DD_LABEL_WS')"; FAIL=$((FAIL + 1))
+    TOTAL=$((TOTAL + 1)); echo -e "  ${RED}FAIL${NC}: dind-mount mounts (daemon='$DD_SIB_BINDS' agent='$DD_AGENT_BINDS' label='$DD_LABEL_WS')"; FAIL=$((FAIL + 1))
 fi
 capture_output rm "$DD"
 docker rm -f "$DD" "$DD_SIB" > /dev/null 2>&1 || true
