@@ -39,8 +39,13 @@ set -euo pipefail
 # Command options (run/create/restart):
 #   -m, --mount <dir>  Mount the specified directory into /workspace
 #   -s, --ssh          Mount the host SSH agent socket into the container
-#       --docker       Mount the host Docker socket into the container (opt-in;
-#                      gives the container root-equivalent access to the host)
+#       --docker       Give the container a throwaway sibling Docker daemon
+#                      (a 'NAME-dind' container with NO host mounts; the host
+#                      socket is never visible inside the agent)
+#       --docker-dev   Also mount the '-m' workspace into that daemon, so
+#                      nested bind mounts resolve (needs -m)
+#       --docker-full  Mount the HOST socket — host-root-equivalent, loud
+#                      banner, refused by 'pia ask'
 #   -o, --openrouter   Forward the host OpenRouter API key into the container
 #                      (opt-in; without it the container starts with no key)
 #   -h, --help         Display this help message
@@ -57,7 +62,8 @@ set -euo pipefail
 #   pia run my-project       # Start with custom name
 #   pia run -m /path/to/proj # Start with mount, auto name
 #   pia run proj -m . --ssh  # Start with name, mount, and SSH
-#   pia run proj --docker    # Start with host Docker socket available
+#   pia run proj --docker    # Start with a throwaway sibling Docker daemon
+#   pia run proj -m . --docker-dev  # ... and the daemon sees the workspace
 #   pia run proj -o           # Start with the OpenRouter key forwarded
 #   pia create proj -m /path # Create stopped container for a later 'pia ask'
 #   pia --debug run proj     # Show debug output (global flag)
@@ -82,6 +88,11 @@ RANDOM_SUFFIX_LENGTH=8
 PROJECT_NAME="pia"        # project every pia container belongs to (label value)
 MONITOR_CYCLE_SECONDS="3"  # default sample length for 'pia monitor' (see cmd_monitor)
 MONITOR_RAW_CHUNK="5"      # default capture chunk for 'pia monitor --raw'; '-i' overrides it
+DIND_SUFFIX="-dind"               # suffix of an agent's throwaway daemon container
+DIND_IMAGE_DEFAULT="pia-dind"     # built daemon image (tag = guard version); PIA_DIND_IMAGE overrides fully
+DIND_WS_TARGET="/workspace"       # where 'dind-mount' exposes the workspace inside the daemon
+# guard policy version lives in docker/pia-dind/guard.sh (line 2 marker);
+# read it with dind_guard_version() — there is no second copy to drift.
 
 
 ###################################################################################################
@@ -149,18 +160,35 @@ log_error() {
     echo "[ERROR] $*" >&2
 }
 
-# List pia containers as 'id<TAB>name<TAB>status<TAB>created'.
-# Matches both the name prefix and the project label, so containers created
-# before the labels existed (or outside the CLI) are found too.
-# Extra arguments are passed to 'docker ps' as additional filters.
-# NOTE: 'docker ps' orders by creation time, NOT by stop time — never use
-# 'head -1' here to find "the latest stopped" container, use pia_last_stopped.
-pia_ps() {
+# List everything pia owns — agent instances AND their throwaway 'dind'
+# daemon siblings. Internal helper; callers that auto-select containers
+# (resume, clean, sole-running detection) must use pia_ps instead, which
+# hides the plumbing. Extra arguments are passed to 'docker ps' as
+# additional filters.
+pia_ps_all() {
     local fmt='{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.CreatedAt}}'
     {
         docker ps -a --filter "name=^${PREFIX}" --format "$fmt" "$@" 2>/dev/null
         docker ps -a --filter "label=com.docker.compose.project=${PROJECT_NAME}" --format "$fmt" "$@" 2>/dev/null
     } | awk -F'\t' '!seen[$1]++'
+}
+
+# List pia AGENT containers as 'id<TAB>name<TAB>status<TAB>created' —
+# throwaway daemon siblings (label pia-role=dind) are plumbing and hidden.
+# Exclusion is done here rather than with a 'label!=' docker filter because
+# older daemons reject that filter syntax. Matches both the name prefix and
+# the project label, so containers created before the labels existed (or
+# outside the CLI) are found too.
+# Extra arguments are passed to 'docker ps' as additional filters.
+# NOTE: 'docker ps' orders by creation time, NOT by stop time — never use
+# 'head -1' here to find "the latest stopped" container, use pia_last_stopped.
+pia_ps() {
+    local dind_names
+    dind_names="$(docker ps -a --filter "label=pia-role=dind" --format '{{.Names}}' 2>/dev/null)"
+    pia_ps_all "$@" | awk -F'\t' -v dinds="$dind_names" '
+        BEGIN { n = split(dinds, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") skip[a[i]] = 1 }
+        !skip[$2]
+    '
 }
 
 # Print the name of the most recently *stopped* agent container (empty if
@@ -204,8 +232,9 @@ Commands:
   stop  [NAME]               Stop a named container
   remove [NAME]              Remove a named container
   rm    [NAME]               Alias for remove
-  list                       List all agent containers
-  ls                         Alias for list
+  list  [OPTIONS]              List all agent containers (-a/--all also shows
+                               the throwaway 'dind' daemon containers)
+  ls                           Alias for list
   clean                      Remove all stopped agent containers (except kept pia-keep-*)
   resume                     Start the most recently stopped agent container and continue its last pi session
                              (takes no NAME — use 'run <NAME>' to continue a specific container)
@@ -215,6 +244,9 @@ Commands:
   exec    [NAME] [CMD]       Execute a command in a running container
   sh      [NAME]             Open an interactive bash shell in a running container (alias: shell)
                              (NAME may be omitted when exactly one container is running)
+  dindlog [NAME]             Nested-container guard log of the agent's throwaway Docker
+                             daemon — the refusal reasons behind opaque 'runc did not
+                             terminate successfully' errors from nested docker runs
   monitor [NAME] [OPTIONS]   Live view of a running container: where its requests go
                              (TLS SNI / cleartext HTTP URLs) + CPU, memory, net I/O
                              (terminal only, nothing is logged; Ctrl-C to stop)
@@ -238,8 +270,19 @@ Global options (any command):
 Command options (run/create/restart):
   -m, --mount <dir>  Mount the specified directory into /workspace
   -s, --ssh          Mount the host SSH agent socket into the container
-      --docker       Mount the host Docker socket into the container (opt-in;
-                     gives the container root-equivalent access to the host)
+      --docker       Give the container a throwaway sibling Docker daemon
+                     (sibling container 'NAME-dind', NO host mounts, host
+                     socket never visible; the agent talks to it over the
+                     shared network namespace at tcp://127.0.0.1:2375)
+      --docker-dev   Like --docker, but also mount the '-m' workspace into
+                     the daemon at the same path, so nested bind mounts
+                     (compose configs, live source) work. Requires -m. The
+                     daemon — and every container it runs — can then read
+                     and write that one directory as root; nothing else on
+                     the host becomes visible.
+      --docker-full  Mount the HOST Docker socket; this is
+                     host-root-equivalent by design: a loud banner
+                     is shown and 'pia ask' refuses the mode
   -o, --openrouter   Forward the host OpenRouter API key into the container
                      (opt-in; without it the container starts with no key,
                      even when OPENROUTER_API_KEY is set on the host)
@@ -253,12 +296,18 @@ Command options (urls):
   -a, --all             Every logged request in order, no aggregation
   -h, --help            Display help message
 
+Command options (ls):
+  -a, --all             Also list the throwaway 'dind' daemon containers
+                        (plumbing, hidden by default)
+
 Examples:
   $(basename "$0") run                  # Start with auto-generated name
   $(basename "$0") run my-project       # Start with custom name
   $(basename "$0") run -m /path/to/proj # Start with mount, auto name
   $(basename "$0") run proj -m . --ssh  # Start with name, mount, and SSH
-  $(basename "$0") run proj --docker    # Start with host Docker socket available
+  $(basename "$0") run proj --docker    # Start with a throwaway sibling Docker daemon
+  $(basename "$0") run proj -m . --docker-dev # ... daemon sees /workspace (bind mounts work)
+  $(basename "$0") run proj --docker-full # Host socket (host-root-equivalent!)
   $(basename "$0") run proj -o          # Start with the OpenRouter key forwarded
   $(basename "$0") create proj -m /path # Create stopped container for a later 'pia ask'
   $(basename "$0") --debug run proj     # Show debug output (global flag)
@@ -291,7 +340,9 @@ EOF
 # Args can be in any order: name and options can be interleaved.
 # The first non-option, non-flag-value arg is treated as the name.
 # If no non-option arg exists, name is empty (auto-generated).
-# Outputs: NAME|HELP_REQUESTED|INVALID_OPTION|MOUNT_DIR|SSH_FLAG|DEBUG_FLAG|DOCKER_FLAG|MISSING_VALUE|OPENROUTER_FLAG
+# Outputs: NAME|HELP_REQUESTED|INVALID_OPTION|MOUNT_DIR|SSH_FLAG|DEBUG_FLAG|DOCKER_MODE|MISSING_VALUE|OPENROUTER_FLAG
+# Field 7 is the --docker MODE string ('' | dind | dind-mount | socket), not a
+# yes/no flag: --docker → dind, --docker-dev → dind-mount, --docker-full → socket.
 extract_name_and_options() {
     local name=""
     local in_mount_value=0
@@ -300,7 +351,7 @@ extract_name_and_options() {
     local mount_dir=""
     local ssh_flag=""
     local debug_flag=""
-    local docker_flag=""
+    local docker_mode=""
     local openrouter_flag=""
     local missing_value=0
 
@@ -321,7 +372,14 @@ extract_name_and_options() {
                 ssh_flag="yes"
                 ;;
             --docker)
-                docker_flag="yes"
+                # throwaway sibling daemon — the safe default mode
+                docker_mode="dind"
+                ;;
+            --docker-dev)
+                docker_mode="dind-mount"
+                ;;
+            --docker-full)
+                docker_mode="socket"
                 ;;
             -o|--openrouter)
                 openrouter_flag="yes"
@@ -361,7 +419,7 @@ extract_name_and_options() {
         missing_value=1
     fi
 
-    echo "${name}|${help_requested}|${invalid_option}|${mount_dir:-}|${ssh_flag:-}|${debug_flag:-}|${docker_flag:-}|${missing_value}|${openrouter_flag:-}"
+    echo "${name}|${help_requested}|${invalid_option}|${mount_dir:-}|${ssh_flag:-}|${debug_flag:-}|${docker_mode:-}|${missing_value}|${openrouter_flag:-}"
 }
 
 # Locate the OpenRouter key file ('openrouter-key.txt'), printing one path or
@@ -483,17 +541,26 @@ build_docker_args() {
         echo "/workspace"
     fi
 
-    # Docker socket (opt-in) — lets the in-container docker CLI talk to the
-    # host daemon. Root-equivalent on the host, hence opt-in only.
-    if [ -n "${DOCKER_FLAG:-}" ]; then
-        local docker_socket="${DOCKER_SOCKET:-/var/run/docker.sock}"
-        if [ -S "$docker_socket" ]; then
-            echo "-v"
-            echo "${docker_socket}:/var/run/docker.sock"
-        else
-            log_warn "Docker socket '${docker_socket}' not found — Docker is not available in the container."
-        fi
-    fi
+    # Docker access mode. The host socket is mounted ONLY for the
+    # explicitly-loud 'socket' mode; 'dind' joins the sibling daemon's network
+    # namespace and talks to it over plain TCP — no socket file inside the
+    # agent, nothing of the host visible to the daemon (it has no mounts).
+    case "${DOCKER_MODE:-}" in
+        socket)
+            local docker_socket="${DOCKER_SOCKET:-/var/run/docker.sock}"
+            if [ -S "$docker_socket" ]; then
+                echo "-v"
+                echo "${docker_socket}:/var/run/docker.sock"
+            else
+                log_warn "Docker socket '${docker_socket}' not found — Docker is not available in the container."
+            fi
+            ;;
+        dind|dind-mount)
+            echo "--net"
+            echo "container:${name}${DIND_SUFFIX}"
+            printf '%s\n' "-e" "DOCKER_HOST=tcp://127.0.0.1:2375"
+            ;;
+    esac
 
     echo "$IMAGE_NAME"
 }
@@ -559,6 +626,587 @@ wait_running() {
         sleep 0.2
     done
     return 1
+}
+
+###################################################################################################
+# DOCKER MODES (--docker / --docker-dev / --docker-full)
+###################################################################################################
+
+# Validate a --docker mode. Modes are the safe-by-default trio only; any
+# other value (a typo, a mode from a newer pia, ...) fails loudly instead
+# of silently degrading into another mode.
+validate_docker_mode() {
+    case "${1:-}" in
+        ""|dind|dind-mount|socket) return 0 ;;
+        *)
+            log_error "INVALID_DOCKER_MODE: '${1}' — use one of --docker, --docker-dev or --docker-full."
+            return 1 ;;
+    esac
+}
+
+# True when the requested mode runs a throwaway sibling daemon. 'dind' and
+# 'dind-mount' differ ONLY in what that daemon may see; netns sharing, labels,
+# lifecycle and cleanup are identical, so every lifecycle call site must ask
+# this instead of comparing against 'dind'.
+dind_mode_active() {
+    case "${1:-${DOCKER_MODE:-}}" in
+        dind|dind-mount) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Loud, deliberate banner for the one mode that is host root by design.
+# Interactive starts get the warning plus an audit line on stderr; 'pia ask'
+# (unattended) refuses the mode outright.
+docker_socket_banner() {
+    log_warn "────────────────────────────────────────────────────────"
+    log_warn "--docker-full: THIS SESSION IS HOST-ROOT-EQUIVALENT."
+    log_warn "The agent (and any code it runs) controls the host Docker"
+    log_warn "daemon and can escape to root on the host. Prefer '--docker'"
+    log_warn "(throwaway sibling daemon). mode=socket name=${1}"
+    log_warn "────────────────────────────────────────────────────────"
+}
+
+# Banner for 'dind-mount': the one mode that lets the daemon — and therefore
+# every container it runs — write into a real host directory. Shorter and
+# calmer than the socket banner on purpose: exactly ONE directory becomes
+# visible and it is the one the user already handed the agent; everything
+# else on the host stays invisible to the daemon.
+dind_mount_banner() {
+    log_warn "────────────────────────────────────────────────────────"
+    log_warn "--docker-dev: the throwaway daemon can read and WRITE"
+    log_warn "'${2}'. Nested containers reach it as root, so files they"
+    log_warn "leave there are root-owned on the host. That directory is"
+    log_warn "the only thing mounted in the daemon — no other path is."
+    log_warn "mode=dind-mount ws=${2} name=${1}"
+    log_warn "────────────────────────────────────────────────────────"
+}
+
+# Resolve the directory 'dind-mount' may mount into the daemon (prints the
+# absolute host path). The mode is meaningless without a '-m' workspace, so
+# it is refused rather than silently degrading into plain 'dind'.
+resolve_dind_workspace() {
+    if [ -z "${MOUNT_DIR:-}" ]; then
+        log_error "--docker-dev needs a workspace: pass -m <dir>."
+        return 1
+    fi
+    if [ ! -d "$MOUNT_DIR" ]; then
+        log_error "Mount directory '${MOUNT_DIR}' does not exist."
+        return 1
+    fi
+    # Same resolution build_docker_args uses for the AGENT mount: the daemon
+    # must see the workspace at the SAME path ('/workspace') or the agent's
+    # nested '-v /workspace/...' requests would not resolve.
+    (cd "$MOUNT_DIR" && pwd)
+}
+
+# Name of the throwaway daemon container belonging to an agent.
+dind_name_for() {
+    echo "${1}${DIND_SUFFIX}"
+}
+
+# Strongest OCI runtime available on this host for the throwaway daemon:
+# sysbox first (unprivileged nested dind, best compatibility), then gVisor
+# (userspace kernel, strongest syscall boundary), else plain runc — where
+# nested dind only works at all with --privileged (see dind_create_args)
+# and shares the host kernel either way.
+detect_dind_runtime() {
+    local runtimes
+    runtimes="$(docker info --format '{{range $k, $v := .Runtimes}}{{$k}} {{end}}' 2>/dev/null || true)"
+    case " ${runtimes} " in
+        *" sysbox-runc "*) echo "sysbox-runc" ;;
+        *" runsc "*)       echo "runsc" ;;
+        *)                 echo "" ;;
+    esac
+}
+
+# Wait until the daemon answers 'docker version' from inside its own
+# container. Probing via 'docker exec' needs no published port — and nothing
+# outside the sibling's network namespace can reach 2375 either.
+wait_dind_ready() {
+    local dind="$1" i
+    for i in $(seq 1 60); do
+        container_is_running "$dind" || return 1
+        if docker exec "$dind" docker version > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+# ── nested-container guard ───────────────────────────────────────
+# The daemon container is root on the shared kernel (plain-runc hosts run it
+# --privileged just to make nested containers start at all). The guard closes
+# the paths that let a NESTED container widen past the session — without a
+# kernel exploit:
+#   * --privileged / --cap-add SYS_ADMIN|SYS_PTRACE|... (raw disks, virtiofs
+#     shares, ptrace of dockerd itself)
+#   * --pid/--net/--ipc/--uts=host or container: (namespace joins)
+#   * binds of daemon-internal paths (containerd state, overlayfs, runtime
+#     binaries — the tamper route that defeats any API-only policy)
+# It is installed AS the daemon's runc, so every create lands on it — even
+# '--runtime=runc' — and delegates to the real binary at '$0.real'. The
+# docker CLI swallows runtime stderr, so refusals also go to
+# /var/log/pia-dind-guard.log inside the daemon.
+#
+# The policy script is a REAL file (docker/pia-dind/guard.sh): BAKED into
+# the pia-dind image (which build-docker.sh builds from that folder) and
+# installed as the daemon's runc by the image entrypoint. The host copy is
+# how pia.sh learns the policy version — it derives the daemon image tag
+# and the recreate threshold from it, and never builds. Resolution order:
+#   1. $PIA_DIND_GUARD_FILE  (tests, power users)
+#   2. <pia dir>/../docker/pia-dind/guard.sh   (running from a checkout)
+#   3. ~/.pia/lib/pia-dind/guard.sh            (installed by install-pia.sh)
+pia_script_dir() {
+    local self
+    # BASH_SOURCE[0] is the file the function was DEFINED in — pia.sh — even
+    # when tests source it, where '$0' would point at the test script.
+    self="$(readlink -f -- "${BASH_SOURCE[0]:-$0}" 2>/dev/null)" || self="${BASH_SOURCE[0]:-$0}"
+    dirname -- "$self"
+}
+
+dind_guard_file() {
+    local cand
+    if [ -n "${PIA_DIND_GUARD_FILE:-}" ] && [ -r "$PIA_DIND_GUARD_FILE" ]; then
+        printf '%s\n' "$PIA_DIND_GUARD_FILE"
+        return 0
+    fi
+    for cand in "$(pia_script_dir)/../docker/pia-dind/guard.sh" "$HOME/.pia/lib/pia-dind/guard.sh"; do
+        if [ -r "$cand" ]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The policy version is whatever the guard file declares — single source of
+# truth, so bumping it is a one-line edit in docker/pia-dind/guard.sh.
+dind_guard_version() {
+    local f
+    f="$(dind_guard_file)" || return 1
+    sed -n 's/^# pia-dind-guard GUARD_VERSION=\(.*\)/\1/p' "$f" | head -1
+}
+
+# The daemon image reference: the locally BUILT pia-dind image, tagged with
+# the guard policy version — so changing the guard policy changes the tag,
+# which forces a rebuild and makes old daemons (older tag, older marker)
+# recreate. PIA_DIND_IMAGE overrides the whole reference: pia then uses it
+# verbatim, never builds, and verification is the only gate (fail-closed).
+dind_image_ref() {
+    if [ -n "${PIA_DIND_IMAGE:-}" ]; then
+        printf '%s\n' "$PIA_DIND_IMAGE"
+        return 0
+    fi
+    local v
+    v="$(dind_guard_version)" || return 1
+    [ -n "$v" ] || return 1
+    printf '%s\n' "${DIND_IMAGE_DEFAULT}:guard-v$v"
+}
+
+# Ensure the daemon image exists locally. The CLI NEVER BUILDS: the
+# pia-dind image is produced by scripts/build-docker.sh, in the same pass
+# as the agent image — and that agent image is itself only obtainable
+# there, so a usable CLI already implies both images were built. A missing
+# daemon image is therefore a setup problem, named as such (fail-closed).
+# A user-provided PIA_DIND_IMAGE is the exception: it is a normal (pullable)
+# image reference, so pulling it on demand is expected behavior — and
+# guard verification still gates whatever it points at.
+ensure_dind_image() {
+    local ref
+    ref="$(dind_image_ref)" || {
+        log_error "Cannot determine the guard policy version — is docker/pia-dind/guard.sh installed?"
+        log_error "Reinstall the CLI: bash harnesses/pia/scripts/install-pia.sh"
+        return 1
+    }
+    docker image inspect "$ref" > /dev/null 2>&1 && return 0
+    if [ -n "${PIA_DIND_IMAGE:-}" ]; then
+        log_info "Pulling daemon image '${ref}'..."
+        if ! docker pull "$ref" > /dev/null 2>&1; then
+            log_error "Failed to pull daemon image '${ref}' (override with PIA_DIND_IMAGE)."
+            return 1
+        fi
+        return 0
+    fi
+    log_error "Daemon image '${ref}' not found locally."
+    log_error "Build it (together with the agent image): bash harnesses/pia/scripts/build-docker.sh"
+    return 1
+}
+
+# True when the running daemon may be REVIVED. Two independent checks:
+#   * CONTENT (state): the effective runc still carries the expected guard
+#     marker and jq is present — catches tampering with the container's
+#     writable layer (runc swapped for a non-guard), which provenance alone
+#     would not see, and is the ONLY real gate for a PIA_DIND_IMAGE we did
+#     not build.
+#   * FINGERPRINT (provenance): the daemon was created from the CURRENT
+#     image — docker assigns a new image id on every rebuild, so a stale
+#     daemon is caught EVEN IF the policy version string was not bumped.
+#     This is why the version marker is provenance, not the decision: the
+#     "remember to bump the number" footgun is gone.
+dind_guard_ok() {
+    local v
+    v="$(dind_guard_version)" || return 1
+    [ -n "$v" ] || return 1
+    docker exec "$1" grep -qs "GUARD_VERSION=$v" /usr/local/bin/runc > /dev/null 2>&1 && \
+        docker exec "$1" test -x /usr/bin/jq > /dev/null 2>&1 && \
+        dind_daemon_image_current "$1"
+}
+
+# Fingerprint check for the BUILT image path: container's image id must
+# equal the current 'pia-dind:guard-v<N>' image id. A user-provided
+# PIA_DIND_IMAGE is never rebuilt by us, so id equality says nothing there
+# — the content checks in dind_guard_ok are the gate for it.
+dind_daemon_image_current() {
+    [ -n "${PIA_DIND_IMAGE:-}" ] && return 0
+    local want have
+    want="$(docker image inspect -f '{{.Id}}' "$(dind_image_ref)" 2>/dev/null)" || return 1
+    have="$(docker container inspect -f '{{.Image}}' "$1" 2>/dev/null)" || return 1
+    [ -n "$want" ] && [ "$want" = "$have" ]
+}
+
+# Post-start tamper-proofing of the DAEMON BINARIES the entrypoint could not
+# reach: it runs before dockerd, but the dind machinery downloads containerd
+# during startup, and docker 29 embeds containerd in dockerd — so pin
+# whatever the running processes ACTUALLY executed (readlink /proc/*/exe),
+# plus the usual /usr/local/bin names. The guard files themselves are made
+# immutable by the image entrypoint (they exist before dockerd starts).
+harden_dind_toolchain() {
+    docker exec "$1" sh -c '
+        for d in /proc/[0-9]*; do
+            e=$(readlink "$d/exe" 2>/dev/null) || continue
+            case "$e" in *dockerd*|*containerd*|*docker-proxy*) ;; *) continue ;; esac
+            [ -f "$e" ] || continue
+            chattr +i "$e" 2>/dev/null || true
+        done
+        for t in dockerd containerd containerd-shim-runc-v2 docker-init docker-proxy docker docker-entrypoint.sh; do
+            [ -e "/usr/local/bin/$t" ] && chattr +i "/usr/local/bin/$t" 2>/dev/null || true
+        done
+    ' > /dev/null 2>&1 || true
+}
+
+# Build the 'docker run' arguments for a throwaway daemon, one per line (the
+# same convention as build_docker_args, so the test suite can assert on them
+# without touching Docker). Args: <daemon-name> <agent-name> <workspace>
+# <runtime>.
+#
+# The daemon gets NO host filesystem mounts by default: build contexts stream
+# over TCP from the agent's docker client, so the daemon's MOUNTED view of
+# the host is empty. (Reach is a separate question: with sysbox/gVisor the
+# two coincide; on plain runc the privileged fallback can mount host disks —
+# see the threat model in docs/docker.md.) The one mount exception is
+# 'dind-mount': its third argument is the resolved workspace path — exactly
+# one bind, at the same path the agent sees, and rprivate so mounts created
+# inside nested containers can never propagate back into the host mount
+# namespace.
+dind_create_args() {
+    local dind="$1" agent="$2" workspace="$3" runtime="$4"
+    local label
+
+    echo "--name"
+    echo "$dind"
+    while IFS= read -r label; do echo "$label"; done < <(project_labels "$dind")
+    echo "--label"; echo "pia-role=dind"
+    echo "--label"; echo "pia-parent=${agent}"
+    # The host paths this daemon may see, recorded because binds are frozen
+    # at creation: the revive path compares it with the request and
+    # recreates on a mismatch instead of silently keeping the old view.
+    echo "--label"; echo "pia-dind-mounts=${workspace}"
+
+    if [ -n "$runtime" ]; then
+        echo "--runtime"; echo "$runtime"
+    else
+        # Plain runc host (no sysbox/gVisor) — e.g. Docker Desktop on macOS.
+        # --privileged is not a style choice here, it is the ONLY
+        # configuration in which nested containers start at all (verified on
+        # Docker Desktop, linuxkit 7.0.14/arm64, with docker:29-dind /
+        # runc 1.5.2 and with crun):
+        #   * the outer default seccomp profile answers
+        #     keyctl(KEYCTL_JOIN_SESSION_KEYRING) with EPERM (Docker's
+        #     mitigation for the session-keyring kernel CVEs). Seccomp is
+        #     inherited and can only be tightened, so NO inner flag can
+        #     undo it — every nested 'docker run' dies with 'unable to join
+        #     session keyring' unless the DAEMON container itself escapes
+        #     the profile (privileged = seccomp unconfined).
+        #   * /proc/sys is mounted read-only in an unprivileged container,
+        #     so the nested daemon cannot set up bridge networking (the
+        #     per-interface disable_ipv6 sysctl write fails).
+        # An enumerated-caps fallback was tried first and runs NOTHING on
+        # such hosts, so it is gone; privileged is also the documented
+        # upstream requirement for docker:dind. This is host-kernel root:
+        # a loud warning is printed at startup. It also erases the
+        # filesystem boundary — a nested --privileged -v /dev:/dev
+        # container can mount the host disks outright, and on Docker
+        # Desktop the daemon's CAP_SYS_ADMIN alone can mount the VM's
+        # virtiofs tags (all macOS file-sharing folders, /Users included,
+        # read-write; verified). For a real boundary install sysbox or
+        # gVisor. See the threat model in docs/docker.md.
+        echo "--privileged"
+    fi
+
+    # 'dind-mount': the workspace, at the agent's own path, read-write.
+    if [ -n "$workspace" ]; then
+        echo "-v"
+        echo "${workspace}:${DIND_WS_TARGET}:rprivate"
+    fi
+
+    # Unauthenticated plain TCP inside the shared network namespace only;
+    # the port is never published on the host. Anything in the agent's netns
+    # controls THIS daemon — accepted: the agent owns it, that is the point.
+    # DOCKER_TLS_CERTDIR='' stops the dind image from generating TLS certs
+    # and listening on 2376, and --tls=false is the explicit intent dockerd
+    # demands for an unauthenticated socket (it otherwise slows startup and
+    # deprecation-warns). The in-container client uses the unix socket.
+    # (printf, not echo: 'echo "-e"' would be swallowed as an echo flag)
+    printf '%s\n' "-e"
+    echo "DOCKER_TLS_CERTDIR="
+    # The bind whitelist the image entrypoint writes into the guard's conf:
+    # dind-mount passes the workspace target inside the daemon, plain dind
+    # nothing (Docker plumbing only). Mode is decided here, enforcement is
+    # the guard's.
+    printf '%s\n' "-e"
+    echo "PIA_GUARD_WS=${workspace:+$DIND_WS_TARGET}"
+    echo "$(dind_image_ref)"
+    echo "dockerd"
+    echo "--host=unix:///var/run/docker.sock"
+    # Loopback, not 0.0.0.0. The agent reaches the API
+    # through the SHARED netns (127.0.0.1:2375) and the in-daemon client
+    # uses the unix socket — but nested containers get their own netns, so
+    # they can no longer dial the daemon API directly through the bridge.
+    # (Published-port forwarding still works: docker-proxy dials loopback.)
+    echo "--host=tcp://127.0.0.1:2375"
+    echo "--tls=false"
+}
+
+# Create (or revive) the throwaway daemon sibling of an agent and wait until
+# its API answers. Second argument is the workspace to bind into the daemon
+# ('dind-mount' only; empty = the daemon sees nothing of the host — see
+# dind_create_args). This is the pia CLI's job — the agent must never be
+# able to spawn its own daemon, and the entrypoint only ever waits for one
+# that already exists.
+start_dind_sibling() {
+    local name="$1"
+    local workspace="${2:-}"
+    local dind image runtime existing_ws
+    dind="$(dind_name_for "$name")"
+    if ! image="$(dind_image_ref)"; then
+        log_error "Cannot determine the daemon image — guard policy version unavailable."
+        log_error "Reinstall the CLI: bash harnesses/pia/scripts/install-pia.sh"
+        return 1
+    fi
+
+    if container_exists "$dind"; then
+        if [ "$(docker container inspect -f '{{ index .Config.Labels "pia-role" }}' "$dind" 2>/dev/null)" != "dind" ]; then
+            log_error "Container '${dind}' exists but is not a pia daemon sibling — refusing to touch it."
+            return 1
+        fi
+        existing_ws="$(docker container inspect -f '{{ index .Config.Labels "pia-dind-mounts" }}' "$dind" 2>/dev/null)"
+        if [ "$existing_ws" != "$workspace" ]; then
+            # Reviving would keep the OLD view (binds cannot be changed) —
+            # either leaking a stale host directory or silently ignoring the
+            # workspace the user just asked for. Recreate instead.
+            log_info "Daemon '${dind}' has a different workspace ('${existing_ws:-none}'); recreating it."
+            log_cmd "docker rm -f -v ${dind}"
+            docker rm -f -v "$dind" > /dev/null 2>&1 || true
+        else
+            if ! container_is_running "$dind"; then
+                log_cmd "docker start ${dind}"
+                if ! docker start "$dind" > /dev/null 2>&1; then
+                    log_error "Failed to start daemon container '${dind}'."
+                    return 1
+                fi
+            fi
+            if wait_dind_ready "$dind"; then
+                if dind_guard_ok "$dind"; then
+                    return 0
+                fi
+                # Stale policy (older image), or a tampered/unguarded layer:
+                # never revive it, recreate from the current image.
+                log_info "Daemon '${dind}' is not the current guarded daemon — recreating it."
+                log_cmd "docker rm -f -v ${dind}"
+                docker rm -f -v "$dind" > /dev/null 2>&1 || true
+            else
+                log_error "Daemon '${dind}' is running but its API never answered — see 'docker logs ${dind}'."
+                return 1
+            fi
+        fi
+    fi
+
+    if ! ensure_dind_image; then
+        return 1
+    fi
+
+    runtime="$(detect_dind_runtime)"
+    if [ -n "$runtime" ]; then
+        log_info "Throwaway daemon '${dind}' using runtime '${runtime}'."
+    else
+        log_warn "No sysbox/gVisor runtime found — the throwaway daemon runs PRIVILEGED"
+        log_warn "on plain runc and SHARES THE HOST KERNEL. Nested containers cannot"
+        log_warn "start without privileged there; the nested-container guard (installed"
+        log_warn "with the daemon) refuses privileged/capped escapes, but a kernel or"
+        log_warn "daemon exploit still reaches the host (on Docker Desktop: this VM,"
+        log_warn "and its virtiofs shares if a guard policy gap ever opens). Install"
+        log_warn "sysbox or gVisor for a real boundary, or run untrusted workloads"
+        log_warn "with no --docker at all."
+    fi
+
+    local args=()
+    local a
+    while IFS= read -r a; do args+=("$a"); done < <(dind_create_args "$dind" "$name" "$workspace" "$runtime")
+
+    log_cmd "docker run -d ${args[*]}"
+    if ! docker run -d "${args[@]}" > /dev/null; then
+        log_error "Failed to create daemon container '${dind}'."
+        return 1
+    fi
+
+    if ! wait_dind_ready "$dind"; then
+        log_error "Daemon '${dind}' did not become ready — see 'docker logs ${dind}'."
+        docker stop "$dind" > /dev/null 2>&1 || true
+        docker rm "$dind" > /dev/null 2>&1 || true
+        return 1
+    fi
+    # The image entrypoint already installed the guard and pinned its
+    # files; verify it (a PIA_DIND_IMAGE without the guard must never
+    # serve), then pin the binaries that only exist post-startup.
+    harden_dind_toolchain "$dind"
+    if ! dind_guard_ok "$dind"; then
+        log_error "Daemon '${dind}' does not carry guard v$(dind_guard_version) — refusing to use it."
+        log_error "Image '${image}' is not a built pia-dind image (PIA_DIND_IMAGE override?)."
+        docker stop "$dind" > /dev/null 2>&1 || true
+        docker rm "$dind" > /dev/null 2>&1 || true
+        return 1
+    fi
+    return 0
+}
+
+# Validate the --docker MODE and its workspace argument, resolving the
+# 'dind-mount' workspace into DIND_WS. Called BEFORE any Docker work: a bad
+# mode or a missing '-m' is a usage error and must not be reported as a
+# missing image or a container conflict.
+validate_docker_request() {
+    validate_docker_mode "${DOCKER_MODE:-}" || return 1
+    DIND_WS=""
+    if [ "${DOCKER_MODE:-}" = "dind-mount" ]; then
+        DIND_WS="$(resolve_dind_workspace)" || return 1
+    fi
+    return 0
+}
+
+# Shared --docker setup for run/create/restart: show the matching banner and
+# start the sibling daemon BEFORE the agent (the agent joins its netns).
+# 'socket' needs no daemon at all — the host socket is mounted by
+# build_docker_args instead. Assumes validate_docker_request already ran.
+prepare_dind_daemon() {
+    local name="$1"
+    if [ "${DOCKER_MODE:-}" = "socket" ]; then
+        docker_socket_banner "$name"
+        return 0
+    fi
+    if [ "${DOCKER_MODE:-}" = "dind-mount" ]; then
+        dind_mount_banner "$name" "$DIND_WS"
+    fi
+    if dind_mode_active; then
+        start_dind_sibling "$name" "$DIND_WS" || return 1
+    fi
+    return 0
+}
+
+# List the daemon siblings belonging to an agent: the pia-parent label is
+# authoritative, the name convention is fallback; anything accepted must
+# carry pia-role=dind so a user container that merely LOOKS like a sibling
+# is never touched. (After 'pia rename' the label still points at the old
+# name — the name-convention fallback covers the standard case.)
+dind_siblings_for() {
+    local name="$1"
+    local cand role parent
+    for cand in "$(dind_name_for "$name")" \
+                "$(docker ps -a --filter "label=pia-parent=${name}" --format '{{.Names}}' 2>/dev/null)"; do
+        [ -n "$cand" ] || continue
+        container_exists "$cand" || continue
+        role="$(docker container inspect -f '{{ index .Config.Labels "pia-role" }}' "$cand" 2>/dev/null)"
+        [ "$role" = "dind" ] || continue
+        parent="$(docker container inspect -f '{{ index .Config.Labels "pia-parent" }}' "$cand" 2>/dev/null)"
+        if [ "$parent" = "$name" ] || [ "$cand" = "$(dind_name_for "$name")" ]; then
+            echo "$cand"
+        fi
+    done | sort -u
+}
+
+stop_dind_siblings() {
+    local s
+    for s in $(dind_siblings_for "$1"); do
+        log_cmd "docker stop ${s}"
+        docker stop "$s" > /dev/null 2>&1 || true
+    done
+}
+
+# '-v' also discards the daemon's storage (built images, pulled layers) —
+# nothing in there is worth keeping once the agent is gone.
+remove_dind_siblings() {
+    local s
+    for s in $(dind_siblings_for "$1"); do
+        log_cmd "docker rm -f -v ${s}"
+        docker rm -f -v "$s" > /dev/null 2>&1 || true
+    done
+}
+
+# Bring an agent's daemon back up before (re)attaching a session: the agent
+# shares the daemon's network namespace, so it cannot start while a stopped
+# daemon owns that netns — and its DOCKER_HOST would point at nothing.
+ensure_dind_siblings_started() {
+    local name="$1" s ready
+    for s in $(dind_siblings_for "$name"); do
+        ready=""
+        if ! container_is_running "$s"; then
+            log_info "Starting daemon container '${s}'..."
+            log_cmd "docker start ${s}"
+            docker start "$s" > /dev/null 2>&1 || { log_warn "Failed to start daemon '${s}'."; continue; }
+        fi
+        wait_dind_ready "$s" && ready="yes"
+        if [ -n "$ready" ] && ! dind_guard_ok "$s"; then
+            # Never keep a daemon whose layer predates the current guard
+            # policy — it may already be tampered with. Recreate it with the
+            # workspace recorded on its own label (its images are lost).
+            local ws
+            ws="$(docker container inspect -f '{{ index .Config.Labels "pia-dind-mounts" }}' "$s" 2>/dev/null)"
+            log_warn "Daemon '${s}' lacks the current guard policy — recreating it (images in it are lost)."
+            docker rm -f -v "$s" > /dev/null 2>&1 || true
+            start_dind_sibling "$name" "$ws" || return 1
+            continue
+        fi
+        [ -n "$ready" ] || log_warn "Daemon '${s}' is running but its API is not answering."
+    done
+    # Agent created against a sibling that no longer exists: docker calls
+    # inside would fail with a confusing connection error — say it plainly.
+    if [ -z "$(dind_siblings_for "$name")" ] && \
+       docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null | \
+       grep -q '^DOCKER_HOST=tcp://127\.0\.0\.1:2375$'; then
+        log_warn "Container '${name}' expects a throwaway daemon but has none — docker calls will fail."
+        log_warn "Recreate it with 'pia restart ${name} --docker' (or --docker-dev with a workspace)."
+    fi
+}
+
+# Warn when a RUNNING agent's throwaway daemon is stopped: the guard's kill
+# switch exits the daemon container on purpose, and because the
+# agent shares its netns, the agent's docker access AND its network die
+# with it. Both halves need restarting, in order, until 'pia revive' wraps
+# this.
+warn_dind_dead() {
+    local name="$1" dind why
+    dind="$(dind_name_for "$name")"
+    container_exists "$dind" || return 0
+    container_is_running "$dind" && return 0
+    container_is_running "$name" || return 0
+    why="the daemon was stopped or crashed"
+    if docker cp "${dind}:/var/log/pia-dind-guard.log" - 2>/dev/null | tar -xO 2>/dev/null | \
+        grep -q "killing dockerd"; then
+        why="the guard kill switch fired on a daemon-side mount refusal — BY DESIGN"
+    fi
+    log_warn "Daemon '${dind}' is stopped while the agent runs: nested docker AND the agent's network are dead (${why})."
+    log_warn "Investigate: pia dindlog ${name#pia-}"
+    log_warn "Recover BOTH halves in order: docker start ${dind} && docker restart ${name}  (planned: 'pia revive')."
 }
 
 # Pick 'docker exec' args: real TTY when we have one, plain stdin otherwise.
@@ -730,7 +1378,7 @@ cmd_create() {
     MOUNT_DIR="$(echo "$result" | cut -d'|' -f4)"
     SSH_FLAG="$(echo "$result" | cut -d'|' -f5)"
     DEBUG_FLAG="${DEBUG_FLAG:-$(echo "$result" | cut -d'|' -f6)}"
-    DOCKER_FLAG="$(echo "$result" | cut -d'|' -f7)"
+    DOCKER_MODE="$(echo "$result" | cut -d'|' -f7)"
     OPENROUTER_FLAG="$(echo "$result" | cut -d'|' -f9)"
 
     # Handle help flag
@@ -752,6 +1400,10 @@ cmd_create() {
         log_error "Run '$(basename "$0") create --help' for usage."
         exit 1
     fi
+
+    # Usage-level --docker checks (mode + workspace) come first, before any
+    # container or image is touched.
+    validate_docker_request || exit 1
 
     # Generate name if not provided, otherwise ensure prefix
     if [ -z "$name" ]; then
@@ -778,6 +1430,10 @@ cmd_create() {
         exit 1
     fi
 
+    # --docker modes: validate, warn loudly for 'socket', and bring up the
+    # throwaway daemon BEFORE the agent — the agent joins its netns.
+    prepare_dind_daemon "$name" || exit 1
+
     # Create (without starting)
     resolve_openrouter_key
     log_info "Creating agent container '${name}' from image '${IMAGE_NAME}' (not started)..."
@@ -789,10 +1445,15 @@ cmd_create() {
     local docker_cmd="docker create ${docker_args[*]}"
     log_cmd "$docker_cmd"
     if ! docker create "${docker_args[@]}" > /dev/null; then
+        if dind_mode_active; then remove_dind_siblings "$name"; fi
         log_error "Failed to create container '${name}'."
         log_error "Make sure the image '${IMAGE_NAME}' exists. Run './scripts/build-docker.sh' first."
         exit 1
     fi
+
+    # Both halves stay stopped — a running daemon idling behind a stopped
+    # agent would go unnoticed. 'pia run NAME' / 'pia ask NAME' start it.
+    if dind_mode_active; then stop_dind_siblings "$name"; fi
 
     log_info "Container '${name}' created but not started."
     log_info "Start it later with 'pia run ${name}', or run a prompt with 'pia ask ${name} <PROMPT>'."
@@ -808,7 +1469,7 @@ cmd_run() {
     MOUNT_DIR="$(echo "$result" | cut -d'|' -f4)"
     SSH_FLAG="$(echo "$result" | cut -d'|' -f5)"
     DEBUG_FLAG="${DEBUG_FLAG:-$(echo "$result" | cut -d'|' -f6)}"
-    DOCKER_FLAG="$(echo "$result" | cut -d'|' -f7)"
+    DOCKER_MODE="$(echo "$result" | cut -d'|' -f7)"
     OPENROUTER_FLAG="$(echo "$result" | cut -d'|' -f9)"
 
     # Handle help flag
@@ -831,6 +1492,10 @@ cmd_run() {
         exit 1
     fi
 
+    # Usage-level --docker checks (mode + workspace) come first, before any
+    # container or image is touched.
+    validate_docker_request || exit 1
+
     # Generate name if not provided, otherwise ensure prefix
     if [ -z "$name" ]; then
         name="$(generate_random_name)"
@@ -843,11 +1508,39 @@ cmd_run() {
         if container_is_running "$name"; then
             log_error "Container '${name}' is already running."
             log_error "Use 'pia exec ${name}' to interact, or 'pia restart ${name}' to restart."
+            warn_dind_dead "$name"
             exit 1
         else
             log_info "Container '${name}' exists but is stopped. Starting it..."
-            attach_session "$name"
-            exit $?
+            # --docker is a creation-time option: this container already has
+            # its netns, its DOCKER_HOST and its daemon bind baked in. Warn
+            # only when the request actually contradicts what exists, so the
+            # ordinary 'pia run NAME --docker' on a dind container stays
+            # quiet instead of nagging about a mode that is already in place.
+            if [ -n "${DOCKER_MODE:-}" ]; then
+                local created_dind=""
+                if docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null | \
+                   grep -q '^DOCKER_HOST=tcp://127\.0\.0\.1:2375$'; then
+                    created_dind="yes"
+                fi
+                if { [ -n "$created_dind" ] && ! dind_mode_active; } || \
+                   { [ -z "$created_dind" ] && [ -n "${DOCKER_MODE:-}" ]; }; then
+                    log_warn "Container '${name}' was created with a different --docker mode — it is unchanged."
+                    local mode_flag="--docker"
+                    case "${DOCKER_MODE:-}" in
+                        dind-mount) mode_flag="--docker-dev" ;;
+                        socket)   mode_flag="--docker-full" ;;
+                    esac
+                    log_warn "Recreate it with 'pia restart ${name} ${mode_flag}'."
+                fi
+            fi
+            # A dind-mode agent shares its daemon's netns: the daemon must
+            # be up before 'docker start' of the agent can succeed at all.
+            ensure_dind_siblings_started "$name"
+            local exit_code=0
+            attach_session "$name" || exit_code=$?
+            stop_dind_siblings "$name"
+            exit $exit_code
         fi
     fi
 
@@ -857,6 +1550,10 @@ cmd_run() {
         log_error "Build it first: cd ../docker && ./build-docker.sh"
         exit 1
     fi
+
+    # --docker modes: validate, warn loudly for 'socket', and bring up the
+    # throwaway daemon BEFORE the agent — the agent joins its netns.
+    prepare_dind_daemon "$name" || exit 1
 
     # Build and run
     resolve_openrouter_key
@@ -869,6 +1566,7 @@ cmd_run() {
     local docker_cmd="docker run -d ${docker_args[*]}"
     log_cmd "$docker_cmd"
     if ! docker run -d "${docker_args[@]}" > /dev/null; then
+        if dind_mode_active; then remove_dind_siblings "$name"; fi
         log_error "Failed to create container '${name}'."
         log_error "Make sure the image '${IMAGE_NAME}' exists. Run './scripts/build-docker.sh' first."
         exit 1
@@ -877,6 +1575,10 @@ cmd_run() {
     # Attach an interactive pi session; the container stops with the session.
     local exit_code=0
     start_session "$name" || exit_code=$?
+
+    # Session ended — the agent container is stopped again; take the
+    # throwaway daemon with it (a stray stopped daemon is 'pia clean' bait).
+    stop_dind_siblings "$name"
 
     if [ $exit_code -eq 0 ]; then
         log_info "Container '${name}' started successfully."
@@ -929,6 +1631,10 @@ cmd_stop() {
         log_info "Container '${name}' is already stopped."
     fi
 
+    # An agent never outlives its throwaway daemon (and stopping a daemon
+    # that does not exist is a silent no-op).
+    stop_dind_siblings "$name"
+
     log_info "Container '${name}' stopped."
 }
 
@@ -975,6 +1681,10 @@ cmd_rm() {
     log_info "Removing container '${name}'..."
     log_cmd "docker rm ${name}"
     docker rm "$name" > /dev/null 2>&1 || true
+
+    # No agent left behind to own the daemon — it goes too, storage and all.
+    remove_dind_siblings "$name"
+
     log_info "Container '${name}' removed."
 }
 
@@ -982,16 +1692,24 @@ cmd_rm() {
 # silently ignored, so reject it instead.
 cmd_ls() {
     local extra=""
+    local all=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
-                echo "Usage: $(basename "$0") list"
+                echo "Usage: $(basename "$0") list [OPTIONS]"
                 echo ""
                 echo "Lists every agent container (running and stopped)."
                 echo ""
-                echo "Takes no arguments. For a single container use:"
+                echo "Options:"
+                echo "  -a, --all   Also show the throwaway 'dind' daemon containers"
+                echo "              (plumbing, hidden by default)"
+                echo ""
+                echo "Takes no other arguments. For a single container use:"
                 echo "  docker ps -a --filter name=^pia-<NAME>"
                 exit 0 ;;
+            -a|--all)
+                all="yes"
+                shift ;;
             *)
                 if [ -z "$extra" ]; then
                     extra="$1"
@@ -1014,14 +1732,15 @@ cmd_ls() {
 
     local found=0
 
-    # pia_ps already selects the project; no extra name filtering here
+    # pia_ps already selects the project and hides daemon plumbing; --all
+    # shows the whole pia project including the 'NAME-dind' siblings
     # (tab separators keep Status and CreatedAt fields with spaces intact)
     while IFS=$'\t' read -r id name state created; do
         if [ -z "$id" ]; then continue; fi
 
         found=1
         printf "%-30s %-10s %s\n" "$name" "$state" "$created"
-    done < <(pia_ps)
+    done < <(if [ -n "$all" ]; then pia_ps_all; else pia_ps; fi)
 
     if [ $found -eq 0 ]; then
         echo "(no agent containers found)"
@@ -1041,7 +1760,7 @@ cmd_restart() {
     MOUNT_DIR="$(echo "$result" | cut -d'|' -f4)"
     SSH_FLAG="$(echo "$result" | cut -d'|' -f5)"
     DEBUG_FLAG="${DEBUG_FLAG:-$(echo "$result" | cut -d'|' -f6)}"
-    DOCKER_FLAG="$(echo "$result" | cut -d'|' -f7)"
+    DOCKER_MODE="$(echo "$result" | cut -d'|' -f7)"
     OPENROUTER_FLAG="$(echo "$result" | cut -d'|' -f9)"
 
     # Handle help flag
@@ -1063,6 +1782,9 @@ cmd_restart() {
         log_error "Run '$(basename "$0") restart --help' for usage."
         exit 1
     fi
+
+    # Usage-level --docker checks (mode + workspace) come first.
+    validate_docker_request || exit 1
 
     # Ensure prefix on custom name
     name="$(ensure_prefix "$name")"
@@ -1095,6 +1817,13 @@ cmd_restart() {
     log_cmd "docker rm ${name}"
     docker rm "$name" > /dev/null 2>&1 || true
 
+    # The old daemon goes with the old agent — a restart starts a clean,
+    # empty daemon, never a reused one with the previous session's images.
+    remove_dind_siblings "$name"
+
+    # --docker modes (same order as 'run': daemon first, agent second)
+    prepare_dind_daemon "$name" || exit 1
+
     # Start a fresh container with the same name
     resolve_openrouter_key
     log_info "Starting fresh agent container '${name}' from image '${IMAGE_NAME}'..."
@@ -1106,6 +1835,7 @@ cmd_restart() {
     local docker_cmd="docker run -d ${docker_args[*]}"
     log_cmd "$docker_cmd"
     if ! docker run -d "${docker_args[@]}" > /dev/null; then
+        if dind_mode_active; then remove_dind_siblings "$name"; fi
         log_error "Failed to create container '${name}'."
         log_error "Make sure the image '${IMAGE_NAME}' exists. Run './scripts/build-docker.sh' first."
         exit 1
@@ -1114,6 +1844,9 @@ cmd_restart() {
     # Attach an interactive pi session; the container stops with the session.
     local exit_code=0
     start_session "$name" || exit_code=$?
+
+    # Session ended — daemon stops with the agent (see cmd_run).
+    stop_dind_siblings "$name"
 
     if [ $exit_code -eq 0 ]; then
         log_info "Container '${name}' restarted successfully."
@@ -1166,6 +1899,7 @@ cmd_exec() {
         log_error "Container '${name}' is not running. Start it with 'pia run ${name}'."
         exit 1
     fi
+    warn_dind_dead "$name"
 
     if [ -n "$cmd" ]; then
         log_cmd "docker exec ${name} bash -c \"${cmd}\""
@@ -1182,7 +1916,7 @@ cmd_exec() {
 # and its tshark go on running inside the container after the terminal is gone.
 # The pattern matches ONLY the monitor's own helpers, not the capture: the
 # helper's own signal handler stops the tshark it owns (see
-# docker/monitor-inside.sh), and naming tshark here would also kill a tshark
+# docker/pia/monitor-inside.sh), and naming tshark here would also kill a tshark
 # the agent is running for its own work — or the long-running 'pia-monitor log'
 # destination logger that backs 'pia urls', which must survive every monitor.
 # Stopping a second monitor watching the same container is intended (one
@@ -1270,6 +2004,7 @@ cmd_sh() {
         log_error "Container '${name}' is not running. Start it with 'pia run ${name}'."
         exit 1
     fi
+    warn_dind_dead "$name"
 
     local exec_args
     exec_args="$(exec_tty_args)"
@@ -1281,10 +2016,64 @@ cmd_sh() {
 # Live view of a running agent container: where its network requests go (TLS
 # SNI hostnames, plus full URLs for cleartext HTTP) alongside CPU, memory, pids
 # and net I/O. The sampling itself runs inside the container by the
-# 'pia-monitor' helper (docker/monitor-inside.sh); this command only resolves the
+# 'pia-monitor' helper (docker/pia/monitor-inside.sh); this command only resolves the
 # container and loops. The monitor writes nothing to disk anywhere — docker exec
 # streams the lines straight to this terminal. (The container may still keep a
 # destination log for 'pia urls'; this command neither reads nor writes it.)
+# Show the nested-container guard log of an agent's throwaway daemon. The
+# docker client only ever shows an opaque 'runc did not terminate
+# successfully' — the refusal reason lives in the daemon's guard log.
+cmd_dindlog() {
+    local name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                echo "Usage: $(basename "$0") dindlog [NAME]"
+                echo ""
+                echo "Show the nested-container guard log of an agent's throwaway Docker"
+                echo "daemon — the refusal reasons behind opaque 'runc did not terminate"
+                echo "successfully' errors from nested 'docker run' calls."
+                echo ""
+                echo "A daemon that self-terminated via the guard's kill switch (opts-volume"
+                echo "refusal) shows as not running; recreate it with 'pia restart'."
+                exit 0 ;;
+            *)
+                if [ -z "$name" ]; then
+                    name="$1"
+                fi
+                shift ;;
+        esac
+    done
+
+    name="$(ensure_prefix "$name")"
+
+    if [ -z "$name" ]; then
+        log_error "Please provide a container name."
+        log_error "Run '$(basename "$0") dindlog --help' for usage."
+        exit 1
+    fi
+
+    local dind
+    dind="$(dind_name_for "$name")"
+
+    if ! container_exists "$dind"; then
+        log_error "No throwaway daemon for '${name}' — was it started with --docker?"
+        exit 1
+    fi
+
+    log_cmd "docker exec ${dind} cat /var/log/pia-dind-guard.log"
+    if container_is_running "$dind"; then
+        docker exec "$dind" cat /var/log/pia-dind-guard.log 2>/dev/null \
+            || echo "(guard log is empty — no refusals yet)"
+    else
+        # Exited daemons (e.g. guard kill switch): read the log out of the
+        # container layer without starting anything.
+        docker cp "${dind}:/var/log/pia-dind-guard.log" - 2>/dev/null | tar -xO 2>/dev/null \
+            || echo "(guard log is empty or unreadable — daemon is stopped)"
+    fi
+}
+
 cmd_monitor() {
     local name="" interval="" mode="cycle"
 
@@ -1375,6 +2164,9 @@ cmd_monitor() {
         exit 1
     fi
 
+    # NOTE: no warn_dind_dead here on purpose — the monitor's docker calls
+    # are covered by stateful mock tests (test-commands.sh), and a stranded
+    # session surfaces the warning via 'pia exec'/'pia ask' instead.
     # Images built before the monitor existed have no helper inside. The check
     # goes through 'sh -c' because 'command' is a shell builtin — docker exec
     # would otherwise look for an executable file literally named 'command'.
@@ -1436,7 +2228,7 @@ cmd_monitor() {
 
 # Every destination (TLS SNI hostnames) and cleartext HTTP URL the container
 # has called since it was created. The container's entrypoint starts
-# 'pia-monitor log' (docker/monitor-inside.sh) on every container start, which
+# 'pia-monitor log' (docker/pia/monitor-inside.sh) on every container start, which
 # appends each request to a log on the container's own filesystem — so the
 # history survives 'pia stop'/'pia run' cycles and is lost only with
 # 'pia remove'. This command only resolves the container and asks the helper
@@ -1504,6 +2296,7 @@ cmd_urls() {
         log_error "Container '${name}' is not running. Start it with 'pia run ${name}'."
         exit 1
     fi
+    warn_dind_dead "$name"
 
     # Images built before the monitor existed have no helper inside; images
     # built before the URL logger exist do have it, and the helper itself
@@ -1531,17 +2324,23 @@ cmd_urls() {
 cmd_ask() {
     local name=""
     local prompt_parts=()
+    local ask_docker_mode=""
+    local ask_mount=""
 
-    # build_docker_args reads these globals; 'ask' takes no mount/ssh/docker/openrouter flags
+    # build_docker_args reads these globals; 'ask' takes no ssh/openrouter
+    # flags and no '-m' except for an ephemeral '--docker-dev' session.
+    # --docker IS accepted, but only with the SAFE modes: '--docker-full' is
+    # refused below — an unattended session must never hold a host-root-equivalent
+    # credential nobody is watching.
     MOUNT_DIR=""
     SSH_FLAG=""
-    DOCKER_FLAG=""
+    DOCKER_MODE=""
     OPENROUTER_FLAG=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
-                echo "Usage: $(basename "$0") ask [NAME] [PROMPT...]"
+                echo "Usage: $(basename "$0") ask [NAME] [OPTIONS] [PROMPT...]"
                 echo ""
                 echo "Run a one-shot non-interactive pi prompt (pi --print)."
                 echo ""
@@ -1550,7 +2349,41 @@ cmd_ask() {
                 echo "With NAME the prompt runs inside that container; if it is"
                 echo "stopped it is started and stopped again afterwards."
                 echo "Without NAME an ephemeral container is created and removed."
+                echo ""
+                echo "Options:"
+                echo "  --docker        Run the prompt against a throwaway sibling"
+                echo "                  Docker daemon (same isolation as 'pia run --docker')"
+                echo "  --docker-dev    ... and (ephemeral asks only) let that daemon"
+                echo "                  see the '-m' workspace, so nested bind mounts work"
+                echo "  -m, --mount <dir>  Workspace for an ephemeral '--docker-dev'"
+                echo "                  ask; a named container already has its own"
+                echo "  --docker-full REFUSED: unattended sessions never get the"
+                echo "                  host Docker socket (host-root-equivalent)"
                 exit 0 ;;
+            --docker)
+                ask_docker_mode="dind"
+                shift ;;
+            --docker=*)
+                # The old '--docker=MODE' syntax. Refuse loudly instead of
+                # letting it slip into the prompt as harmless-looking text.
+                log_error "Option '--docker=…' no longer exists: use '--docker', '--docker-dev' or '--docker-full'."
+                exit 1 ;;
+            --docker-dev)
+                ask_docker_mode="dind-mount"
+                shift ;;
+            --docker-full)
+                log_error "Refusing '--docker-full' for 'pia ask': an unattended"
+                log_error "session with the host Docker socket is host-root-equivalent"
+                log_error "and nobody is watching it. Use '--docker' (throwaway"
+                log_error "daemon), or 'pia run' for an interactive socket session."
+                exit 1 ;;
+            -m|--mount)
+                if [ $# -lt 2 ]; then
+                    log_error "Option '$1' requires a value."
+                    exit 1
+                fi
+                ask_mount="$2"
+                shift 2 ;;
             *)
                 if [ -z "$name" ]; then
                     name="$1"
@@ -1575,6 +2408,11 @@ cmd_ask() {
     fi
     local prompt="${prompt_parts[*]}"
 
+    # --docker for unattended starts: the safe modes only (socket was refused
+    # during parsing; anything else fails in validate_docker_mode).
+    DOCKER_MODE="$ask_docker_mode"
+    validate_docker_mode "$DOCKER_MODE" || exit 1
+
     local ephemeral=""
     if [ -z "$name" ]; then
         name="$(generate_random_name)"
@@ -1586,6 +2424,27 @@ cmd_ask() {
     if [ -z "$ephemeral" ] && ! container_exists "$name"; then
         log_error "Container '${name}' does not exist."
         log_error "Use 'pia run ${name}' first, or omit NAME for a one-shot container."
+        exit 1
+    fi
+
+    # 'dind-mount' is allowed for an unattended ask (unlike 'socket'): the
+    # session writes only into a directory the user explicitly handed it.
+    # An ephemeral ask needs that '-m'; a NAMED container's workspace — and
+    # its daemon's bind — were fixed when it was created, so accepting -m
+    # there would silently do nothing.
+    DIND_WS=""
+    if [ "${DOCKER_MODE:-}" = "dind-mount" ]; then
+        if [ -n "$ephemeral" ]; then
+            MOUNT_DIR="$ask_mount"
+            DIND_WS="$(resolve_dind_workspace)" || exit 1
+            dind_mount_banner "$name" "$DIND_WS"
+        elif [ -n "$ask_mount" ]; then
+            log_error "Container '${name}' already has its own workspace — '-m' would be ignored."
+            log_error "Recreate it instead: 'pia restart <NAME> -m <dir> --docker-dev'."
+            exit 1
+        fi
+    elif [ -n "$ask_mount" ]; then
+        log_error "Option '-m' is only accepted with '--docker-dev'."
         exit 1
     fi
 
@@ -1601,12 +2460,16 @@ cmd_ask() {
         # No resolve_openrouter_key here: OPENROUTER_FLAG is forced empty
         # above, so 'ask' never forwards a key (see README).
         log_info "Creating one-shot container '${name}'..."
+        if dind_mode_active; then
+            start_dind_sibling "$name" "$DIND_WS" || exit 1
+        fi
         local docker_args=()
         while IFS= read -r arg; do
             docker_args+=("$arg")
         done < <(build_docker_args "$name")
         log_cmd "docker run -d ${docker_args[*]}"
         if ! docker run -d "${docker_args[@]}" > /dev/null; then
+            if dind_mode_active; then remove_dind_siblings "$name"; fi
             log_error "Failed to create container '${name}'."
             exit 1
         fi
@@ -1619,6 +2482,12 @@ cmd_ask() {
             exit 1
         fi
         started_by_us="yes"
+    fi
+
+    # A dind-mode agent needs its daemon up before any docker call inside
+    # works (and before 'docker start' of a netns-sharing agent at all).
+    if dind_mode_active; then
+        ensure_dind_siblings_started "$name"
     fi
 
     # Pin to the container ID so a rename during the run cannot orphan the
@@ -1638,11 +2507,12 @@ cmd_ask() {
     # running. Without a signal, cleanup still runs below after the exec.
     local ask_cleanup="true"
     if [ -n "$ephemeral" ]; then
-        ask_cleanup="docker rm -f '$id' > /dev/null 2>&1"
+        ask_cleanup="docker rm -f '$id' > /dev/null 2>&1; remove_dind_siblings '$name'"
     elif [ -n "$started_by_us" ]; then
-        ask_cleanup="docker stop '$id' > /dev/null 2>&1"
+        ask_cleanup="docker stop '$id' > /dev/null 2>&1; stop_dind_siblings '$name'"
     fi
 
+    warn_dind_dead "$name"
     log_cmd "docker exec ${name} pi --print <prompt>"
     local rc=0
     trap_session_signals "$ask_cleanup"
@@ -1652,9 +2522,11 @@ cmd_ask() {
     if [ -n "$ephemeral" ]; then
         log_cmd "docker rm -f ${name}"
         docker rm -f "$id" > /dev/null 2>&1
+        remove_dind_siblings "$name"
     elif [ -n "$started_by_us" ] && container_is_running "$id"; then
         log_cmd "docker stop ${name}"
         docker stop "$id" > /dev/null 2>&1
+        stop_dind_siblings "$name"
     fi
 
     exit $rc
@@ -1704,6 +2576,29 @@ cmd_clean() {
         docker rm "$name" > /dev/null 2>&1 || true
         count=$((count + 1))
     done < <(pia_ps --filter "status=exited" | cut -f2)
+
+    # Throwaway daemon siblings: a stopped daemon is normally a stray (an
+    # agent that ended without teardown, or one that was removed outside
+    # pia). Never touch a daemon whose agent is still running — that agent
+    # still talks to it ('clean' must never kill a live agent's
+    # daemon). Kept containers stay protected like everywhere else.
+    local parent
+    while IFS=$'\t' read -r id name state created; do
+        if [ -z "$id" ]; then continue; fi
+        if [[ "$name" == ${KEEP_PREFIX}* ]]; then
+            log_info "Skipping protected container '${name}'."
+            continue
+        fi
+        parent="$(docker container inspect -f '{{ index .Config.Labels "pia-parent" }}' "$name" 2>/dev/null)"
+        if [ -n "$parent" ] && container_is_running "$parent"; then
+            log_info "Skipping daemon '${name}' — its agent '${parent}' is still running."
+            continue
+        fi
+        log_info "Removing stopped daemon container '${name}'..."
+        log_cmd "docker rm -f -v ${name}"
+        docker rm -f -v "$name" > /dev/null 2>&1 || true
+        count=$((count + 1))
+    done < <(pia_ps_all --filter "status=exited" --filter "label=pia-role=dind")
 
     if [ $count -eq 0 ]; then
         log_info "No stopped agent containers to remove."
@@ -1908,12 +2803,18 @@ cmd_resume() {
 
     if container_is_running "$name"; then
         log_info "Container '${name}' is already running."
+        warn_dind_dead "$name"
         exit 0
     fi
 
     log_info "Starting stopped container '${name}'..."
-    attach_session "$name"
-    exit $?
+    # If this agent owns a throwaway daemon it must come back first — the
+    # agent shares the daemon's netns and cannot start without it.
+    ensure_dind_siblings_started "$name"
+    local rc=0
+    attach_session "$name" || rc=$?
+    stop_dind_siblings "$name"
+    exit $rc
 }
 
 
@@ -1982,6 +2883,8 @@ case "$COMMAND" in
         cmd_sh "$@" ;;
     monitor)
         cmd_monitor "$@" ;;
+    dindlog)
+        cmd_dindlog "$@" ;;
     urls)
         cmd_urls "$@" ;;
     keep)

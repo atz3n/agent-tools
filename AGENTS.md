@@ -99,7 +99,10 @@ agent-tools/
 ├── harnesses/                     # Isolated agent runtimes (harnesses)
 │   └── pia/                       # Pi agent container setup and `pia` CLI
 │       ├── configs/               # models.json, settings.json, cli.config.json
-│       ├── docker/                # Dockerfile, entrypoint.sh, monitor-inside.sh (pia-monitor)
+│       ├── docker/                # image build inputs, one folder per image
+│       │   ├── pia/               #   agent image: Dockerfile, entrypoint.sh, monitor-inside.sh
+│       │   └── pia-dind/          #   daemon image: Dockerfile (FROM docker:29-dind), entrypoint.sh, guard.sh
+│       ├── docs/                  # docker.md — how pia uses Docker (modes, guard, threat model)
 │       └── scripts/               # build-docker.sh, install-pia.sh, pia.sh, run-tests.sh
 ├── LICENSE
 ├── .gitignore
@@ -322,7 +325,7 @@ The `pia` CLI lets you run multiple Pi agent containers in parallel, each with i
 | `pia create [NAME] [OPTIONS]` | Create a stopped container without starting it (same options as `pia run`; for later use with `pia ask`) |
 | `pia run -m /path` | Start with `/path` mounted into `/workspace` |
 | `pia run --ssh` | Start with host SSH agent socket mounted |
-| `pia run --docker` | Start with host Docker socket mounted (opt-in Docker CLI access) |
+| `pia run --docker` | Start with a private throwaway sibling Docker daemon (`NAME-dind`, no host socket/mounts; sysbox/gVisor runtime auto-detected, privileged fallback on plain runc). The daemon runs the built `pia-dind:guard-v<N>` image (FROM digest-pinned `docker:29-dind`) with a nested-container guard (`pia-dind-guard`, baked in and installed as its runc) refusing privileged/capped/container-internal-bind workloads. `--docker-dev` additionally mounts the `-m` workspace into that daemon at the same path, so nested bind mounts and compose configs resolve (one directory only). `--docker-full` mounts the raw host socket instead — host-root-equivalent, loud banner, refused by `pia ask` |
 | `pia run -o` / `--openrouter` | Forward the host OpenRouter API key into the container (opt-in; resolved from `OPENROUTER_API_KEY`, `$PIA_OPENROUTER_KEY_FILE`, or `~/.pia/secrets/openrouter-key.txt`) |
 | `pia stop [NAME]` | Stop a named container |
 | `pia remove [NAME]` / `pia rm [NAME]` | Stop and remove a named container |
@@ -338,6 +341,7 @@ The `pia` CLI lets you run multiple Pi agent containers in parallel, each with i
 | `pia sh [NAME]` / `pia shell [NAME]` | Open an interactive bash shell in a running container (omit NAME if only one runs) |
 | `pia monitor [NAME]` | Live view of the container's request destinations (TLS SNI / cleartext HTTP URLs) plus CPU, memory and net I/O — terminal only, the monitor itself logs nothing (`--raw` streams destinations only) |
 | `pia urls [NAME]` | Every destination/URL the container has called since its creation, with counts — the entrypoint keeps a `tshark` request log (`/var/log/pia-urls.log`) for the container's whole life; `--all` prints every logged request |
+| `pia dindlog [NAME]` | Nested-container guard refusals of the agent's throwaway Docker daemon — the reasons behind opaque `runc did not terminate successfully` errors; works even after a guard kill-switch exit (reads the log from the container layer) |
 
 Containers are grouped under the `pia` project by plain `docker --label` stamping (`com.docker.compose.project=pia`, plus a per-container `config-hash` that project views require) — compose is never called and no compose file is used, so `docker ps --filter label=com.docker.compose.project=pia` and Docker Desktop show all agent instances as one project. Containers are named with the `pia-` prefix. If no `NAME` is provided, a random name is generated (e.g., `pia-k3m9x2p1`). Install the CLI globally with `bash harnesses/pia/scripts/install-pia.sh`. The test suite supports filtering to specific commands via `bash harnesses/pia/scripts/run-tests.sh run stop` to skip slow Docker-based tests.
 

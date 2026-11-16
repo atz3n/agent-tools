@@ -195,6 +195,7 @@ source "$SCRIPT_DIR/tests/test-commands.sh"
 source "$SCRIPT_DIR/tests/test-functions.sh"
 source "$SCRIPT_DIR/tests/test-debug-flag.sh"
 source "$SCRIPT_DIR/tests/test-session-trap.sh"
+source "$SCRIPT_DIR/tests/test-docker-modes.sh"
 
 # ─── Summary ─────────────────────────────────────────────────────────
 

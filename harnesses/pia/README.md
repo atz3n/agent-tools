@@ -10,6 +10,12 @@ Containerized [Pi Coding Agent](https://pi.dev) for isolated, interactive operat
 bash scripts/build-docker.sh
 ```
 
+Builds both images: the agent image (`pia`) and the nested-daemon image
+(`pia-dind:guard-v<N>`, built from `docker/pia-dind/` on top of the
+upstream `docker:29-dind` — it carries the nested-container guard and its
+jq parser). This is the only place either image is built; the `pia` CLI
+never builds, it requires both to exist.
+
 To force a completely fresh build that ignores all cached Docker layers, pass
 `--force` (alias `--no-cache`):
 
@@ -28,7 +34,8 @@ The `pia` CLI lets you run multiple pi-agent containers in parallel, each with i
 | `pia run [NAME]` | Start a new agent container (auto-names if omitted) |
 | `pia run -m /path` | Start with `/path` mounted into `/workspace` |
 | `pia run --ssh` | Start with host SSH agent socket mounted |
-| `pia run --docker` | Start with host Docker socket mounted (opt-in) |
+| `pia run --docker` | Start with a throwaway sibling Docker daemon (opt-in; no host socket) |
+| `pia run --docker-full` | Start with the HOST Docker socket mounted (host-root-equivalent!) |
 | `pia run myproj -m . --ssh` | Start with name, mount, and SSH |
 | `pia create [NAME] [OPTIONS]` | Create a stopped container without starting it (same options as `pia run`) |
 | `pia stop [NAME]` | Stop a named container |
@@ -42,6 +49,7 @@ The `pia` CLI lets you run multiple pi-agent containers in parallel, each with i
 | `pia sh [NAME]` / `pia shell [NAME]` | Open an interactive bash shell in a running container (NAME may be omitted if only one is running) |
 | `pia monitor [NAME]` | Live view of where the container's requests go, plus CPU/memory/net (terminal only, the monitor itself logs nothing) |
 | `pia urls [NAME]` | Every destination/URL the container has called **since it was created** (aggregated; `--all` for every request) |
+| `pia dindlog [NAME]` | Nested-container guard refusals of the agent's throwaway Docker daemon (works even after a kill-switch exit) |
 | `pia keep [NAME] [SUFFIX]` | Protect a container from `pia clean` (renames it to `pia-keep-*`) |
 | `pia unkeep [NAME]` | Remove the keep protection (renames it back to `pia-*`) |
 | `pia rename [NAME] [NEW]` | Rename a container (running or stopped) |
@@ -99,8 +107,12 @@ pia run backend-api
 # Start with mount and SSH
 pia run myproj -m /path/to/project --ssh
 
-# Start with Docker access (build/run/test images from inside the agent)
+# Start with Docker access (build/run/test images from inside the agent) —
+# a private, throwaway daemon per session; the host socket stays invisible.
+# '--docker-dev' also mounts the workspace into that daemon, so bind
+# mounts and compose configs resolve (see the Docker Access section).
 pia run myproj -m /path/to/project --docker
+pia run myproj -m /path/to/project --docker-dev
 
 # Create a stopped container now (name + mount set up), use it later with 'pia ask'
 pia create myproj -m /path/to/project
@@ -155,7 +167,9 @@ pia rename old-name new-name
 |--------|-------------|
 | `-m, --mount <dir>` | Mount the specified directory into `/workspace` |
 | `-s, --ssh` | Mount the host SSH agent socket into the container |
-| `--docker` | Mount the host Docker socket into the container (opt-in, see below) |
+| `--docker` | Throwaway sibling Docker daemon per session (safe default, see below). Grants the agent root over the session — use it for your own code only |
+| `--docker-dev` | `--docker` plus the `-m` workspace mounted into the daemon at the same path (requires `-m`) |
+| `--docker-full` | Mount the raw **host** Docker socket — host-root-equivalent by design (loud banner, refused by `pia ask`) |
 | `-h, --help` | Display help message |
 
 Monitor options (`pia monitor`):
@@ -179,7 +193,7 @@ URL-history options (`pia urls`):
 - `pia create` accepts the same options as `pia run` (`-m`, `--ssh`, `--docker`) but only creates the container and leaves it stopped; it fails if a container with that name already exists. Start it later with `pia run <NAME>` or run a one-shot prompt with `pia ask <NAME> <prompt>` (which starts the container, runs the prompt, and stops it again)
 - `pia resume` / `pia rs` start the most recently stopped container (by stop time, not creation time) and attach pi with `--continue`, so you land directly in the last session instead of reopening it; `pia run <NAME>` on a stopped container does the same for that container
 - `pia resume` selects the container itself and **takes no name** — `pia rs myproj` is rejected with a hint to use `pia run myproj`, rather than silently resuming a different session
-- `pia list` and `pia clean` **take no arguments** — an argument is rejected instead of ignored, so `pia clean --help` prints usage rather than removing containers
+- `pia list` takes no arguments except `-a`/`--all` (which also shows the throwaway `NAME-dind` daemon containers, hidden by default); `pia clean` **takes no arguments** — an argument is rejected rather than ignored, so `pia clean --help` prints usage instead of removing containers
 - `pia ask` runs `pi --print` through `docker exec` (no TTY needed); in a named container the exchange is saved as a session you can later open with `pia rs`
 - `pia sh` (alias `pia shell`) opens `/bin/bash` in a *running* container for manual work; it uses a real TTY when you have one, and when `NAME` is omitted it picks the only running agent container (otherwise it asks for a name)
 - `pia monitor` reads the same "only running container" fallback as `pia sh`; it ends by itself if the container goes away, and it stops the capture inside the container when it ends — by Ctrl-C or otherwise (the URL logger that backs `pia urls` is deliberately *not* stopped — it runs for the container's whole life)
@@ -190,6 +204,7 @@ URL-history options (`pia urls`):
 - Sessions are stored inside the container — deleting the container deletes the session
 - `pia` forwards the OpenRouter key into containers **only when you pass `--openrouter` (`-o`)** — by default containers start with no credentials, even when a key is available on the host (see [Inference via OpenRouter](#inference-via-openrouter))
 - Options can be placed before or after the name (e.g., `pia run -m /path myproj` or `pia run myproj -m /path`)
+- `--docker-dev` is `--docker` plus exactly one bind: it **requires** `-m`, mounts that directory into the *daemon* at the same path so nested bind mounts resolve, and recreates the daemon when the workspace changes. `pia ask` accepts it only for ephemeral sessions (see [docs/docker.md](docs/docker.md))
 - Containers are labelled with the `pia` project (see [Container Project](#container-project)); `pia list`, `pia clean`, and `pia rs` match them by the `pia-` name prefix or by that label
 
 ## Watching a Container (`pia monitor`)
@@ -216,7 +231,7 @@ Each sample prints the destinations seen in that interval, then one resource lin
 ```
 
 How it works: `docker exec` runs `pia-monitor` inside the container (from
-`docker/monitor-inside.sh`), which captures with `tshark` on the container's own
+`docker/pia/monitor-inside.sh`), which captures with `tshark` on the container's own
 interface and reads CPU/memory/pids from the container's cgroup files plus
 `/proc/net/dev`. Repeated hits to the same destination within an interval collapse
 to a single line with an `xN` counter. Stop with `Ctrl-C`.
@@ -410,40 +425,52 @@ Alternatives, and caveats:
 
 ## Docker Access (`--docker`)
 
-The pia image ships the **Docker CLI and the Docker Compose plugin** (no daemon), so
-`docker compose` is available inside the container. With `pia run --docker`, the
-host Docker socket is mounted into the container, so the agent can build, run, and
-test images against the **host daemon** (the "docker-out-of-docker" / socket-passthrough
-pattern).
+The pia image ships the **Docker CLI and the Docker Compose plugin** (no daemon).
+`pia run --docker` gives the agent a **private, throwaway Docker daemon** so it can
+build, run and test images — **without ever seeing the host Docker socket**.
+
+Full reference — architecture diagrams, plumbing, the nested-container guard,
+`--docker-dev`, per-host threat model, configuration and troubleshooting:
+**[docs/docker.md](docs/docker.md)**.
+
+### Trust ladder (modes)
+
+| Mode | What it is | Threat model it survives |
+|------|-----------|--------------------------|
+| no `--docker` | no Docker at all | hostile workload, fully contained |
+| `--docker` | sibling throwaway daemon `NAME-dind`, one per session, with a nested-container guard | your own builds: credential isolation, and **with sysbox/gVisor** filesystem isolation too. On plain runc (Docker Desktop!) the daemon is privileged and the guard blocks the no-exploit escapes — hostile input still needs kernel/daemon CVEs, so keep it to trusted code |
+| `--docker-dev` | same daemon, **plus** the `-m` workspace mounted into it at the same path | your own dev stacks: adds exactly one bind (the workspace); the runtime caveats of `--docker` apply unchanged |
+| `--docker-full` | the raw **host** socket mounted | **nothing — host root by design** |
+
+Decision rule: the danger of the input and the strength of the boundary move
+together. `--docker-full` sits *below* "no `--docker`"; when in doubt, take
+the lower mode. In short:
+
+- `--docker` hands the agent **root inside the session** — the private
+  daemon answers over TCP in a shared network namespace; the host socket
+  stays invisible and the daemon has no host mounts.
+- Every dind daemon runs the **guard**, baked into the
+  `pia-dind:guard-v<N>` image and installed by its entrypoint as the
+  daemon's own `runc` (spec parsing via jq, fail-closed): refuses
+  `--privileged`, dangerous `--cap-add`s, host namespace joins,
+  daemon-internal bind mounts and symlink/TOCTOU bind tricks — the routes
+  that would otherwise need no exploit to reach host disks or, on Docker
+  Desktop, the macOS file-sharing folders.
+- **sysbox or gVisor on the host → real boundary** (unprivileged daemon);
+  plain runc (Docker Desktop included) → guard + privileged daemon, i.e.
+  hostile input now needs a kernel/daemon CVE — untrusted code belongs in a
+  session with **no `--docker`** there.
+- `--docker-dev` is `--docker` plus exactly one bind: it **requires**
+  `-m`, mounts that directory into the *daemon* at the same path so nested
+  bind mounts and compose configs resolve, and recreates the daemon when the
+  workspace changes. `pia ask` accepts it only for ephemeral sessions.
 
 ```bash
-pia run myproj -m /path/to/project --docker
-# inside the container:
-docker build -t myimage /workspace       # build context is streamed — works
-docker push myimage                      # registry ops — fine
-docker run --rm myimage pytest           # fine (no bind mounts)
-docker compose -f docker-compose.yml up -d   # subject to the bind-mount caveat below
+pia run myproj -m /path/to/project --docker            # named volumes only
+pia run myproj -m /path/to/project --docker-dev   # bind mounts resolve
+docker exec pia-myproj-dind cat /var/log/pia-dind-guard.log   # guard refusals
 ```
 
-### What works / what to watch
-
-- **Works**: `docker build` (the CLI tars and streams the context, so container paths
-  like `/workspace` are fine), `pull`, `push`, `save`, `load`, `cp`, `run` without bind
-  mounts, and a build cache shared with the host.
-- **Bind mounts are resolved by the host daemon**, not by pia: `-v /workspace/data:/data`
-  fails because `/workspace` only exists inside the container. To share data with
-  sibling containers use named volumes (`-v mydata:/data`, moved in/out with
-  `docker cp` if needed) or bake fixtures into the image.
-- **Sibling containers**, not children: they don't see pia's network namespace — reach
-  them via a user-defined network or container IP, not `localhost`.
-- **Docker Compose** (the `docker compose` plugin, shipped in the image) talks to
-  the same host daemon, so the bind-mount and networking caveats above apply to compose
-  files too: relative `volumes:` in a compose file inside the container resolve to paths
-  the host daemon cannot see. Use named volumes instead.
-- **Security**: access to the Docker socket is root-equivalent on the host. That is why
-  this is strictly opt-in and not enabled by `pia run` defaults.
-- **Rootless Docker on the host**: point at a different socket with
-  `DOCKER_SOCKET=~/.docker/run/docker.sock pia run myproj --docker`.
 
 ## Make Scripts Globally Accessible
 

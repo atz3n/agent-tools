@@ -287,33 +287,33 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Test DOCKER_FLAG (field 7) is set with --docker
+# Test DOCKER_MODE (field 7) is set with --docker — shorthand for 'dind'
 result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options --docker my-container)
-if [ "$(echo "$result" | cut -d'|' -f7)" = "yes" ]; then
+if [ "$(echo "$result" | cut -d'|' -f7)" = "dind" ]; then
     TOTAL=$((TOTAL + 1))
-    echo -e "  ${GREEN}PASS${NC}: extract_name_and_options sets DOCKER_FLAG field (field 7) with --docker"
+    echo -e "  ${GREEN}PASS${NC}: extract_name_and_options sets DOCKER_MODE field (field 7) to 'dind' with --docker"
     PASS=$((PASS + 1))
 else
     TOTAL=$((TOTAL + 1))
-    echo -e "  ${RED}FAIL${NC}: extract_name_and_options DOCKER_FLAG field wrong (got '$(echo "$result" | cut -d'|' -f7)')"
+    echo -e "  ${RED}FAIL${NC}: extract_name_and_options DOCKER_MODE field wrong (got '$(echo "$result" | cut -d'|' -f7)')"
     FAIL=$((FAIL + 1))
 fi
 
-# Test DOCKER_FLAG is empty when no --docker flag
+# Test DOCKER_MODE is empty when no --docker flag
 result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options my-container)
 if [ "$(echo "$result" | cut -d'|' -f7)" = "" ]; then
     TOTAL=$((TOTAL + 1))
-    echo -e "  ${GREEN}PASS${NC}: extract_name_and_options DOCKER_FLAG is empty without --docker"
+    echo -e "  ${GREEN}PASS${NC}: extract_name_and_options DOCKER_MODE is empty without --docker"
     PASS=$((PASS + 1))
 else
     TOTAL=$((TOTAL + 1))
-    echo -e "  ${RED}FAIL${NC}: extract_name_and_options DOCKER_FLAG should be empty (got '$(echo "$result" | cut -d'|' -f7)')"
+    echo -e "  ${RED}FAIL${NC}: extract_name_and_options DOCKER_MODE should be empty (got '$(echo "$result" | cut -d'|' -f7)')"
     FAIL=$((FAIL + 1))
 fi
 
 # Test --docker combined with -m and --ssh
 result=$(MOUNT_DIR="" SSH_FLAG="" extract_name_and_options -m /tmp my-container --ssh --docker)
-if [ "$(extract_name_only "$result")" = "my-container" ] && [ "$(echo "$result" | cut -d'|' -f4)" = "/tmp" ] && [ "$(echo "$result" | cut -d'|' -f5)" = "yes" ] && [ "$(echo "$result" | cut -d'|' -f7)" = "yes" ]; then
+if [ "$(extract_name_only "$result")" = "my-container" ] && [ "$(echo "$result" | cut -d'|' -f4)" = "/tmp" ] && [ "$(echo "$result" | cut -d'|' -f5)" = "yes" ] && [ "$(echo "$result" | cut -d'|' -f7)" = "dind" ]; then
     TOTAL=$((TOTAL + 1))
     echo -e "  ${GREEN}PASS${NC}: extract_name_and_options handles --docker with -m and --ssh"
     PASS=$((PASS + 1))
@@ -824,10 +824,11 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# --- Docker socket tests (opt-in --docker) ---
+# --- Docker socket tests ('--docker-full' — the 'socket' mode — only; plain --docker is
+# dind and must NEVER mount a socket; see the docker-mode section) ---
 
 # Test Docker socket is NOT included without --docker flag
-MOUNT_DIR="" SSH_FLAG="" DOCKER_FLAG=""
+MOUNT_DIR="" SSH_FLAG="" DOCKER_MODE=""
 result=$(DOCKER_SOCKET="/nonexistent/docker.sock" build_docker_args "test-container" 2>/dev/null)
 if ! echo "$result" | grep -qF "docker.sock"; then
     TOTAL=$((TOTAL + 1))
@@ -839,14 +840,14 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Test Docker socket is included when --docker is set and socket exists
+# Test Docker socket is included in socket mode when the socket exists
 DOCKER_SOCK="/tmp/test-docker-sock-$$"
 if start_test_socket "$DOCKER_SOCK"; then
-    MOUNT_DIR="" SSH_FLAG="" DOCKER_FLAG="yes"
+    MOUNT_DIR="" SSH_FLAG="" DOCKER_MODE="socket"
     result=$(DOCKER_SOCKET="$DOCKER_SOCK" build_docker_args "test-container" 2>/dev/null)
     if echo "$result" | grep -qF "$DOCKER_SOCK:/var/run/docker.sock"; then
         TOTAL=$((TOTAL + 1))
-        echo -e "  ${GREEN}PASS${NC}: build_docker_args includes Docker socket with --docker"
+        echo -e "  ${GREEN}PASS${NC}: build_docker_args includes Docker socket in socket mode"
         PASS=$((PASS + 1))
     else
         TOTAL=$((TOTAL + 1))
@@ -860,8 +861,8 @@ else
     PASS=$((PASS + 1))
 fi
 
-# Test warning when --docker is set but socket does not exist
-MOUNT_DIR="" SSH_FLAG="" DOCKER_FLAG="yes"
+# Test warning in socket mode when the socket does not exist
+MOUNT_DIR="" SSH_FLAG="" DOCKER_MODE="socket"
 result=$(DOCKER_SOCKET="/nonexistent/docker-$$-xyz.sock" build_docker_args "test-container" 2>&1)
 if echo "$result" | grep -qF "not found" && ! echo "$result" | grep -qF "docker-$$-xyz.sock:/var/run/docker.sock"; then
     TOTAL=$((TOTAL + 1))
@@ -1219,6 +1220,20 @@ else
     PASS=$((PASS + 1))
 fi
 
+# The CLI must never build an image: both the agent image and the daemon
+# image come from build-docker.sh (the agent image is not pullable, so a
+# usable CLI already implies both were built). Checked on code lines, so the
+# 'build-docker.sh' remediation message is fine.
+if grep -vE '^[[:space:]]*#' "$AGENTS" | grep -qE 'docker +build'; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: pia.sh must not build images: $(grep -nE 'docker +build' "$AGENTS" | head -1)"
+    FAIL=$((FAIL + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: pia.sh never builds images (build-docker.sh owns that)"
+    PASS=$((PASS + 1))
+fi
+
 if grep -q 'docker-compose' "$AGENTS"; then
     TOTAL=$((TOTAL + 1))
     echo -e "  ${RED}FAIL${NC}: pia.sh must not reference a compose file"
@@ -1349,7 +1364,7 @@ else
 fi
 
 # --- wiring into docker create/run -------------------------------------------
-MOUNT_DIR="" SSH_FLAG="" DOCKER_FLAG=""
+MOUNT_DIR="" SSH_FLAG="" DOCKER_MODE=""
 ARGS_WITH_LABELS="$(build_docker_args "pia-labelled" 2>/dev/null)"
 
 if echo "$ARGS_WITH_LABELS" | grep -qxF "com.docker.compose.project=pia"; then
@@ -1383,7 +1398,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-if grep -q 'done < <(pia_ps)' "$AGENTS" && grep -q 'pia_ps --filter "status=exited"' "$AGENTS"; then
+if grep -q 'pia_ps' "$AGENTS" && grep -q 'pia_ps --filter "status=exited"' "$AGENTS"; then
     TOTAL=$((TOTAL + 1))
     echo -e "  ${GREEN}PASS${NC}: pia ls, pia clean, and pia rs use pia_ps"
     PASS=$((PASS + 1))

@@ -1,6 +1,8 @@
 #!/bin/bash
 
-# Copies pia script to ~/.local/bin/ so it is globally callable without the .sh suffix.
+# Copies pia script to ~/.local/bin/ so it is globally callable without the
+# .sh suffix, and the embedded payload scripts (the nested-container guard)
+# to ~/.pia/lib/, where the installed 'pia' finds them at runtime.
 #
 # Usage: bash install-pia.sh
 
@@ -49,6 +51,24 @@ case ":${PATH}:" in
     *":${TARGET_DIR}:"*) ;;
     *) echo "[WARN] ${TARGET_DIR} is not in your PATH — add it to call 'pia' directly." ;;
 esac
+
+# The guard policy version is the marker on line 2 of docker/pia-dind/
+# guard.sh; 'pia' reads it to derive the daemon image tag and to verify
+# running daemons (recreate anything older). The CLI never builds — the
+# daemon image comes from build-docker.sh — so the installed CLI needs ONLY
+# guard.sh (the version), not the Dockerfile/entrypoint. An installed 'pia'
+# is a plain copy in ~/.local/bin, not next to the repo, so guard.sh is
+# mirrored here; a missing copy is fail-closed (no version, no daemon).
+LIB_DIR="${HOME}/.pia/lib/pia-dind"
+mkdir -p "${LIB_DIR}"
+GUARD="${HERE}/../docker/pia-dind/guard.sh"
+if [ -f "${GUARD}" ]; then
+    cp "${GUARD}" "${LIB_DIR}/guard.sh"
+    chmod +x "${LIB_DIR}/guard.sh"
+    echo "[INFO] Installed: ${LIB_DIR}/guard.sh"
+else
+    echo "[WARN] guard.sh not found — 'pia --docker' will refuse to start daemons."
+fi
 
 # Create the home '.pia' secrets folder. The installed 'pia' command is a
 # plain copy in ~/.local/bin, so ~/.pia/secrets is where it looks for
