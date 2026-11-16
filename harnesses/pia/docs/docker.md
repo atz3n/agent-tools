@@ -69,129 +69,117 @@ unattended session must never hold a host-root credential nobody is watching.
 
 ### Architecture at a glance
 
-```text
-                        pia run --docker???
-                               │
-      ┌──────────────┬─────────┴────────┬────────────────┬
-      │ (omitted)    │ --docker         │ --docker-dev   │ --docker-full
-      ▼              ▼                  ▼                ▼               
-  ┌─────────┐   ┌───────────┐     ┌───────────┐    ┌───────────┐
-  │  NONE   │   │   dind    │     │docker-dev │    │   FULL    │
-  │ no      │   │ + guard   │     │ dind +    │    │ ⚠ HOST    │
-  │ docker  │   │  default  │     │ exactly 1 │    │   ROOT    │
-  └─────────┘   └───────────┘     │   bind    │    └───────────┘
-                                  └───────────┘
-              (a future 'vm' tier — daemon in its own kernel — is planned,
-               not implemented; there is no flag for it yet)
+```mermaid
+flowchart TD
+    Q{{"pia run --docker???"}}
+    Q --> NONE["no flag<br/>NONE —<br/>no docker"]
+    Q --> DIND["--docker<br/>dind + guard<br/>(default)"]
+    Q --> DEV["--docker-dev<br/>dind + exactly<br/>one bind"]
+    Q --> FULL["--docker-full<br/>⚠ HOST ROOT"]
+    Q -. "planned, no flag yet" .-> VM["vm tier —<br/>daemon in its own kernel"]
+    classDef danger fill:#ffe0e0,stroke:#b03030,color:#000
+    classDef dim fill:none,stroke:#999,stroke-dasharray:4 4,color:#666
+    class FULL danger
+    class VM dim
 ```
 
-**Mode B — `--docker` (dind, the default).** A sibling daemon per session;
+**`--docker` (dind, the default).** A sibling daemon per session;
 the host socket is never mounted anywhere:
 
-```text
-┌─ HOST ────────────────────────────────────────────────────────┐
-│  host dockerd (root)   ←— NOBODY in this diagram connects here│
-│     ✗ socket never mounted                                    │
-│                                                               │
-│ ╔═ pia project ════════════════════════════════════════════╗  │
-│ ║ ┌──────────────────┐  DOCKER_ ┌───────────────────────┐  ║  │
-│ ║ │ pia-foo (agent)  │ ─HOST──▶ │ pia-foo-dind          │  ║  │
-│ ║ │ pi + /workspace  │  tcp:    │ dockerd (throwaway)   │  ║  │
-│ ║ │ docker CLI only  │  2375    │  guard replaces runc  │  ║  │
-│ ║ │ no socket,       │          │  NO host mounts       │  ║  │
-│ ║ │ no creds         │          │  images: own storage  │  ║  │
-│ ║ └──────────────────┘          └───────────────────────┘  ║  │
-│ ║        shared network namespace — 2375 never published   ║  │
-│ ╚══════════════════════════════════════════════════════════╝  │
-└───────────────────────────────────────────────────────────────┘
-  ↑ both are plain containers on the host — "sibling", not nested
-  survives: stolen keys, host files, the real docker ✅ (sysbox/gVisor:
-  full stop) · plain runc: guard blocks walk-in escapes; a kernel or
-  daemon CVE still reaches the shared host ⚠
+```mermaid
+flowchart TB
+    HD["host dockerd (root)<br/>✗ socket never mounted —<br/>NOBODY in this diagram connects here"]
+    subgraph PROJ["pia project — shared network namespace, 2375 never published"]
+        AG["pia-foo (agent)<br/>pi + /workspace<br/>docker CLI only<br/>no socket, no creds"]
+        DD["pia-foo-dind<br/>dockerd (throwaway)<br/>guard replaces runc<br/>NO host mounts<br/>images: own storage"]
+        AG -- "DOCKER_HOST<br/>tcp://127.0.0.1:2375" --> DD
+    end
+    classDef dead fill:#f2f2f2,stroke:#999,color:#555
+    class HD dead
 ```
+
+Both boxes are plain containers on the host — "sibling", not nested.
+Survives: stolen keys, host files, the real docker ✅ (sysbox/gVisor: full
+stop) · plain runc: the guard blocks walk-in escapes; a kernel or daemon
+CVE still reaches the shared host ⚠.
 
 The dind box's *runtime* is a slot, auto-detected at `pia run` time — same
 flag, same UX:
 
-```text
-   pia-foo-dind runs on:
-   ├─ sysbox-runc  (host has sysbox)           → unprivileged daemon    🥇 real boundary
-   ├─ runsc        (host has gVisor)           → userspace kernel       🥈 real boundary
-   └─ plain runc   (always — e.g. Docker
-      Desktop)                                 → --privileged + guard   ⚠ shared kernel
-                        (privileged is not optional there: nested
-                         containers cannot even start without it — §4)
+```mermaid
+flowchart LR
+    R{{"pia-foo-dind runs on:<br/>auto-detected at pia run"}}
+    R -- "host has sysbox" --> S["sysbox-runc<br/>unprivileged daemon<br/>🥇 real boundary"]
+    R -- "host has gVisor" --> G["runsc<br/>userspace kernel<br/>🥈 real boundary"]
+    R -- "always — e.g. Docker Desktop" --> P["plain runc<br/>--privileged + guard<br/>⚠ shared kernel"]
+    classDef warn fill:#fff3d6,stroke:#c08a20,color:#000
+    class P warn
 ```
 
-**Mode B′ — `--docker-dev`.** The same daemon plus exactly one bind,
+(On plain runc, `--privileged` is not optional: nested containers cannot
+even start without it — §4.)
+
+**`--docker-dev`.** The same daemon plus exactly one bind,
 mounted at the *same path* the agent sees — path symmetry is the whole trick:
 
-```text
-     HOST                 ┌─ pia-foo (agent) ────────┐
-  /home/me/proj ─────────▶│ /workspace  (project)    │
-       │ (one host        └──────────────────────────┘
-       │  directory)      ┌─ pia-foo-dind ───────────┐
-       └─────────────────▶│ /workspace  (SAME dir)   │
-                          │ dockerd + guard          │
-                          └────────────┬─────────────┘
-                                       │ nested: docker run -v /workspace/app:/etc/app
-                                       ▼
-                          ┌─ nested container ───────┐
-                          │ /etc/app = real project  │  bind is rprivate — nested
-                          │   files, read+write      │  mounts never flow back
-                          └──────────────────────────┘
-  cost: nested containers write there as root, and read whatever
-  lands there (.env, git creds…) — §6
+```mermaid
+flowchart TD
+    WS["HOST: /home/me/proj<br/>(one host directory)"]
+    AG["pia-foo (agent)<br/>/workspace (project)"]
+    DD["pia-foo-dind<br/>/workspace (SAME dir)<br/>dockerd + guard"]
+    NC["nested container<br/>/etc/app = real project<br/>files, read+write"]
+    WS --> AG
+    WS --> DD
+    DD -- "nested: docker run -v /workspace/app:/etc/app" --> NC
 ```
 
-**Mode C — `--docker-full` (fenced off).** Full control of the host daemon,
+The bind is `rprivate` — nested mounts never flow back. Cost: nested
+containers write there as root, and read whatever lands there
+(`.env`, git creds…) — §6.
+
+**`--docker-full` (fenced off).** Full control of the host daemon,
 kept deliberately for the one use case that can justify it — a human
 watching the session: loud banner, refused by `pia ask`/autopilot:
 
-```text
-┌─ HOST ────────────────────────────────────────────┐
-│   ┌── dockerd (root) ──────────────────┐          │
-│   │  can: run anything, mount anything │          │
-│   └─────────────▲──────────────────────┘          │
-│                 │ /var/run/docker.sock            │
-│                 │ ⚠ MOUNTED INTO AGENT ⚠          │
-│   ┌─────────────┴──────────────────────┐          │
-│   │  pia agent container               │          │
-│   │  pi + ANY code it runs             │          │
-│   └────────────────────────────────────┘          │
-│   agent == host root. Survives: nothing.          │
-└───────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph HOST["HOST — agent == host root. Survives: nothing."]
+        D["dockerd (root)<br/>can: run anything, mount anything"]
+        A["pia agent container<br/>pi + ANY code it runs"]
+        A -- "/var/run/docker.sock<br/>⚠ MOUNTED INTO AGENT ⚠" --> D
+    end
+    classDef danger fill:#ffe0e0,stroke:#b03030,color:#000
+    class D,A danger
 ```
 
 **The mental model.** Danger of the input and strength of the boundary move
 together:
 
-```text
-  HOW MUCH DO YOU TRUST WHAT THE AGENT RUNS?
-
-  own scripts ──► your builds ──► dev stacks ──► third-party ──► hostile
-  & nothing       (build/test)    (compose       code            input
-                                   + binds)         │              │
-      │               │              │             ▼              ▼
-      ▼               ▼              ▼          no --docker    no --docker
-  no --docker     --docker    --docker-dev    (or dind on     (or wait
-                   (dind)                      sysbox/gVisor)   for vm)
-
-  --docker-full ✗ NOT ON THIS LINE — it sits BELOW "no --docker":
-     strictly worse than doing nothing, because it converts "agent
-     might be hostile" into "hostile code has root on my machine."
+```mermaid
+flowchart LR
+    T1["own scripts<br/>& nothing"] --> T2["your builds<br/>(build/test)"] --> T3["dev stacks<br/>(compose + binds)"] --> T4["third-party<br/>code"] --> T5["hostile<br/>input"]
+    T1 --> R1["no --docker"]
+    T2 --> R2["--docker"]
+    T3 --> R3["--docker-dev"]
+    T4 --> R4["no --docker<br/>(or dind on<br/>sysbox/gVisor)"]
+    T5 --> R5["no --docker<br/>(or wait for vm)"]
+    classDef pick fill:#e8f0fe,stroke:#3b6bc0,color:#000
+    class R1,R2,R3,R4,R5 pick
 ```
+
+`--docker-full` ✗ is **not on this line** — it sits *below* "no `--docker`":
+strictly worse than doing nothing, because it converts "agent might be
+hostile" into "hostile code has root on my machine."
 
 ---
 
 ## 4. The throwaway daemon: lifecycle and plumbing
 
-```
-pia-<name> (agent)              pia-<name>-dind (throwaway daemon)
-  docker build / compose  ─TCP─►  tcp://127.0.0.1:2375 (shared netns)
-  DOCKER_HOST set, no socket      NO host mounts — builds/contexts stream in
-                                  pia-dind-guard wraps runc
-                                  runtime: sysbox → gVisor → runc (auto-detected)
+```mermaid
+flowchart LR
+    A["pia-NAME (agent)<br/>docker build / compose<br/>DOCKER_HOST set, no socket"]
+    D["pia-NAME-dind (throwaway daemon)<br/>tcp://127.0.0.1:2375 (shared netns)<br/>NO host mounts — builds/contexts stream in<br/>pia-dind-guard wraps runc<br/>runtime: sysbox → gVisor → runc (auto-detected)"]
+    A -- "TCP" --> D
 ```
 
 Creation sequence (`start_dind_sibling`, always **before the agent exists**):
@@ -348,7 +336,8 @@ from dead processes.
 **A derived image, verified at runtime.** The guard and its jq parser ship
 in `pia-dind:guard-v<N>`, built from `docker/pia-dind/` (`FROM
 docker:29-dind@sha256:…`, digest-pinned; `docker history` shows every
-addition — a 15-line diff over the audited upstream). The image entrypoint
+addition — the whole layer is one short Dockerfile plus the guard files).
+The image entrypoint
 writes the bind whitelist from `$PIA_GUARD_WS` (mode is decided by pia at
 daemon create), swaps the guard in as `runc`, makes the policy files
 immutable, and only then execs the upstream entrypoint — so **no nested
@@ -380,13 +369,14 @@ actually executed (`readlink /proc/<pid>/exe`) and sweeps the usual
 which a nested workload cannot make. Clearing +i needs daemon root plus
 `CAP_LINUX_IMMUTABLE`, which the policy makes unreachable.
 
-**Observability.** A refusal now reaches the agent verbatim: the guard
+**Observability.** A refusal reaches the agent verbatim: the guard
 writes the reason to the runtime log in **runc's own logrus format**
 (`{"level":"error","msg":…}`) — that is the field containerd ≥ 2.x parses
 and surfaces as the client-facing `OCI runtime create failed: pia-dind-guard:
 REFUSED: <reason>`. The historic `{"log","args","err"}` shape is not read,
-leaving only the opaque `runc did not terminate successfully`. Every refusal is also logged inside the daemon, with a
-CONTEXT line recording whether the log channel existed — read it with:
+leaving only the opaque `runc did not terminate successfully`. Every refusal
+is also logged inside the daemon, with a CONTEXT line recording whether the
+log channel existed — read it with:
 
 ```bash
 pia dindlog <name>        # the agent's daemon; works even after a kill-switch exit
@@ -432,8 +422,8 @@ path the agent sees (`/workspace` in both). A nested
 directory. The bind is `rprivate`: mounts created inside nested containers
 can never propagate back into the host mount namespace.
 
-The invariant, asserted by the test suite: plain `dind` gives the daemon
-**zero** host binds, `--docker-dev` exactly **one** — the workspace. Costs,
+The invariant, asserted by the test suite: plain `--docker` gives the
+daemon **zero** host binds, `--docker-dev` exactly **one** — the workspace. Costs,
 exactly:
 
 - Nested containers write there **as root** (no userns remapping yet):
@@ -515,8 +505,9 @@ install, from a client holding **nothing but the daemon's TCP API**:
 
 ### 8.3 Known residual risks
 
-- **Image-baked device nodes are a guard blind spot.** `docker import`/`docker commit` can put `/dev/vda1` (254:1) or
-  `/dev/mem` (1:1) into an image’s rootfs; the container spec then carries
+- **Image-baked device nodes are a guard blind spot.** `docker
+  import`/`docker commit` can put `/dev/vda1` (254:1) or `/dev/mem` (1:1)
+  into an image's rootfs; the container spec then carries
   no device rule, so the guard has nothing to refuse and the container
   starts. It is harmless because the **cgroup-v2 eBPF device filter** denies
   `open()` on every non-default device one layer down (verified EPERM in
@@ -541,14 +532,15 @@ install, from a client holding **nothing but the daemon's TCP API**:
   containers are fully agent-owned. Blast radius ends where the daemon
   container ends: no host filesystem, no host socket, no host images.
 - **No resource limits on the daemon yet.** A greedy build can exhaust host
-  RAM, PIDs and **disk** (image storage is an anonymous volume on your real
-  disk, reclaimed only by `pia rm`/`pia clean` with `-v`). Watch `df` on
-  long-lived sessions.
+  RAM, PIDs and **disk** (image storage is an anonymous volume on your
+  real disk, reclaimed only when pia removes the daemon — `pia rm` and
+  `pia clean` do, `docker rm -v`). Watch `df` on long-lived sessions.
 - **`--docker-dev` widens one directory to the whole session** — and
   the workspace is a two-way door (secrets in, hook/script execution out on
   the host later). Treat it as shared state with the agent, not a sandbox.
-- **`/proc/self/mountinfo` in the pia container is unmasked:** on Docker Desktop it leaks the TRUE host path of the container's own
-  binds (`/Users/<user>/…`) plus the username. Docker offers no CLI mask
+- **`/proc/self/mountinfo` in the pia container is unmasked:** on
+  Docker Desktop it leaks the TRUE host path of the container's own binds
+  (`/Users/<user>/…`) plus the username. Docker offers no CLI mask
   for it; keep secrets out of paths you bind, or run hostile workloads
   without `-m`.
 - **The VM share scope is your setting.** Docker Desktop's file-sharing
