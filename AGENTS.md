@@ -90,7 +90,8 @@ agent-tools/
 │   │   └── tasks-server/
 │   └── misc/                  # Miscellaneous utilities
 │       ├── codebase-review/   # Multi-pass review.md auditor
-│       └── loop-prompt/       # Interviews to define task + criteria, then writes a loop prompt
+│       ├── loop-prompt/       # Interviews to define task + criteria, then writes a loop prompt
+│       └── incident-report/   # SKILL.md + template.md — evidence-first post-mortems with TLDR/ELI5
 ├── templates/
 │   └── llm-wiki/              # LLM-assisted wiki template
 │       ├── README.md
@@ -238,7 +239,7 @@ cd servers/tasks-server
 
 ### Agent Skills
 
-The skill file (`skills/tasks-server/tasks-server/SKILL.md`) teaches the agent to call the server via `curl` to `localhost:8088`. Skills include Docker network auto-detection (`.dockerenv` / cgroup checks) to switch between `localhost` and `host.docker.internal`. Install by copying skill directories into `~/.pi/agent/skills/`, preserving the feature subfolder (e.g. `~/.pi/agent/skills/project/project-qa/`). Use the `misc/loop-prompt` skill to define and run an iterative loop prompt for task-driven agent workflows.
+The skill file (`skills/tasks-server/tasks-server/SKILL.md`) teaches the agent to call the server via `curl` to `localhost:8088`. Skills include Docker network auto-detection (`.dockerenv` / cgroup checks) to switch between `localhost` and `host.docker.internal`. Install by copying skill directories into `~/.pi/agent/skills/`, preserving the feature subfolder (e.g. `~/.pi/agent/skills/project/project-qa/`). Use the `misc/loop-prompt` skill to define and run an iterative loop prompt for task-driven agent workflows. Use the `misc/incident-report` skill to write evidence-first incident reports (TLDR + ELI5 up top, with a full and a short report tier), optionally filing them as issues via the GitHub proxy.
 
 ---
 
@@ -255,7 +256,7 @@ To install: copy skill directories into `~/.pi/agent/skills/`, preserving the fe
 | **odoo-proxy** | `odoo-get-task-data`, `odoo-get-task-messages`, `odoo-post-task-message` |
 | **project** | `project-new-project`, `project-write-spec`, `project-architecture`, `project-implement`, `project-refine`, `project-qa`, `project-help`, `project-doctor`, `project-autopilot` (unattended orchestration in fresh `pi -p` sessions on an `autopilot/*` branch) |
 | **tasks-server** | `tasks-server` |
-| **misc** | `codebase-review`, `loop-prompt` |
+| **misc** | `codebase-review`, `loop-prompt`, `incident-report` |
 
 ---
 

@@ -68,7 +68,7 @@ Each server has its own README with endpoints, setup, and configuration.
 | odoo-proxy | `odoo-get-task-data`, `odoo-get-task-messages`, `odoo-post-task-message` |
 | project | `project-new-project`, `project-write-spec`, `project-architecture`, `project-implement`, `project-refine`, `project-qa`, `project-doctor`, `project-help`, `project-autopilot` |
 | tasks-server | `tasks-server` |
-| misc | `codebase-review`, `loop-prompt` |
+| misc | `codebase-review`, `loop-prompt`, `incident-report` |
 
 Install by copying a skill's directory into your agent's skills folder (e.g. `~/.pi/agent/skills/<feature>/<skill>/`).
 
