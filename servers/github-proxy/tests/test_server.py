@@ -184,9 +184,15 @@ class TestIssueEndpoints(unittest.TestCase):
         self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/issues/42'))
 
     def test_issue_comments_allowed(self) -> None:
-        """Issue comment collection and single-comment paths should be allowed."""
+        """Issue comment collection and comment-scoped item paths should be allowed."""
         self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/issues/42/comments'))
-        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/issues/42/comments/123'))
+        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/issues/comments'))
+        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/issues/comments/123'))
+        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/issues/comments/6947468468'))
+
+    def test_issue_scoped_single_comment_blocked(self) -> None:
+        """/issues/{n}/comments/{id} is not a GitHub route — get/update/delete use /issues/comments/{id}."""
+        self.assertFalse(whitelist.is_allowed_endpoint('/repos/owner/repo/issues/42/comments/123'))
 
     def test_issue_labels_allowed(self) -> None:
         """Issue label collection and per-label paths should be allowed."""

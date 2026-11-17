@@ -49,7 +49,10 @@ _ISSUE_PATHS: list[str] = [
     r"^/repos/[^/]+/[^/]+/issues/\d+$",
     # Issue / PR discussion comments
     r"^/repos/[^/]+/[^/]+/issues/\d+/comments$",
-    r"^/repos/[^/]+/[^/]+/issues/\d+/comments/\d+$",
+    # Single issue comment — GitHub's get/update/delete route is comment-scoped
+    # (/issues/comments/{id}); there is no /issues/{n}/comments/{id} route.
+    r"^/repos/[^/]+/[^/]+/issues/comments$",
+    r"^/repos/[^/]+/[^/]+/issues/comments/\d+$",
     # Issue labels
     r"^/repos/[^/]+/[^/]+/issues/\d+/labels$",
     r"^/repos/[^/]+/[^/]+/issues/\d+/labels/[^/]+$",

@@ -121,17 +121,20 @@ curl -s -X POST $PROXY/repos/{owner}/{repo}/issues/42/comments \
 
 ## Get / Update / Delete an Issue Comment
 
+GitHub's single-comment routes are **comment-scoped** — `/issues/comments/{id}`, with no issue
+number in the path.
+
 ```bash
 # Get
-curl -s $PROXY/repos/{owner}/{repo}/issues/42/comments/123 | jq '.'
+curl -s $PROXY/repos/{owner}/{repo}/issues/comments/123 | jq '.'
 
 # Update
-curl -s -X PATCH $PROXY/repos/{owner}/{repo}/issues/42/comments/123 \
+curl -s -X PATCH $PROXY/repos/{owner}/{repo}/issues/comments/123 \
   -H "Content-Type: application/json" \
   -d '{"body":"Updated comment body"}' | jq '.'
 
 # Delete (returns 204)
-curl -s -o /dev/null -w "%{http_code}" -X DELETE $PROXY/repos/{owner}/{repo}/issues/42/comments/123
+curl -s -o /dev/null -w "%{http_code}" -X DELETE $PROXY/repos/{owner}/{repo}/issues/comments/123
 ```
 
 ## Labels on an Issue

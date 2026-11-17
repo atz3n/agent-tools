@@ -352,7 +352,7 @@ Containers are grouped under the `pia` project by plain `docker --label` stampin
 
 ### github-proxy
 
-- **Whitelist**: 27 regex patterns covering PR CRUD, reviews, review comments (including replies and reactions), review reactions, merge, commits, files, issue CRUD, issue comments, issue labels/assignees, repository labels, and `/user`.
+- **Whitelist**: 28 regex patterns covering PR CRUD, reviews, review comments (including replies and reactions), review reactions, merge, commits, files, issue CRUD, issue comments (incl. comment-scoped get/update/delete at `/issues/comments/{id}`), issue labels/assignees, repository labels, and `/user`.
 - **Auth**: Bearer token injected from `GITHUB_PERSONAL_ACCESS_TOKEN` env var.
 - **Headers**: Combines duplicate `Accept` headers, strips hop-by-hop headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`), sets `User-Agent: pr-proxy/1.0`.
 - **Network skill**: Auto-detects Docker environment and sets `PROXY` to `host.docker.internal:8086` when running inside a container.

@@ -39,9 +39,10 @@ A lightweight HTTP proxy that exposes a subset of endpoints from the GitHub REST
 | PATCH | `/repos/{owner}/{repo}/issues/{number}` | Update issue (close via `state: closed`) |
 | GET | `/repos/{owner}/{repo}/issues/{number}/comments` | List issue/PR discussion comments |
 | POST | `/repos/{owner}/{repo}/issues/{number}/comments` | Create issue/PR discussion comment |
-| GET | `/repos/{owner}/{repo}/issues/{number}/comments/{id}` | Get issue/PR discussion comment |
-| PATCH | `/repos/{owner}/{repo}/issues/{number}/comments/{id}` | Update issue/PR discussion comment |
-| DELETE | `/repos/{owner}/{repo}/issues/{number}/comments/{id}` | Delete issue/PR discussion comment |
+| GET | `/repos/{owner}/{repo}/issues/comments` | List repository-wide issue/PR discussion comments |
+| GET | `/repos/{owner}/{repo}/issues/comments/{id}` | Get issue/PR discussion comment |
+| PATCH | `/repos/{owner}/{repo}/issues/comments/{id}` | Update issue/PR discussion comment |
+| DELETE | `/repos/{owner}/{repo}/issues/comments/{id}` | Delete issue/PR discussion comment |
 | GET | `/repos/{owner}/{repo}/issues/{number}/labels` | List labels on an issue |
 | POST | `/repos/{owner}/{repo}/issues/{number}/labels` | Add labels to an issue |
 | PUT | `/repos/{owner}/{repo}/issues/{number}/labels` | Replace all labels on an issue |
