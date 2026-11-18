@@ -2060,6 +2060,11 @@ sparkline() {
 
 # bar WIDTH PCT — a horizontal gauge for a 0..100 percentage, clamped at both
 # ends (a cgroup reading can exceed 100 or go negative after a counter reset).
+# The fill glyph is the SECOND-tallest block, like the sparkline ceiling: a
+# full gauge must not touch the top of its row either, or it welds itself to
+# the chart above (cpu's ▇ sitting on mem's █ read as one solid block, while
+# mem-over-net, where both leave the ceiling free, showed the small gap the
+# rows are meant to have).
 bar() {
     local width="${1:-20}" pct="${2:-0}" filled out="" i
     [[ "$width" =~ ^[0-9]+$ ]] || width=20
@@ -2067,7 +2072,7 @@ bar() {
         f = int(p * w / 100 + 0.5); if (f < 0) f = 0; if (f > w) f = w; print f
     }')"
     for ((i = 0; i < width; i++)); do
-        if [ "$i" -lt "$filled" ]; then out+="${CHART_GLYPHS[7]}"; else out+="$CHART_EMPTY"; fi
+        if [ "$i" -lt "$filled" ]; then out+="${CHART_GLYPHS[6]}"; else out+="$CHART_EMPTY"; fi
     done
     printf '%s' "$out"
 }
@@ -2085,6 +2090,8 @@ RX_SERIES=()
 TX_SERIES=()
 declare -a DEST_LIST=()  # every destination ever seen, in order of first sight
 declare -a DEST_TOTAL=() # hits per destination since the monitor started (parallel to DEST_LIST)
+declare -a DEST_LAST=()  # the sample number each destination last appeared in
+                         # (the pane leads with what is being called NOW)
 declare -a DEST_CUR=()   # the destinations of the newest cycle... (parallel with...)
 declare -a DEST_CUR_N=() # ... their hits in that cycle
 CHART_IDX="-1"           # chart_index's answer
@@ -2122,13 +2129,14 @@ series_spark() {
     eval "sparkline \"\$__w\" \"\${${__name}[@]}\""
 }
 
-# series_max NAME — the largest value a series ever held (0 when it is empty).
-# Used for the memory peak, which is the one history worth a number.
+# series_max NAME [FMT] — the largest value a series ever held (0 when it is
+# empty), printed with FMT (default '%d' — byte counts; '%.1f' for percents).
+# Used for the header's peak cpu/memory figures, the history worth a number.
 series_max() {
-    local __name="$1" __n
+    local __name="$1" __fmt="${2:-%d}" __n
     eval "__n=\${#${__name}[@]}"
     [ "${__n:-0}" -gt 0 ] || { printf '0'; return 0; }
-    eval "printf '%s\n' \"\${${__name}[@]}\"" | awk 'BEGIN { m = 0 } $1 + 0 > m { m = $1 + 0 } END { printf "%d", m }'
+    eval "printf '%s\n' \"\${${__name}[@]}\"" | awk -v f="$__fmt" 'BEGIN { m = 0 } $1 + 0 > m { m = $1 + 0 } END { printf f, m }'
 }
 
 # chart_index LIST KEY — the position of KEY in the named list, left in
@@ -2158,11 +2166,14 @@ chart_index() {
 # line, drawn as charts. Returns 1 when the sample carried no '#stats' line,
 # which means the image inside the container predates charts.
 monitor_ingest() {
-    local out="$1" line dest n kv stats_line="" value i
+    local out="$1" line dest n kv stats_line="" value i seq
     local -a words
 
     DEST_CUR=()
     DEST_CUR_N=()
+    # CHART_SAMPLES counts the samples ingested SO FAR, so this cycle is the
+    # next number — the stamp DEST_LAST keeps, and the pane sorts by.
+    seq=$(( ${CHART_SAMPLES:-0} + 1 ))
     while IFS= read -r line; do
         case "$line" in
             ('#stats '*) stats_line="$line"; continue ;;
@@ -2193,9 +2204,11 @@ monitor_ingest() {
         chart_index DEST_LIST "$dest"
         if [ "$CHART_IDX" -ge 0 ]; then
             DEST_TOTAL[$CHART_IDX]=$(( ${DEST_TOTAL[$CHART_IDX]} + n ))
+            DEST_LAST[$CHART_IDX]="$seq"
         else
             DEST_LIST+=("$dest")
             DEST_TOTAL+=("$n")
+            DEST_LAST+=("$seq")
         fi
     done <<< "$out"
 
@@ -2225,8 +2238,8 @@ monitor_ingest() {
     series_push RX_SERIES "$(chart_positive "${CHART_RX:-0}")"
     series_push TX_SERIES "$(chart_positive "${CHART_TX:-0}")"
     # 'pids' is deliberately NOT pushed to a series: the dashboard shows the
-    # current count in the header next to the sample counter — a process leak
-    # is caught by watching that number grow, a history row bought nothing.
+    # current count in the header — a process leak is caught by watching that
+    # number grow, a history row bought nothing.
     CHART_SAMPLES=$(( ${CHART_SAMPLES:-0} + 1 ))
     return 0
 }
@@ -2244,13 +2257,17 @@ chart_positive() {
 # when neither date dialect can parse the timestamp. The frame then simply
 # leaves the uptime out. GNU date parses ISO 8601 with '-d'; BSD date (macOS)
 # has no '-d' and wants '-j -f FORMAT' without fractional seconds, so the
-# '.123456789' in docker's '…T10:00:00.123456789Z' is stripped for it.
+# '.123456789' in docker's '…T10:00:00.123456789Z' is stripped for it. '-u'
+# matters on both branches: docker stamps STARTED_AT in UTC, and BSD date
+# without '-u' reads the parsed time as LOCAL — every uptime then carries the
+# timezone offset (a container started two minutes ago reports 'up 01:01:45'
+# on a +01:00 laptop).
 monitor_start_epoch() {
     local started
     started="$(docker inspect --format '{{.State.StartedAt}}' "$1" 2>/dev/null || echo '')"
     [ -n "$started" ] || { printf '0'; return 0; }
-    date -d "$started" +%s 2>/dev/null \
-        || date -jf '%Y-%m-%dT%H:%M:%SZ' "${started%%.*}Z" +%s 2>/dev/null \
+    date -u -d "$started" +%s 2>/dev/null \
+        || date -ju -f '%Y-%m-%dT%H:%M:%SZ' "${started%%.*}Z" +%s 2>/dev/null \
         || printf '0'
 }
 
@@ -2282,8 +2299,8 @@ monitor_uptime() {
 # screen.
 monitor_dashboard() {
     local name="$1" interval="$2"
-    local w lw="$CHART_LABEL_WIDTH" rule spark_w half_w bar_w mem_spark rows
-    local frame="" line dest hits=0 cycle_hits=0 shown=0 mem_field mem_pct mem_peak up
+    local w lw="$CHART_LABEL_WIDTH" rule spark_w half_w bar_w rows
+    local frame="" line dest hits=0 cycle_hits=0 shown=0 mem_field mem_pct mem_peak cpu_peak up
     local i n rest
     local -a ranked=()
 
@@ -2303,7 +2320,6 @@ monitor_dashboard() {
     half_w=$(( (spark_w - 7) / 2 )); [ "$half_w" -lt 4 ] && half_w=4
     bar_w=$(( spark_w / 2 )); [ "$bar_w" -lt 8 ] && bar_w=8
     [ "$bar_w" -gt 24 ] && bar_w=24
-    mem_spark=$(( spark_w - 13 )); [ "$mem_spark" -lt 4 ] && mem_spark=4
 
     # Fixed overhead of the frame is 10 lines; whatever is left is destination
     # rows, capped so a huge terminal does not get 60 mostly-empty rows.
@@ -2324,25 +2340,30 @@ monitor_dashboard() {
     done
 
     up="$(monitor_uptime "${CHART_STARTED_EPOCH:-0}")"
-    # The current pids count sits in the header, next to the sample counter —
-    # it is a 'right now' number you watch grow, not a history worth a row.
-    frame+=" $(chart_pad "$name" 24)$(chart_pad "${up:-up ?}" 14)sample ${CHART_SAMPLES:-0}  pids ${CHART_PIDS:-?}"
+    # The header is the 'right now + worst-case' line: name, uptime, current
+    # pids, and the PEAK cpu/memory of the run — peaks belong next to the
+    # uptime (they describe the whole session) rather than trailing their
+    # row's gauge. chart_pad keeps the tail from pushing the header past the
+    # frame on a narrow terminal; the '~' there is rarer than a long URL.
+    mem_peak="$(human_bytes "$(series_max MEM_SERIES)")"
+    cpu_peak="$(series_max CPU_SERIES '%.1f')"
+    frame+=" $(chart_pad "$name" 24)$(chart_pad "${up:-up ?}" 14)$(chart_pad "pids ${CHART_PIDS:-?}  peak cpu ${cpu_peak}%  mem ${mem_peak}" "$(( w - 40 ))")"
     frame+=$'\n'"$rule"$'\n'
 
     # cpu — percent of the container's whole allowance, as in line mode.
     frame+=" $(chart_pad "cpu  ${CHART_CPU:-0}% of ${CHART_CORES:-?} cores" "$lw")$(series_spark CPU_SERIES "$spark_w")"$'\n'
 
-    # mem — a gauge against the limit when there is one, plus the peak of the
-    # run (line mode prints 'unlimited' for the same reason; with no limit there
-    # is no percentage to gauge, so the column shows the history instead).
-    mem_peak="$(human_bytes "$(series_max MEM_SERIES)")"
+    # mem — a gauge against the limit when there is one (line mode prints
+    # 'unlimited' for the same reason; with no limit there is no percentage to
+    # gauge, so the column shows the history instead). The run's peak lives in
+    # the header now, so this row carries only the live figure.
     if [ "${CHART_MEM_MAX:-max}" = "max" ]; then
         mem_field="mem  $(human_bytes "${CHART_MEM:-0}")/unlimited"
-        frame+=" $(chart_pad "$mem_field" "$lw")$(chart_pad "peak ${mem_peak}" 13)$(series_spark MEM_SERIES "$mem_spark")"$'\n'
+        frame+=" $(chart_pad "$mem_field" "$lw")$(series_spark MEM_SERIES "$spark_w")"$'\n'
     else
         mem_pct="$(awk -v u="${CHART_MEM:-0}" -v l="${CHART_MEM_MAX}" 'BEGIN { printf "%.1f", (l + 0 > 0) ? u * 100 / (l + 0) : 0 }')"
         mem_field="mem  $(human_bytes "${CHART_MEM:-0}")/$(human_bytes "${CHART_MEM_MAX}") (${mem_pct}%)"
-        frame+=" $(chart_pad "$mem_field" "$lw")$(bar "$bar_w" "$mem_pct") peak ${mem_peak}"$'\n'
+        frame+=" $(chart_pad "$mem_field" "$lw")$(bar "$bar_w" "$mem_pct")"$'\n'
     fi
 
     # net — the newest deltas as numbers, the history as two sparklines.
@@ -2351,19 +2372,15 @@ monitor_dashboard() {
 
     frame+=$'\n'"$(printf 'destinations  this cycle: %d   total: %d   targets: %d' "$cycle_hits" "$hits" "${#DEST_LIST[@]}")"$'\n'
 
-    # Ranking: one row per destination, ranked by the hits ACCUMULATED for that
-    # URL since the monitor started — a destination polled in a hundred cycles
-    # is one row holding the sum, not a number that resets and flickers every
-    # interval. This cycle's hits are the tie-break. Every destination ever
-    # seen is a candidate, so one sort ranks them all; the accumulated count
-    # IS the ranking, so no bar trails the URL — the columns it used go to
-    # the URL itself.
+    # Ranking: most RECENTLY called first — a destination's sort key is the
+    # last sample it appeared in, so the URLs the container is talking to NOW
+    # sit on top and a page the agent stopped looking at sinks, whatever its
+    # lifetime count. The accumulated hits are the tie-break (destinations seen
+    # in the same sample keep a stable, meaningful order), and every
+    # destination ever seen stays listed, so one sort ranks them all.
     i=0
     while [ "$i" -lt "${#DEST_LIST[@]}" ]; do
-        chart_index DEST_CUR "${DEST_LIST[$i]}"
-        n=0
-        [ "$CHART_IDX" -ge 0 ] && n="${DEST_CUR_N[$CHART_IDX]}"
-        ranked+=("$(printf '%s\t%s\t%s' "${DEST_TOTAL[$i]}" "$n" "${DEST_LIST[$i]}")")
+        ranked+=("$(printf '%s\t%s\t%s' "${DEST_LAST[$i]}" "${DEST_TOTAL[$i]}" "${DEST_LIST[$i]}")")
         i=$(( i + 1 ))
     done
     local tab
@@ -2372,9 +2389,10 @@ monitor_dashboard() {
         frame+=$'\n'"    (nothing requested since the monitor started)"$'\n'
     else
         while IFS=$'\t' read -r n rest dest && [ "$shown" -lt "$rows" ]; do
-            # The hit counts are column-aligned: a ranking you cannot scan
-            # vertically is not a ranking.
-            frame+=" $(chart_pad "$(printf 'x%-4s %s' "$n" "$dest")" "$(( w - 2 ))")"$'\n'
+            # 'n' is the last-seen sample (the sort key, never printed) and
+            # 'rest' the accumulated hits. The hit counts are column-aligned:
+            # a ranking you cannot scan vertically is not a ranking.
+            frame+=" $(chart_pad "$(printf 'x%-4s %s' "$rest" "$dest")" "$(( w - 2 ))")"$'\n'
             shown=$(( shown + 1 ))
         done < <(printf '%s\n' "${ranked[@]}" | sort -t$'\t' -k1,1nr -k2,2nr)
         [ "${#ranked[@]}" -gt "$rows" ] &&\

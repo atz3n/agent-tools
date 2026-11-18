@@ -47,7 +47,7 @@ DURATION="${2:-}"
 # that backs 'pia monitor' charts. Anything else is a typo, caught below.
 STATS="${3:-}"
 IFACE="${PIA_MONITOR_IFACE:-any}"
-CG=/sys/fs/cgroup
+CG="${PIA_MONITOR_CGROUP:-/sys/fs/cgroup}"
 # Destination log backing 'pia urls' — written only by the 'log' mode.
 URL_LOG="${PIA_URL_LOG:-/var/log/pia-urls.log}"
 
@@ -100,18 +100,38 @@ cpu_usec() {
     fi
 }
 
-# '<used> <limit>', limit may be 'max'
+# '<used> <limit>', limit may be 'max'.
+#
+# 'used' is NOT the raw usage counter: memory.current also counts the page
+# cache charged to this cgroup, so after a read-heavy spell (an agent that
+# curl'd the internet for an hour) the container 'uses' 12 GiB while its
+# processes hold ~1 GiB — the rest is kernel page cache the kernel hands back
+# the moment anything needs it. That is not 'in use', so the reclaimable part
+# is subtracted, exactly like 'docker stats': usage minus inactive_file on
+# v2, usage minus total_inactive_file on v1. (What the agent inside sees via
+# /proc/meminfo is yet another basis — HOST-WIDE, since there is no lxcfs —
+# which is why its numbers never match the monitor either way.)
 mem_bytes() {
-    local used limit
+    local used limit stat="" key="" cache
     if [ -r "$CG/memory.current" ]; then
         used="$(cat "$CG/memory.current")"
         limit="$(cat "$CG/memory.max" 2>/dev/null || echo max)"
+        stat="$CG/memory.stat"
+        key="inactive_file"
     elif [ -r "$CG/memory/memory.usage_in_bytes" ]; then
         used="$(cat "$CG/memory/memory.usage_in_bytes")"
         limit="$(cat "$CG/memory/memory.limit_in_bytes" 2>/dev/null || echo max)"
+        stat="$CG/memory/memory.stat"
+        key="total_inactive_file"
     else
         used=0
         limit=max
+    fi
+    if [ -n "$stat" ] && [ -r "$stat" ]; then
+        cache="$(awk -v k="$key" '$1 == k { print $2; exit }' "$stat")"
+        [[ "$cache" =~ ^[0-9]+$ ]] || cache=0
+        used=$(( used - cache ))
+        [ "$used" -lt 0 ] && used=0
     fi
     # v1 reports 'unlimited' where v2 reports 'max'
     [ "$limit" = "unlimited" ] && limit=max

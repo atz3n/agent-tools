@@ -247,17 +247,17 @@ pia monitor myproj | tee log.txt # the line view: a pipe gets no escape codes
 ```
 
 ```
- pia-k3m9x2p1            up 01:02:05 sample 64  pids 12
+ pia-k3m9x2p1            up 01:02:05 pids 12  peak cpu 6.8%  mem 813.0MiB
 ────────────────────────────────────────────────────────────────────────────────
  cpu  4.2% of 8 cores          ▁▇▁▂▇▁▂▇▁▁
- mem  300.0MiB/2.0GiB (14.6%)  ████░░░░░░░░░░░░░░░░░░░░ peak 813.0MiB
+ mem  300.0MiB/2.0GiB (14.6%)  ▇▇▇▇░░░░░░░░░░░░░░░░░░░░
  net  ↓12.0KiB ↑4.0KiB         rx ▁▇▁▁▇▁▁▇▁▁ tx ▁▇▁▁▇▁▁▇▁▁
 
-destinations  this cycle: 18   total: 197   targets: 6
- x151   TLS   api.github.com (20.205.243.168)
+destinations  this cycle: 18   total: 197   targets: 5
  x22   HTTP  GET localhost:8088/tasks?status=open
- x14   TLS   registry.npmjs.org (104.16.0.0)
+ x151   TLS   api.github.com (20.205.243.168)
  x7    TLS   api.anthropic.com (142.250.72.1)
+ x14   TLS   registry.npmjs.org (104.16.0.0)
  x3    HTTP  POST localhost:8086/repos/x/y/pulls
 
 Ctrl-C to stop · every 1s · -i 5 for a calmer chart · --no-chart for the line view
@@ -267,11 +267,11 @@ What is on it, and why:
 
 | Part | Shows | Notes |
 |------|-------|-------|
-| header | name, uptime, sample counter and the current `pids` | the pids count is a *right now* number you watch grow — a history row for it bought nothing, so it is no longer charted |
+| header | name, uptime, current `pids` and the run's **peak cpu/memory** | peaks describe the whole session, so they sit next to the uptime; the pids count is a *right now* number you watch grow — a history row for it bought nothing, so it is no longer charted; how many samples the monitor has drawn is bookkeeping, not on the frame |
 | `cpu` | newest percent + sparkline of the run | scaled to the run's own maximum, so a container that goes busy after an hour of quiet still lights up — but one step below the top: the highest block is never drawn, so a busy container shows a line with a gap above it, and dips stay visible instead of flattening into a wall |
-| `mem` | gauge against the limit + the peak | with no limit there is no percentage to gauge, so the row prints `unlimited` and shows the history instead — the same call line mode makes |
+| `mem` | gauge against the limit | with no limit there is no percentage to gauge, so the row prints `unlimited` and shows the history instead — the same call line mode makes; the run's peak is in the header |
 | `net` | newest ↓/↑ deltas + two sparklines | rx and tx are separate series: a download and an upload are not the same story |
-| destinations | one row per URL, ranked by the hits **accumulated since the monitor started**, this cycle's hits as the tie-break | counts add up across samples instead of resetting — a destination polled every second keeps one stable, growing row instead of flickering between `x1` and `x0`. No gauge trails the URL: the count is the whole story, and the freed columns show longer URLs in full |
+| destinations | one row per URL, **most recently called first** (the last sample a destination appeared in), its accumulated hits as the tie-break | what the container is talking to NOW sits on top, and a page the agent stopped looking at sinks; counts still add up across samples, so a polled URL keeps one stable, growing row instead of flickering between `x1` and `x0`. No gauge trails the URL: the count is the whole story, and the freed columns show longer URLs in full |
 
 Three properties worth knowing:
 
@@ -360,7 +360,7 @@ restart loop, runs unbounded by design, and is covered in
 | `TLS <host> (<ip>)` | TLS ClientHello SNI | the *hostname only* — the URL path of an `https://` request is inside the encrypted envelope and is never visible to a packet capture |
 | `HTTP <method> <url>` | cleartext HTTP | full URL, so the local proxies (`8086`/`8087`/`8088`) show in detail |
 | `cpu` | `cpu.stat` usage delta | percent of the container's whole CPU allowance (`cores × interval`) |
-| `mem`, `pids` | `memory.current`, `pids.current` | container limits shown when set (`unlimited` otherwise) |
+| `mem`, `pids` | `memory.current` − `inactive_file`, `pids.current` | the page cache charged to the cgroup is reclaimable, so it is not counted as used — the same rule `docker stats` applies (without it, a download-heavy spell shows as gigabytes 'in use'); container limits shown when set (`unlimited` otherwise). Never compare with the agent's `/proc/meminfo`: inside a container that is the **host's** memory |
 | `net` | `/proc/net/dev` delta | bytes received / sent by this container during the interval |
 
 Requirements and caveats:

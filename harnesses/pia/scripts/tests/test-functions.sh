@@ -1473,10 +1473,11 @@ assert_helper "aaa" "$(sparkline 3 0 0 0)" "sparkline of an all-zero series is t
 assert_helper "   " "$(sparkline 3)" "sparkline with no values is blank, not an error"
 assert_helper "ag" "$(sparkline 4 -5 10)" "sparkline clamps a negative value instead of indexing off the end"
 
-assert_helper "hhhhh....." "$(bar 10 50)" "bar 10 50 fills half"
-assert_helper "hhhh" "$(bar 4 150)" "bar clamps above 100%"
+assert_helper "ggggg....." "$(bar 10 50)" "bar 10 50 fills half"
+assert_helper "gggg" "$(bar 4 150)" "bar clamps above 100%"
 assert_helper "...." "$(bar 4 -5)" "bar clamps below 0%"
 assert_helper "....." "$(bar 5 0)" "bar of nothing is the empty glyph"
+assert_helper "0" "$(bar 6 100 | grep -c h || true)" "a FULL bar still leaves the ceiling free — the gauge gap matches the sparklines"
 
 assert_helper "0B" "$(human_bytes 0)" "human_bytes 0"
 assert_helper "2.0KiB" "$(human_bytes 2048)" "human_bytes KiB"
@@ -1499,6 +1500,7 @@ series_push CPU_SERIES 20
 series_push CPU_SERIES 7
 assert_helper "bgc" "$(series_spark CPU_SERIES 10)" "series_spark renders the series it is given"
 assert_helper "20" "$(series_max CPU_SERIES)" "series_max reports the peak, not the last value"
+assert_helper "20.0" "$(series_max CPU_SERIES '%.1f')" "series_max formats the peak when asked (percents keep a decimal)"
 series_push CPU_SERIES "not-a-number"
 assert_helper "4" "${#CPU_SERIES[@]}" "series_push keeps one sample per cycle even when the value is unreadable"
 
@@ -1536,7 +1538,7 @@ MON_CYCLE='14:03:11  TLS   api.github.com (20.205.243.168)   x14
 #stats cpu=4.2 cores=8 mem=314572800 mem_max=2147483648 pids=12 rx=12288 tx=4096 secs=3'
 
 CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
-DEST_LIST=(); DEST_TOTAL=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
 monitor_ingest "$MON_CYCLE"
 assert_exit_code 0 0 "monitor_ingest accepts a cycle that carries a '#stats' line"
 assert_helper "14" "$(dest_hits DEST_CUR DEST_CUR_N "TLS   api.github.com (20.205.243.168)")" "monitor_ingest reads the xN counter of a flow line"
@@ -1552,12 +1554,13 @@ monitor_ingest '14:03:15  TLS   api.github.com (20.205.243.168)   x2
 #stats cpu=1.0 cores=8 mem=1048576 mem_max=max pids=3 rx=0 tx=0 secs=3'
 assert_helper "2" "$(dest_hits DEST_CUR DEST_CUR_N "TLS   api.github.com (20.205.243.168)")" "the newest cycle holds only that cycle's hits"
 assert_helper "16" "$(dest_hits DEST_LIST DEST_TOTAL "TLS   api.github.com (20.205.243.168)")" "DEST_TOTAL accumulates across cycles"
+assert_helper "2" "$(dest_hits DEST_LIST DEST_LAST "TLS   api.github.com (20.205.243.168)")" "DEST_LAST stamps the sample a destination last appeared in"
 assert_helper "2" "${#DEST_LIST[@]}" "DEST_LIST records each destination once, in order"
 assert_helper "max" "$CHART_MEM_MAX" "'mem_max=max' (no limit) is read as 'max'"
 
 # An image from before charts exists answers a normal cycle: no '#stats' line.
 # monitor_ingest says so, and cmd_monitor falls back to the line view.
-DEST_LIST=(); DEST_TOTAL=(); DEST_CUR=(); DEST_CUR_N=()
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=()
 if monitor_ingest '14:03:20  TLS   example.org (1.2.3.4)
 -- cpu 1.0% of 8 core(s)  mem 1.0MiB/unlimited  pids 3  net -0B +0B  [3s]'; then
     TOTAL=$((TOTAL + 1))
@@ -1571,7 +1574,7 @@ fi
 
 # A stray warning inside the output is neither a flow line nor a sample, and must
 # not be counted as a destination.
-DEST_LIST=(); DEST_TOTAL=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
 monitor_ingest 'cannot open device
 -- cpu 0.0% of 8 core(s)  mem 1B/unlimited  pids 1  net -0B +0B  [3s]
 #stats cpu=0 cores=1 mem=1 mem_max=max pids=1 rx=0 tx=0 secs=3'
@@ -1582,7 +1585,7 @@ assert_helper "1" "${CHART_SAMPLES}" "... but still counts the sample it came wi
 # stripping it must not leave trailing blanks behind: '…(1.2.3.4) ' and
 # '…(1.2.3.4)' would otherwise be two different keys, and a destination that is
 # polled in one cycle and hit once in the next would split into two rows.
-DEST_LIST=(); DEST_TOTAL=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
 monitor_ingest '14:03:11  TLS   example.org (1.2.3.4)   x5
 14:03:12  TLS   example.org (1.2.3.4)
 -- cpu 0.0% of 8 core(s)  mem 1B/unlimited  pids 1  net -0B +0B  [3s]
@@ -1617,7 +1620,7 @@ assert_helper "" "$(monitor_uptime not-a-number)" "monitor_uptime ignores a time
 # --- monitor_dashboard ------------------------------------------------------
 
 CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
-DEST_LIST=(); DEST_TOTAL=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
 CHART_STARTED_EPOCH=$(( $(date +%s) - 61 ))
 CHART_COLS=80 CHART_LINES=24
 monitor_ingest "$MON_CYCLE"
@@ -1626,7 +1629,10 @@ case "$frame_out" in ($'\e[H\e[2J'*) frame_home=yes ;; (*) frame_home=no ;; esac
 assert_helper "yes" "$frame_home" "the frame homes the cursor and clears the whole screen, so no tail of a previous frame survives (resize, or a frame that shrank)"
 assert_output_contains "cpu" "$frame_out" "the frame draws the cpu row"
 assert_output_contains "mem  300.0MiB/2.0GiB (14.6%)" "$frame_out" "the frame shows memory against its limit"
-assert_output_contains "sample 1  pids 12" "$frame_out" "the frame shows the current pids next to the sample counter"
+assert_output_contains "pids 12" "$frame_out" "the frame shows the current pids in the header"
+assert_output_contains "peak cpu 4.2%  mem 300.0MiB" "$frame_out" "the header carries the run's peak cpu and peak memory next to the uptime"
+assert_output_not_contains "peak 300.0MiB" "$frame_out" "the mem row no longer trails its peak"
+assert_output_not_contains "sample" "$frame_out" "the sample counter is bookkeeping, not frame content"
 assert_helper "1" "$(printf '%s' "$frame_out" | grep -c 'pids 12')" "pids appears once — the header, not also a chart row"
 assert_output_contains "x14   TLS   api.github.com" "$frame_out" "the destinations pane shows the accumulated hits per URL"
 dest_row="$(printf '%s' "$frame_out" | grep -F 'x14   TLS   api.github.com' | head -1)"
@@ -1651,7 +1657,7 @@ while IFS= read -r frline; do
 done <<< "$clean_frame"
 assert_helper "yes" "$([ "$max_row" -le "$(( CHART_COLS - 1 ))" ] && echo yes || echo "no (widest row: ${max_row} of ${CHART_COLS})")" \
     "no frame row reaches the last column — nothing wraps, so the frame cannot drift on the screen"
-if printf '%s' "$frame_out" | grep -q 'bgc\|hhhh\|hhhhhh'; then
+if printf '%s' "$frame_out" | grep -q 'bgc\|gggg\|gggggg'; then
     TOTAL=$((TOTAL + 1))
     echo -e "  ${GREEN}PASS${NC}: the frame actually contains chart glyphs"
     PASS=$((PASS + 1))
@@ -1671,10 +1677,29 @@ accum_out="$(monitor_dashboard pia-testframe 1)"
 assert_output_contains "x16   TLS   api.github.com" "$accum_out" "destination hits accumulate per URL across cycles (14 + 2 = 16)"
 assert_helper "1" "$(printf '%s' "$accum_out" | grep -c 'api.github.com')" "... into ONE row per destination, not a new row per cycle"
 
+# Recency leads: the pane is ordered by the LAST sample a destination appeared
+# in, so the URL called now sits above one the container stopped talking to —
+# even when the dormant one has a hundred times the lifetime hits.
+CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=()
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+monitor_ingest '10:00:01  TLS   big.example (9.9.9.9)   x100
+10:00:01  TLS   small.example (8.8.8.8)
+-- cpu 1.0% of 2 core(s)  mem 1B/max  pids 1  net -0B +0B  [1s]
+#stats cpu=1 cores=2 mem=1 mem_max=max pids=1 rx=0 tx=0 secs=1'
+monitor_ingest '10:00:02  TLS   small.example (8.8.8.8)
+-- cpu 1.0% of 2 core(s)  mem 1B/max  pids 1  net -0B +0B  [1s]
+#stats cpu=1 cores=2 mem=1 mem_max=max pids=1 rx=0 tx=0 secs=1'
+recency_out="$(monitor_dashboard pia-testframe 1)"
+small_line="$(printf '%s' "$recency_out" | grep -n -F 'small.example' | head -1 | cut -d: -f1)"
+big_line="$(printf '%s' "$recency_out" | grep -n -F 'big.example' | head -1 | cut -d: -f1)"
+assert_helper "yes" "$([ "${small_line:-9999}" -lt "${big_line:-9999}" ] && echo yes)" \
+    "the most recently called destination is listed above the dormant one, despite fewer hits"
+assert_output_contains "x100  TLS   big.example" "$recency_out" "... while the dormant destination keeps its accumulated count"
+
 # No limit: there is no percentage to gauge, so the row says 'unlimited' (the
 # same call line mode makes) rather than a meaningless bar.
 CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
-DEST_LIST=(); DEST_TOTAL=(); DEST_CUR=(); DEST_CUR_N=()
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=()
 monitor_ingest '14:03:20  TLS   example.org (1.2.3.4)
 -- cpu 0.0% of 8 core(s)  mem 1.0MiB/unlimited  pids 1  net -0B +0B  [3s]
 #stats cpu=0.5 cores=8 mem=1048576 mem_max=max pids=1 rx=0 tx=0 secs=3'
@@ -1683,7 +1708,7 @@ assert_output_contains "unlimited" "$unlimited_out" "the memory row says 'unlimi
 
 # An empty monitor (no samples yet, nothing requested) still draws a frame.
 CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
-DEST_LIST=(); DEST_TOTAL=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
 empty_out="$(monitor_dashboard pia-testframe 3)"
 assert_output_contains "targets: 0" "$empty_out" "an idle monitor draws a frame, it does not crash"
 
@@ -1731,6 +1756,33 @@ else
     echo -e "  ${RED}FAIL${NC}: the helper's usage should document the 'stats' argument"
     FAIL=$((FAIL + 1))
 fi
+
+# --- mem_bytes: page cache is not 'in use' ----------------------------------
+
+# The '12 GiB' lies bug: memory.current counts the PAGE CACHE charged to the
+# cgroup, so an agent that just streamed a lot of traffic left ~11 GiB of
+# reclaimable cache behind and the monitor called it 12 GiB 'used' while the
+# processes held ~1 GiB. The helper now subtracts the reclaimable part
+# (inactive_file / v1 total_inactive_file) exactly like 'docker stats'.
+eval "$(sed -n '/^mem_bytes()/,/^}/p' "$HELPER")"
+FAKE_CG="$(mktemp -d)"
+printf '12884901888' > "$FAKE_CG/memory.current"              # 12.0 GiB charged
+printf '21474836480' > "$FAKE_CG/memory.max"                  # 20.0 GiB limit
+printf 'anon 1288489984\nfile 11596411904\ninactive_file 11596411904\n' > "$FAKE_CG/memory.stat"
+CG="$FAKE_CG"
+assert_helper "1288489984 21474836480" "$(mem_bytes)" \
+    "mem_bytes subtracts reclaimable page cache — 12 GiB charged, 10.8 GiB cache, ~1 GiB real"
+printf '1048576' > "$FAKE_CG/memory.current"
+printf 'anon 0\nfile 10485760\ninactive_file 10485760\n' > "$FAKE_CG/memory.stat"
+assert_helper "0 21474836480" "$(mem_bytes)" "... and never reports a negative number when the cache exceeds the charge"
+rm -f "$FAKE_CG/memory.current" "$FAKE_CG/memory.max" "$FAKE_CG/memory.stat"
+mkdir -p "$FAKE_CG/memory"
+printf '3221225472' > "$FAKE_CG/memory/memory.usage_in_bytes"
+printf 'unlimited' > "$FAKE_CG/memory/memory.limit_in_bytes"
+printf 'total_inactive_file 1073741824\n' > "$FAKE_CG/memory/memory.stat"
+assert_helper "2147483648 max" "$(mem_bytes)" "the cgroup v1 branch subtracts total_inactive_file too"
+rm -rf "$FAKE_CG"
+CG="/sys/fs/cgroup"
 
 # The chart must never be the only way to see a sample: the line view stays
 # reachable, and a non-terminal stays on it.
