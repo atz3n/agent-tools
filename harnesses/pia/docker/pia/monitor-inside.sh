@@ -11,7 +11,13 @@
 # only to the destination log that backs 'pia urls'.
 #
 # Usage:
-#   pia-monitor cycle [SECONDS]   capture for SECONDS, print flows + summary
+#   pia-monitor cycle [SECONDS] [stats]
+#                                 capture for SECONDS, print flows + summary;
+#                                 with 'stats' also print one '#stats k=v ...'
+#                                 machine-readable line, which is what the
+#                                 host-side 'pia monitor' chart draws its
+#                                 sparklines from (the human summary stays,
+#                                 so a hand-run cycle is unchanged)
 #   pia-monitor raw [SECONDS]     stream flows as they happen (no summary);
 #                                 without SECONDS it runs until interrupted,
 #                                 which is how it is started by hand — stop it
@@ -37,6 +43,9 @@ set -uo pipefail
 
 MODE="${1:-cycle}"
 DURATION="${2:-}"
+# Third argument of 'cycle': 'stats' asks for the machine-readable sample line
+# that backs 'pia monitor' charts. Anything else is a typo, caught below.
+STATS="${3:-}"
 IFACE="${PIA_MONITOR_IFACE:-any}"
 CG=/sys/fs/cgroup
 # Destination log backing 'pia urls' — written only by the 'log' mode.
@@ -169,13 +178,18 @@ _flush_run() {
     prev=""; count=0
 }
 
+# Matched as a variable operand, not inline: bash 3.2 (macOS' /bin/bash,
+# should this helper ever be run on a host) aborts on unquoted parentheses
+# inside '[[ =~ ]]'.
+RE_HMS='([0-9][0-9]:[0-9][0-9]:[0-9][0-9])'
+
 flows() {
     local stream="${1:-0}" t ip ip6 sni method host uri peer target what prev="" first="" count=0
 
     while IFS='|' read -r t ip ip6 sni method host uri; do
         peer="$ip"; [ -n "$peer" ] || peer="$ip6"
         # the time field looks like: Nov  3, 2026 17:21:32.415311341 UTC
-        if [[ "$t" =~ ([0-9][0-9]:[0-9][0-9]:[0-9][0-9]) ]]; then
+        if [[ "$t" =~ $RE_HMS ]]; then
             t="${BASH_REMATCH[1]}"
         else
             t="--:--:--"
@@ -329,6 +343,16 @@ run_cycle() {
         "$(human "$(( net2[0] - net1[0] ))")" \
         "$(human "$(( net2[1] - net1[1] ))")" \
         "$DURATION"
+
+    # The same sample in machine-readable form, for 'pia monitor' charts. Raw
+    # byte counts and plain numbers on purpose: the host does its own scaling,
+    # so nothing here has to be parsed back out of a human string. 'pids' may
+    # be '?' (no pids cgroup) and 'mem_max' may be 'max'; the host handles both.
+    if [ "$STATS" = "stats" ]; then
+        printf '#stats cpu=%s cores=%s mem=%s mem_max=%s pids=%s rx=%s tx=%s secs=%s\n' \
+            "$cpu_pct" "$cores" "$used" "$limit" "$pids" \
+            "$(( net2[0] - net1[0] ))" "$(( net2[1] - net1[1] ))" "$DURATION"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -463,7 +487,8 @@ run_urls() {
 
 # A duration is always a whole number of seconds; 'pia monitor' validates its
 # own arguments, so anything else here means a hand-typed call. Only the
-# monitor modes take one.
+# monitor modes take one. The only accepted third argument is 'stats', and only
+# for 'cycle' — 'raw' streams flows and has no sample to describe.
 case "$MODE" in
     (cycle | raw)
         case "$DURATION" in
@@ -474,6 +499,11 @@ case "$MODE" in
         esac
         ;;
 esac
+
+if [ -n "$STATS" ] && { [ "$MODE" != "cycle" ] || [ "$STATS" != "stats" ]; }; then
+    echo "[ERROR] Unknown option for 'pia-monitor cycle': '${STATS}' (expected 'stats')." >&2
+    exit 2
+fi
 
 case "$MODE" in
     raw)   run_raw ;;

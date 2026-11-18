@@ -340,7 +340,7 @@ The `pia` CLI lets you run multiple Pi agent containers in parallel, each with i
 | `pia restart [NAME] -m /path` | Stop/remove then run fresh |
 | `pia exec [NAME] [CMD]` | Execute a command in a running container |
 | `pia sh [NAME]` / `pia shell [NAME]` | Open an interactive bash shell in a running container (omit NAME if only one runs) |
-| `pia monitor [NAME]` | Live view of the container's request destinations (TLS SNI / cleartext HTTP URLs) plus CPU, memory and net I/O — terminal only, the monitor itself logs nothing (`--raw` streams destinations only) |
+| `pia monitor [NAME]` | Live view of the container's request destinations (TLS SNI / cleartext HTTP URLs) plus CPU, memory and net I/O — drawn as charts on a terminal (sparklines, a memory gauge, a ranked destination pane), one line per sample when piped. Terminal only, the monitor itself logs nothing (`--raw` streams destinations only, `--no-chart` forces the line view, `--chart` forces the dashboard) |
 | `pia urls [NAME]` | Every destination/URL the container has called since its creation, with counts — the entrypoint keeps a `tshark` request log (`/var/log/pia-urls.log`) for the container's whole life; `--all` prints every logged request |
 | `pia dindlog [NAME]` | Nested-container guard refusals of the agent's throwaway Docker daemon — the reasons behind opaque `runc did not terminate successfully` errors; works even after a guard kill-switch exit (reads the log from the container layer) |
 
