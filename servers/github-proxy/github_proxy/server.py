@@ -13,7 +13,7 @@ import signal
 from urllib.parse import urlparse
 
 from .config import PORT, TARGET, TOKEN, logger, validate_token
-from .whitelist import _ALLOWED_PATHS, is_allowed_endpoint
+from .whitelist import _ALLOWED_PATHS, is_allowed_endpoint, normalize_path
 
 # ---------------------------------------------------------------------------
 # Signal handler
@@ -33,7 +33,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     """Forward allowed PR/issue requests to GitHub; reject everything else."""
 
     def _proxy(self, method: str) -> None:
-        raw_path = self.path
+        raw_path = normalize_path(self.path)  # rewrite alias paths (e.g. requested-reviewers)
         path = raw_path.split("?")[0]  # strip query params for whitelist matching
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
 

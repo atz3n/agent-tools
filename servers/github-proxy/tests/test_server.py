@@ -122,6 +122,40 @@ class TestEndpointWhitelist(unittest.TestCase):
         """PUT /repos/{owner}/{repo}/pulls/{number}/update-branch should be allowed."""
         self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/update-branch'))
 
+    def test_list_requested_reviewers_allowed(self) -> None:
+        """GET /repos/{owner}/{repo}/pulls/{number}/requested_reviewers should be allowed."""
+        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/requested_reviewers'))
+
+    def test_add_requested_reviewers_allowed(self) -> None:
+        """POST /repos/{owner}/{repo}/pulls/{number}/requested_reviewers should be allowed."""
+        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/requested_reviewers'))
+
+    def test_remove_requested_reviewers_allowed(self) -> None:
+        """DELETE /repos/{owner}/{repo}/pulls/{number}/requested_reviewers should be allowed."""
+        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/requested_reviewers'))
+
+    def test_requested_reviewers_hyphen_variant_normalized(self) -> None:
+        """Hyphenated /requested-reviewers is normalized to GitHub's underscore route."""
+        normalized = whitelist.normalize_path('/repos/owner/repo/pulls/42/requested-reviewers')
+        self.assertEqual(normalized, '/repos/owner/repo/pulls/42/requested_reviewers')
+        self.assertTrue(whitelist.is_allowed_endpoint(normalized))
+
+    def test_normalize_path_preserves_query(self) -> None:
+        """normalize_path keeps query parameters intact."""
+        self.assertEqual(
+            whitelist.normalize_path('/repos/owner/repo/pulls/42/requested-reviewers?per_page=10'),
+            '/repos/owner/repo/pulls/42/requested_reviewers?per_page=10',
+        )
+
+    def test_normalize_path_leaves_other_paths_untouched(self) -> None:
+        """normalize_path only rewrites known aliases."""
+        for path in (
+            '/repos/owner/repo/pulls/42/reviews',
+            '/repos/owner/repo/pulls/42/requested_reviewers',
+            '/repos/owner/repo/issues/7',
+        ):
+            self.assertEqual(whitelist.normalize_path(path), path)
+
     def test_get_authenticated_user_allowed(self) -> None:
         """GET /user should be allowed."""
         self.assertTrue(whitelist.is_allowed_endpoint('/user'))

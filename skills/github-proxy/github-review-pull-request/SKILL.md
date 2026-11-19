@@ -1,6 +1,6 @@
 ---
 name: github-review-pull-request
-description: Call the GitHub PR proxy server via REST API to list, create, submit, update, dismiss, or delete pull request reviews and review comments through the local proxy on port 8086.
+description: Call the GitHub PR proxy server via REST API to list, create, submit, update, dismiss, or delete pull request reviews, request reviewers, and manage review comments through the local proxy on port 8086.
 ---
 
 This skill provides instructions for calling the GitHub PR proxy server directly via REST API. The proxy runs on `localhost:8086` and injects your PAT automatically — no authentication header needed.
@@ -143,6 +143,33 @@ curl -s -X PUT $PROXY/repos/{owner}/{repo}/pulls/42/reviews/123/dismissals \
   -H "Content-Type: application/json" \
   -d '{"message": "Superseded by new review", "event": "DISMISS"}' | jq '.'
 ```
+
+## Request Reviewers
+
+Formally request reviewers on a PR. Use the hyphenated path `requested-reviewers` — the proxy normalizes it to GitHub's canonical underscore route (`/pulls/{n}/requested_reviewers`) before forwarding. Both forms work.
+
+```bash
+# Request individual and/or team reviewers
+curl -s -X POST $PROXY/repos/{owner}/{repo}/pulls/42/requested-reviewers \
+  -H "Content-Type: application/json" \
+  -d '{"reviewers": ["octocat"], "team_reviewers": ["my-team"]}' | jq '.'
+```
+
+```bash
+# List currently requested reviewers (users + teams)
+curl -s $PROXY/repos/{owner}/{repo}/pulls/42/requested-reviewers | jq '.'
+```
+
+```bash
+# Remove a previously requested reviewer
+curl -s -X DELETE $PROXY/repos/{owner}/{repo}/pulls/42/requested-reviewers \
+  -H "Content-Type: application/json" \
+  -d '{"reviewers": ["octocat"]}' | jq '.'
+```
+
+Notes:
+- `reviewers` are individual usernames; `team_reviewers` are team slugs (without org prefix). At least one of the two is required for POST/DELETE.
+- Reviewers must be eligible for the repo (collaborators); otherwise GitHub returns `422`.
 
 ## List Comments for a Review
 

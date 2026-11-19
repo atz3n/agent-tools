@@ -28,6 +28,9 @@ _PR_PATHS: list[str] = [
     r"^/repos/[^/]+/[^/]+/pulls/\d+/reviews/\d+/comments$",
     r"^/repos/[^/]+/[^/]+/pulls/\d+/reviews/\d+/dismissals$",
     r"^/repos/[^/]+/[^/]+/pulls/\d+/reviews/\d+/events$",
+    # Requested reviewers (list / add / remove). GitHub's route uses an
+    # underscore: /pulls/{n}/requested_reviewers
+    r"^/repos/[^/]+/[^/]+/pulls/\d+/requested_reviewers$",
     # PR metadata
     r"^/repos/[^/]+/[^/]+/pulls/\d+/commits$",
     r"^/repos/[^/]+/[^/]+/pulls/\d+/files$",
@@ -65,6 +68,32 @@ _ISSUE_PATHS: list[str] = [
 _ALLOWED_PATHS: list[str] = _PR_PATHS + _ISSUE_PATHS
 
 _ALLOWED_PATTERNS: list[re.Pattern[str]] = [re.compile(p) for p in _ALLOWED_PATHS]
+
+# ---------------------------------------------------------------------------
+# Path aliases
+# ---------------------------------------------------------------------------
+
+# Accepted alias paths rewritten to GitHub's canonical routes before the
+# whitelist check and forwarding. GitHub's requested-reviewers route uses an
+# underscore (/pulls/{n}/requested_reviewers); the hyphenated alias matches
+# GitHub's operation-id style and is what agents tend to reach for.
+_PATH_ALIASES: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"^(?P<prefix>/repos/[^/]+/[^/]+/pulls/\d+)/requested-reviewers$"),
+        r"\g<prefix>/requested_reviewers",
+    ),
+]
+
+
+def normalize_path(path: str) -> str:
+    """Rewrite alias paths to their canonical GitHub route.
+
+    Query parameters are preserved.
+    """
+    clean_path, sep, query = path.partition("?")
+    for pattern, repl in _PATH_ALIASES:
+        clean_path = pattern.sub(repl, clean_path)
+    return clean_path + (sep + query if sep else "")
 
 
 def is_allowed_endpoint(path: str) -> bool:

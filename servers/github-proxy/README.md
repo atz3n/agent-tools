@@ -33,6 +33,11 @@ A lightweight HTTP proxy that exposes a subset of endpoints from the GitHub REST
 | GET | `/repos/{owner}/{repo}/pulls/{number}/files` | List PR changed files |
 | GET | `/repos/{owner}/{repo}/commits/{sha}/pulls` | List PRs with commit |
 | PUT | `/repos/{owner}/{repo}/pulls/{number}/update-branch` | Update PR branch |
+| GET | `/repos/{owner}/{repo}/pulls/{number}/requested-reviewers` | List requested reviewers |
+| POST | `/repos/{owner}/{repo}/pulls/{number}/requested-reviewers` | Request reviewers |
+| DELETE | `/repos/{owner}/{repo}/pulls/{number}/requested-reviewers` | Remove requested reviewers |
+
+> Requested-reviewer paths are also accepted in GitHub's canonical underscore form (`requested_reviewers`); the proxy normalizes the hyphenated alias to it before forwarding.
 | GET | `/repos/{owner}/{repo}/issues` | List issues |
 | POST | `/repos/{owner}/{repo}/issues` | Create issue |
 | GET | `/repos/{owner}/{repo}/issues/{number}` | Get issue |
