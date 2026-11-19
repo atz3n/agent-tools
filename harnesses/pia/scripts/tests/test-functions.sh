@@ -1466,12 +1466,12 @@ dest_hits() {
     eval "printf '%s' \"\${$2[$CHART_IDX]}\""
 }
 
-assert_helper "agd" "$(sparkline 4 0 10 5)" "sparkline scales to the maximum of what it shows, one step below the top"
+assert_helper "agd." "$(sparkline 4 0 10 5)" "sparkline scales to the maximum of what it shows, one step below the top — free slots stay '.' placeholders"
 assert_helper "fg" "$(sparkline 2 1 2 3 4)" "sparkline shows the LAST width values, not the first"
-assert_helper "gg" "$(sparkline 8 7 7)" "a flat series sits one glyph below the top — the ceiling glyph stays a gap, so 'all up' still reads as a line, not a wall"
+assert_helper "gg......" "$(sparkline 8 7 7)" "a flat series sits one glyph below the top — the ceiling glyph stays a gap, so 'all up' still reads as a line, not a wall"
 assert_helper "aaa" "$(sparkline 3 0 0 0)" "sparkline of an all-zero series is the lowest glyph"
-assert_helper "   " "$(sparkline 3)" "sparkline with no values is blank, not an error"
-assert_helper "ag" "$(sparkline 4 -5 10)" "sparkline clamps a negative value instead of indexing off the end"
+assert_helper "..." "$(sparkline 3)" "sparkline with no values is a row of '.' placeholders — the chart reserves its width and 'no data yet' is visible"
+assert_helper "ag.." "$(sparkline 4 -5 10)" "sparkline clamps a negative value instead of indexing off the end"
 
 assert_helper "ggggg....." "$(bar 10 50)" "bar 10 50 fills half"
 assert_helper "gggg" "$(bar 4 150)" "bar clamps above 100%"
@@ -1483,6 +1483,10 @@ assert_helper "0B" "$(human_bytes 0)" "human_bytes 0"
 assert_helper "2.0KiB" "$(human_bytes 2048)" "human_bytes KiB"
 assert_helper "1.0MiB" "$(human_bytes 1048576)" "human_bytes MiB"
 assert_helper "-2.0KiB" "$(human_bytes -2048)" "human_bytes keeps the sign of a counter that went backwards"
+
+assert_helper "999" "$(human_count 999)" "human_count below a thousand is plain"
+assert_helper "262.1k" "$(human_count 262144)" "human_count scales tokens to k"
+assert_helper "1.5M" "$(human_count 1500000)" "human_count scales tokens to M"
 
 assert_helper "abc   " "$(chart_pad abc 6)" "chart_pad pads to the column width"
 assert_helper "abcd~" "$(chart_pad abcdefg 5)" "chart_pad truncates with a ~ marker"
@@ -1498,7 +1502,7 @@ CPU_SERIES=()
 series_push CPU_SERIES 3
 series_push CPU_SERIES 20
 series_push CPU_SERIES 7
-assert_helper "bgc" "$(series_spark CPU_SERIES 10)" "series_spark renders the series it is given"
+assert_helper "bgc......." "$(series_spark CPU_SERIES 10)" "series_spark renders the series it is given, padded with '.' to full width"
 assert_helper "20" "$(series_max CPU_SERIES)" "series_max reports the peak, not the last value"
 assert_helper "20.0" "$(series_max CPU_SERIES '%.1f')" "series_max formats the peak when asked (percents keep a decimal)"
 series_push CPU_SERIES "not-a-number"
@@ -1512,7 +1516,7 @@ assert_helper "5" "$(series_max MEM_SERIES)" "the trimmed series keeps the newes
 CHART_HISTORY=240
 
 CPU_SERIES=()
-assert_helper "  " "$(series_spark CPU_SERIES 2)" "series_spark of an empty series is blank (and survives 'set -u')"
+assert_helper ".." "$(series_spark CPU_SERIES 2)" "series_spark of an empty series is '.' placeholders (and survives 'set -u')"
 assert_helper "0" "$(series_max CPU_SERIES)" "series_max of an empty series is 0"
 
 # --- chart_index ------------------------------------------------------------
@@ -1534,8 +1538,8 @@ assert_helper "-1" "$CHART_IDX" "chart_index on an empty list is a miss, not an 
 
 MON_CYCLE='14:03:11  TLS   api.github.com (20.205.243.168)   x14
 14:03:12  HTTP  GET localhost:8088/tasks?status=open
--- cpu 4.2% of 8 core(s)  mem 300.0MiB/2.0GiB (14.6%)  pids 12  net -12.0KiB +4.0KiB  [3s]
-#stats cpu=4.2 cores=8 mem=314572800 mem_max=2147483648 pids=12 rx=12288 tx=4096 secs=3'
+-- cpu 4.2% of 8 core(s)  mem 300.0MiB/2.0GiB (14.6%)  pids 12  net -12.0KiB +4.0KiB  tok in 262.1k (in 8.2k + cached 254.0k) out 21.5k $0.42  [3s]
+#stats cpu=4.2 cores=8 mem=314572800 mem_max=2147483648 pids=12 rx=12288 tx=4096 secs=3 tok_in=8192 tok_cache=253952 tok_out=21504 tok_cost=0.42'
 
 CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
 DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
@@ -1622,7 +1626,11 @@ assert_helper "" "$(monitor_uptime not-a-number)" "monitor_uptime ignores a time
 CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
 DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
 CHART_STARTED_EPOCH=$(( $(date +%s) - 61 ))
-CHART_COLS=80 CHART_LINES=24
+# Deterministic frame size: on a real terminal 'tput' would report whatever
+# width the suite happens to run in, and header assertions (which show every
+# field) would depend on the machine. 100 columns shows everything.
+chart_term_size() { CHART_COLS="${FRAME_COLS:-100}"; CHART_LINES=24; }
+FRAME_COLS=100
 monitor_ingest "$MON_CYCLE"
 frame_out="$(monitor_dashboard pia-testframe 3)"
 case "$frame_out" in ($'\e[H\e[2J'*) frame_home=yes ;; (*) frame_home=no ;; esac
@@ -1630,7 +1638,23 @@ assert_helper "yes" "$frame_home" "the frame homes the cursor and clears the who
 assert_output_contains "cpu" "$frame_out" "the frame draws the cpu row"
 assert_output_contains "mem  300.0MiB/2.0GiB (14.6%)" "$frame_out" "the frame shows memory against its limit"
 assert_output_contains "pids 12" "$frame_out" "the frame shows the current pids in the header"
-assert_output_contains "peak cpu 4.2%  mem 300.0MiB" "$frame_out" "the header carries the run's peak cpu and peak memory next to the uptime"
+assert_output_contains "peak cpu 4.2%/mem 300.0MiB" "$frame_out" "the header carries the run's peak cpu and peak memory next to the uptime"
+assert_output_contains "tok in 262.1k (in 8.2k + cached 254.0k)  out 21.5k  \$0.42" "$frame_out" "the tok row leads with the input total and labels the uncached and cached parts of it"
+net_line="$(printf '%s' "$frame_out" | grep -n '^ net ' | head -1 | cut -d: -f1)"
+tok_line="$(printf '%s' "$frame_out" | grep -n '^ tok ' | head -1 | cut -d: -f1)"
+assert_helper "yes" "$([ "${tok_line:-0}" -eq "$(( ${net_line:-0} + 1 ))" ] && echo yes)" "the tok row sits directly under the net line"
+assert_helper "8192" "$CHART_TOK_IN" "monitor_ingest parses the cumulative token fields"
+assert_helper "253952" "$CHART_TOK_CACHE" "... including the cached-input split"
+# a stale image (helper from before the split) sends tok_in but no tok_cache:
+# the row must fall back to the old combined form, not claim zero cache reads
+unset CHART_TOK_CACHE
+monitor_ingest "$(printf '%s\n' "$MON_CYCLE" | grep '^#stats' | sed 's/ tok_cache=[0-9]*//')"
+assert_helper "" "${CHART_TOK_CACHE-}" "a pre-split stats line leaves tok_cache unset"
+assert_output_contains "tok 8.2k/21.5k" "$(monitor_dashboard pia-testframe 1)" \
+    "a pre-split image renders the old combined token form rather than lying about zero cache"
+# restore the split token state (assigning, not re-ingesting — a second
+# MON_CYCLE ingest would double the destination counts the tests below assert)
+CHART_TOK_IN=8192; CHART_TOK_CACHE=253952; CHART_TOK_OUT=21504; CHART_TOK_COST=0.42
 assert_output_not_contains "peak 300.0MiB" "$frame_out" "the mem row no longer trails its peak"
 assert_output_not_contains "sample" "$frame_out" "the sample counter is bookkeeping, not frame content"
 assert_helper "1" "$(printf '%s' "$frame_out" | grep -c 'pids 12')" "pids appears once — the header, not also a chart row"
@@ -1655,8 +1679,16 @@ while IFS= read -r frline; do
     # terminal counts, so a row passing here cannot wrap.
     [ "${#frline}" -gt "$max_row" ] && max_row="${#frline}"
 done <<< "$clean_frame"
-assert_helper "yes" "$([ "$max_row" -le "$(( CHART_COLS - 1 ))" ] && echo yes || echo "no (widest row: ${max_row} of ${CHART_COLS})")" \
+assert_helper "yes" "$([ "$max_row" -le "$(( FRAME_COLS - 1 ))" ] && echo yes || echo "no (widest row: ${max_row} of ${FRAME_COLS})")" \
     "no frame row reaches the last column — nothing wraps, so the frame cannot drift on the screen"
+
+# 80-column regression: an earlier header gave the tail only 40 columns and
+# the token summary — the number the user asked for — died as 't~'. The
+# token figure must survive an 80-column frame.
+FRAME_COLS=80
+narrow_out="$(monitor_dashboard pia-testframe 1)"
+assert_output_contains "tok in 262.1k" "$narrow_out" "the token summary survives an 80-column frame (was truncated to 't~')"
+FRAME_COLS=100
 if printf '%s' "$frame_out" | grep -q 'bgc\|gggg\|gggggg'; then
     TOTAL=$((TOTAL + 1))
     echo -e "  ${GREEN}PASS${NC}: the frame actually contains chart glyphs"
@@ -1783,6 +1815,29 @@ printf 'total_inactive_file 1073741824\n' > "$FAKE_CG/memory/memory.stat"
 assert_helper "2147483648 max" "$(mem_bytes)" "the cgroup v1 branch subtracts total_inactive_file too"
 rm -rf "$FAKE_CG"
 CG="/sys/fs/cgroup"
+
+# --- tok_usage: the agent's own token accounting ----------------------------
+
+# pi writes every assistant message's usage into its session JSONLs; tok_usage
+# sums EVERY session the container stores, not just the running one. 'in'
+# includes cache reads (the big number is normal), and a half-written last
+# line — a session captured WHILE the agent runs — must cost that file's
+# tail, never the whole ledger.
+eval "$(sed -n '/^tok_usage()/,/^}/p' "$HELPER")"
+FAKE_SESS="$(mktemp -d)"; mkdir -p "$FAKE_SESS/--x--" "$FAKE_SESS/--y--"
+printf '%s\n' \
+    '{"type":"session","version":3,"id":"u","timestamp":"t","cwd":"/w"}' \
+    '{"type":"message","message":{"role":"assistant","usage":{"input":100,"output":40,"cacheRead":900,"cost":{"total":0.01}}}}' \
+    '{"type":"message","message":{"role":"assistant","usage":{"input":200,"output":60,"cacheRead":0,"cost":{"total":0.02}}}}' \
+    '{"type":"message","message":{"role":"user","content":[{"type":"tex' > "$FAKE_SESS/--x--/s.jsonl"
+assert_helper "300 900 100 0.03" "$(PIA_PI_SESSIONS="$FAKE_SESS" tok_usage)" \
+    "tok_usage sums a pi session — uncached and cached input apart, a truncated live tail tolerated"
+printf '%s\n' \
+    '{"type":"session","version":3,"id":"v","timestamp":"t","cwd":"/w2"}' \
+    '{"type":"message","message":{"role":"assistant","usage":{"input":50,"output":10,"cacheRead":50,"cost":{"total":0.01}}}}' > "$FAKE_SESS/--y--/older.jsonl"
+assert_helper "350 950 110 0.04" "$(PIA_PI_SESSIONS="$FAKE_SESS" tok_usage)" \
+    "tok_usage accumulates across ALL sessions the container stores, not just the running one"
+rm -rf "$FAKE_SESS"
 
 # The chart must never be the only way to see a sample: the line view stays
 # reachable, and a non-terminal stays on it.

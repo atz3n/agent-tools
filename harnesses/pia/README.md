@@ -231,7 +231,7 @@ below](#the-chart-dashboard), and a pipe always gets these lines):
 14:03:11  TLS   api.anthropic.com (142.250.72.1)   x3
 14:03:13  HTTP  GET localhost:8088/tasks?status=open
 14:03:14  TLS   registry.npmjs.org (104.16.0.0)
--- cpu 4.2% of 8 core(s)  mem 300.0MiB/2.0GiB (14.6%)  pids 12  net -12.0KiB +4.0KiB  [1s]
+-- cpu 4.2% of 8 core(s)  mem 300.0MiB/2.0GiB (14.6%)  pids 12  net -12.0KiB +4.0KiB  tok in 262.1k (in 8.2k + cached 254.0k) out 21.5k $0.42  [1s]
 ```
 
 ### The chart dashboard
@@ -247,11 +247,12 @@ pia monitor myproj | tee log.txt # the line view: a pipe gets no escape codes
 ```
 
 ```
- pia-k3m9x2p1            up 01:02:05 pids 12  peak cpu 6.8%  mem 813.0MiB
+ pia-k3m9x2p1                up 01:02:05        pids 12   peak cpu 6.8%/mem 813.0MiB
 ────────────────────────────────────────────────────────────────────────────────
  cpu  4.2% of 8 cores          ▁▇▁▂▇▁▂▇▁▁
  mem  300.0MiB/2.0GiB (14.6%)  ▇▇▇▇░░░░░░░░░░░░░░░░░░░░
  net  ↓12.0KiB ↑4.0KiB         rx ▁▇▁▁▇▁▁▇▁▁ tx ▁▇▁▁▇▁▁▇▁▁
+ tok  in 25.2M (in 1.2M + cached 24M)  out 84k  $2.31
 
 destinations  this cycle: 18   total: 197   targets: 5
  x22   HTTP  GET localhost:8088/tasks?status=open
@@ -267,7 +268,8 @@ What is on it, and why:
 
 | Part | Shows | Notes |
 |------|-------|-------|
-| header | name, uptime, current `pids` and the run's **peak cpu/memory** | peaks describe the whole session, so they sit next to the uptime; the pids count is a *right now* number you watch grow — a history row for it bought nothing, so it is no longer charted; how many samples the monitor has drawn is bookkeeping, not on the frame |
+| header | name, uptime, current `pids` and the run's **peak cpu/memory** | peaks describe the whole session, so they sit next to the uptime; on a narrow terminal the tail is truncated with `~` rather than wrapped |
+| `tok` | the agent's **token usage**, cumulative across **all sessions** the container stores, on its own row under `net` — the input **total** with the uncached + cache-read split in parentheses, and output, like pi's own `/usage`, plus cost when the provider reports one | cached reads and fresh prompt tokens are different money, and the cached side dwarfs the other once a session settles — the row leads with the whole and shows the parts, so nobody does token arithmetic mid-glance. Sessions live on the container's filesystem: the total survives stop/start and `pia resume`, and ends with `pia remove`. The row exists because this figure did not survive a squeezed header |
 | `cpu` | newest percent + sparkline of the run | scaled to the run's own maximum, so a container that goes busy after an hour of quiet still lights up — but one step below the top: the highest block is never drawn, so a busy container shows a line with a gap above it, and dips stay visible instead of flattening into a wall |
 | `mem` | gauge against the limit | with no limit there is no percentage to gauge, so the row prints `unlimited` and shows the history instead — the same call line mode makes; the run's peak is in the header |
 | `net` | newest ↓/↑ deltas + two sparklines | rx and tx are separate series: a download and an upload are not the same story |
@@ -283,8 +285,8 @@ Three properties worth knowing:
   in chart mode or out of it. For the whole life of the container there is
   [`pia urls`](#request-history-pia-urls).
 - **The sample itself is machine-readable.** The helper prints one more line per
-  cycle (`#stats cpu=… mem=… rx=… tx=…`) and the host charts *that*, rather than
-  parsing numbers back out of the human summary line. An image built before that
+  cycle (`#stats cpu=… mem=… rx=… tx=… tok_in=… tok_cache=… tok_out=…`) and the host charts
+  *that*, rather than parsing numbers back out of the human summary line. An image built before that
   line existed prints a normal cycle, so the monitor notices, says so once, and
   finishes in the line view — rebuild and `pia restart` to get charts.
 

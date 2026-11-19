@@ -2045,7 +2045,7 @@ case "\$1" in
                 exit 0 ;;
             *"pia-monitor "*)
                 echo "shim-sample: cpu 1.0%"
-                [ "\$(mon_read stats)" = "no" ] || echo "#stats cpu=1.0 cores=2 mem=1048576 mem_max=max pids=3 rx=1024 tx=2048 secs=1"
+                [ "\$(mon_read stats)" = "no" ] || echo "#stats cpu=1.0 cores=2 mem=1048576 mem_max=max pids=3 rx=1024 tx=2048 secs=1 tok_in=1500 tok_cache=100000 tok_out=1000 tok_cost=0.03"
                 exit "\$(mon_read sampler)" ;;
             *"pkill "*)
                 # Real pkill answers 1 ('no process matched') once the helper is

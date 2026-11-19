@@ -172,6 +172,47 @@ human() {
     }'
 }
 
+# Token counts with a decimal k/M suffix — 262.1k reads better in a header
+# than 262144, and tokens are never binary-sized.
+human_tok() {
+    awk -v n="$1" 'BEGIN {
+        if (n >= 1000000) printf "%.1fM", n / 1000000
+        else if (n >= 1000) printf "%.1fk", n / 1000
+        else printf "%d", n
+    }'
+}
+
+# ---------------------------------------------------------------------------
+# token usage — the other half of 'what is this agent costing'
+#
+# pi writes every assistant message's usage into its session JSONLs under
+# ~/.pi/agent/sessions; tok_usage prints '<in> <cache> <out> <cost>' CUMULATED
+# ACROSS ALL SESSIONS the container stores — the running one plus every
+# session it has ever had. Input is split the way pi's own /usage shows it:
+# uncached prompt tokens ('in') and cache reads ('cache') are different money,
+# and after an agent has settled into a session the cached side dwarfs the
+# other — lumping them together hid what is actually being paid for.
+# They live on the container's own filesystem, so the total survives
+# stop/start and 'pia resume' and ends with 'pia remove' — the ledger of this
+# container's agent, which is the question the monitor answers. Cost is
+# whatever the providers reported (0 for local models). Files are summed one
+# jq call each: the newest line of a LIVE session can be half-written, and a
+# per-file parse error must cost that file's tail, never the whole ledger.
+# Without jq (a stripped image) the fields report -1 and the host shows
+# 'tok ?'.
+tok_usage() {
+    local dir="${PIA_PI_SESSIONS:-$HOME/.pi/agent/sessions}" f
+    command -v jq >/dev/null 2>&1 || { echo "-1 -1 -1 -1"; return 0; }
+    [ -d "$dir" ] || { echo "0 0 0 0"; return 0; }
+    find "$dir" -name '*.jsonl' -type f -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+        jq -r 'select(type == "object") | (.message.usage // empty)
+               | [(.input // 0), (.cacheRead // 0), (.output // 0), (.cost.total // 0)] | @tsv' \
+            "$f" 2>/dev/null
+    done |
+    awk '{ i += $1; ca += $2; o += $3; c += $4 } END { printf "%d %d %d %.6g\n", i, ca, o, c }'
+}
+
 # ---------------------------------------------------------------------------
 # flow formatting: turn tshark's 'time|ip|ip6|sni|method|host|uri' records into one
 # readable line per destination.
@@ -333,8 +374,10 @@ run_cycle() {
     net2=($(net_bytes))
 
     local mem used limit mem_pct mem_field cpu_pct pids
+    local tok_in tok_cache tok_out tok_cost tok_field
     mem="$(mem_bytes)"
     pids="$(pids_count)"
+    read -r tok_in tok_cache tok_out tok_cost <<< "$(tok_usage)"
 
     cpu_pct="$(awk -v a="$cpu1" -v b="$cpu2" -v d="$DURATION" -v n="$cores" \
         'BEGIN { t = d * n * 1000000; printf "%.1f", (t > 0) ? (b - a) * 100 / t : 0 }')"
@@ -358,20 +401,31 @@ run_cycle() {
         exit 2
     fi
 
-    printf -- '-- cpu %s%% of %s core(s)  mem %s  pids %s  net -%s +%s  [%ss]\n' \
+    if [ "$tok_in" = "-1" ]; then
+        tok_field="tok ?"
+    else
+        tok_field="tok in $(human_tok "$(awk -v i="$tok_in" -v c="$tok_cache" 'BEGIN { printf "%d", i + c }')") (in $(human_tok "$tok_in") + cached $(human_tok "$tok_cache")) out $(human_tok "$tok_out")"
+        # the price only when a provider actually reported one
+        tok_field="$tok_field$(awk -v c="$tok_cost" 'BEGIN { if (c + 0 > 0) printf " $%.2f", c + 0 }')"
+    fi
+
+    printf -- '-- cpu %s%% of %s core(s)  mem %s  pids %s  net -%s +%s  %s  [%ss]\n' \
         "$cpu_pct" "$cores" "$mem_field" "$pids" \
         "$(human "$(( net2[0] - net1[0] ))")" \
         "$(human "$(( net2[1] - net1[1] ))")" \
-        "$DURATION"
+        "$tok_field" "$DURATION"
 
     # The same sample in machine-readable form, for 'pia monitor' charts. Raw
     # byte counts and plain numbers on purpose: the host does its own scaling,
     # so nothing here has to be parsed back out of a human string. 'pids' may
-    # be '?' (no pids cgroup) and 'mem_max' may be 'max'; the host handles both.
+    # be '?' (no pids cgroup), 'mem_max' may be 'max', and the tok_* fields are
+    # cumulative across ALL sessions the container stores; the host handles
+    # all of them.
     if [ "$STATS" = "stats" ]; then
-        printf '#stats cpu=%s cores=%s mem=%s mem_max=%s pids=%s rx=%s tx=%s secs=%s\n' \
+        printf '#stats cpu=%s cores=%s mem=%s mem_max=%s pids=%s rx=%s tx=%s secs=%s tok_in=%s tok_cache=%s tok_out=%s tok_cost=%s\n' \
             "$cpu_pct" "$cores" "$used" "$limit" "$pids" \
-            "$(( net2[0] - net1[0] ))" "$(( net2[1] - net1[1] ))" "$DURATION"
+            "$(( net2[0] - net1[0] ))" "$(( net2[1] - net1[1] ))" "$DURATION" \
+            "$tok_in" "$tok_cache" "$tok_out" "$tok_cost"
     fi
 }
 

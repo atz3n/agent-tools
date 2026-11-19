@@ -2016,6 +2016,16 @@ human_bytes() {
     }'
 }
 
+# Token counts with a decimal k/M suffix (same rule as the helper's
+# human_tok): 262144 tokens is 262.1k, never 256KiB — tokens are not bytes.
+human_count() {
+    awk -v n="${1:-0}" 'BEGIN {
+        if (n >= 1000000) printf "%.1fM", n / 1000000
+        else if (n >= 1000) printf "%.1fk", n / 1000
+        else printf "%d", n
+    }'
+}
+
 # chart_pad TEXT WIDTH — pad (or truncate, with a '~') to WIDTH columns so the
 # chart columns line up. Padding is counted with ${#s} and printed as plain
 # spaces, because 'printf %-Ns' counts BYTES and a padded string can well
@@ -2043,7 +2053,10 @@ chart_pad() {
 sparkline() {
     local width="${1:-20}" out="" lv
     shift
-    [ $# -gt 0 ] || { printf '%*s' "$width" ''; return 0; }
+    # slots without a sample yet are '.', not blank: the chart reserves its
+    # full width from the first cycle (nothing shifts as history grows) and
+    # 'no data yet' is something you can see
+    [ $# -gt 0 ] || { printf '%*s' "$width" '' | tr ' ' '.'; return 0; }
     for lv in $(printf '%s\n' "$@" | awk -v w="$width" '
         { v[++n] = $1 + 0; if (v[n] < 0) v[n] = 0 }
         END {
@@ -2055,6 +2068,7 @@ sparkline() {
         }'); do
         out+="${CHART_GLYPHS[$lv]}"
     done
+    while [ "${#out}" -lt "$width" ]; do out+="."; done
     printf '%s' "$out"
 }
 
@@ -2125,7 +2139,7 @@ series_push() {
 series_spark() {
     local __name="$1" __w="${2:-20}" __n
     eval "__n=\${#${__name}[@]}"
-    [ "${__n:-0}" -gt 0 ] || { printf '%*s' "$__w" ''; return 0; }
+    [ "${__n:-0}" -gt 0 ] || { printf '%*s' "$__w" '' | tr ' ' '.'; return 0; }
     eval "sparkline \"\$__w\" \"\${${__name}[@]}\""
 }
 
@@ -2214,7 +2228,12 @@ monitor_ingest() {
 
     [ -n "$stats_line" ] || return 1
 
-    # '#stats cpu=1.2 cores=8 mem=... mem_max=max pids=12 rx=... tx=... secs=3'
+    # '#stats cpu=1.2 cores=8 mem=... mem_max=max pids=12 rx=... tx=... secs=3
+    #         tok_in=... tok_cache=... tok_out=... tok_cost=...'
+    # (the tok_* fields are cumulative across ALL pi sessions the container
+    # stores, with input split into uncached and cached like pi's /usage; an
+    # image built before tokens existed simply omits them and the tok row
+    # shows 'tok ?')
     read -r -a words <<< "${stats_line#'\#stats '}"
     i=0
     while [ "$i" -lt "${#words[@]}" ]; do
@@ -2229,6 +2248,10 @@ monitor_ingest() {
             (rx=*)      CHART_RX="$value" ;;
             (tx=*)      CHART_TX="$value" ;;
             (secs=*)    CHART_SECS="$value" ;;
+            (tok_in=*)  CHART_TOK_IN="$value" ;;
+            (tok_cache=*) CHART_TOK_CACHE="$value" ;;
+            (tok_out=*) CHART_TOK_OUT="$value" ;;
+            (tok_cost=*) CHART_TOK_COST="$value" ;;
         esac
         i=$(( i + 1 ))
     done
@@ -2300,7 +2323,7 @@ monitor_uptime() {
 monitor_dashboard() {
     local name="$1" interval="$2"
     local w lw="$CHART_LABEL_WIDTH" rule spark_w half_w bar_w rows
-    local frame="" line dest hits=0 cycle_hits=0 shown=0 mem_field mem_pct mem_peak cpu_peak up
+    local frame="" line dest hits=0 cycle_hits=0 shown=0 mem_field mem_pct mem_peak cpu_peak up tok_disp
     local i n rest
     local -a ranked=()
 
@@ -2310,20 +2333,27 @@ monitor_dashboard() {
     # would turn one '─' into the first byte of a three-byte character.
     rule=""
     while [ "${#rule}" -lt "$(( w - 1 ))" ]; do rule+="$CHART_RULE"; done
-    spark_w=$(( w - lw - 1 )); [ "$spark_w" -lt 8 ] && spark_w=8
+    # a full-width row is ' ' + label(lw) + spark(spark_w) = w-1 — the last
+    # column stays empty, since anything that touches it wraps and a wrapped
+    # frame drifts. sparks no longer shrink while short on samples ('.'
+    # placeholders hold the width), so this budget is now always exercised.
+    spark_w=$(( w - lw - 2 )); [ "$spark_w" -lt 8 ] && spark_w=8
     # The net row prints 'rx ' + spark + ' tx ' + spark after the label column,
     # so half_w is HALF of what is left AFTER those seven characters, not half
     # of spark_w. At 100 columns the old (spark_w / 2) made the row 106 wide:
     # it wrapped, the explicit \n then scrolled one line per frame, and every
     # next frame drew over a screen shifted by one — the 'duplicated net row'
     # and ghosted tails a wide terminal produced.
+    # 'rx ' + ' tx ' cost 7 columns; halves of floor((spark_w-7)/2) keep the
+    # full-width net row at 1 + lw + 7 + 2*half_w ≤ w-1 as well
     half_w=$(( (spark_w - 7) / 2 )); [ "$half_w" -lt 4 ] && half_w=4
     bar_w=$(( spark_w / 2 )); [ "$bar_w" -lt 8 ] && bar_w=8
     [ "$bar_w" -gt 24 ] && bar_w=24
 
-    # Fixed overhead of the frame is 10 lines; whatever is left is destination
+    # Fixed overhead of the frame is 11 lines (the tok row under net counts);
+    # whatever is left is destination
     # rows, capped so a huge terminal does not get 60 mostly-empty rows.
-    rows=$(( CHART_LINES - 10 ))
+    rows=$(( CHART_LINES - 11 ))
     [ "$rows" -lt 1 ] && rows=1
     [ "$rows" -gt "$CHART_ROWS" ] && rows="$CHART_ROWS"
 
@@ -2340,14 +2370,39 @@ monitor_dashboard() {
     done
 
     up="$(monitor_uptime "${CHART_STARTED_EPOCH:-0}")"
-    # The header is the 'right now + worst-case' line: name, uptime, current
-    # pids, and the PEAK cpu/memory of the run — peaks belong next to the
-    # uptime (they describe the whole session) rather than trailing their
-    # row's gauge. chart_pad keeps the tail from pushing the header past the
-    # frame on a narrow terminal; the '~' there is rarer than a long URL.
+    # The header is the 'right now + worst-case' line: name, uptime, pids and
+    # the PEAK cpu/memory of the run — peaks belong next to the uptime (they
+    # describe the whole session) rather than trailing their row's gauge.
+    # Since the token summary moved to its own row, the items get generous
+    # gaps again: name 24, uptime 17, and the tail keeps its own spacing —
+    # the whole line still fits an 80-column frame (the 80-col regression
+    # test guards that). chart_pad guards the tail as a last resort
+    # ('~' beats a wrapped frame).
     mem_peak="$(human_bytes "$(series_max MEM_SERIES)")"
     cpu_peak="$(series_max CPU_SERIES '%.1f')"
-    frame+=" $(chart_pad "$name" 24)$(chart_pad "${up:-up ?}" 14)$(chart_pad "pids ${CHART_PIDS:-?}  peak cpu ${cpu_peak}%  mem ${mem_peak}" "$(( w - 40 ))")"
+    # Token usage across ALL pi sessions the container stores, cumulative,
+    # with the input split the way pi's own /usage shows it: uncached prompt
+    # tokens and cache reads are different money (once an agent settles into
+    # a session the cached side dwarfs the other — one lump figure hid what
+    # is actually being paid for). The price rides along only when a provider
+    # reported one. '-1' means the image has no jq — an unknown is shown as
+    # '?', never as zero.
+    if [ -z "${CHART_TOK_IN:-}" ] || [ "${CHART_TOK_IN:-}" = "-1" ]; then
+        tok_disp="tok ?"
+    elif [ -z "${CHART_TOK_CACHE:-}" ]; then
+        # an image from before the split reports the lumped input only —
+        # render the old combined form rather than lie about zero cache reads
+        tok_disp="tok $(human_count "${CHART_TOK_IN:-0}")/$(human_count "${CHART_TOK_OUT:-0}")"
+    else
+        # the total leads — 'what has the agent fed the models' is the first
+        # question — and the split pi's /usage draws (uncached + cache reads,
+        # different money) rides along in parentheses, so nobody does token
+        # arithmetic mid-glance
+        tok_disp="tok in $(human_count "$(awk -v i="${CHART_TOK_IN:-0}" -v c="${CHART_TOK_CACHE:-0}" 'BEGIN { printf "%d", i + c }')") (in $(human_count "${CHART_TOK_IN:-0}") + cached $(human_count "${CHART_TOK_CACHE:-0}"))  out $(human_count "${CHART_TOK_OUT:-0}")"
+    fi
+    [ "$(awk -v c="${CHART_TOK_COST:-0}" 'BEGIN { print (c + 0 > 0) ? 1 : 0 }')" = "1" ] &&\
+        tok_disp+="  $(printf '$%.2f' "${CHART_TOK_COST}")"
+    frame+=" $(chart_pad "$name" 24)$(chart_pad "${up:-up ?}" 17)$(chart_pad "pids ${CHART_PIDS:-?}   peak cpu ${cpu_peak}%/mem ${mem_peak}" "$(( w - 43 ))")"
     frame+=$'\n'"$rule"$'\n'
 
     # cpu — percent of the container's whole allowance, as in line mode.
@@ -2369,6 +2424,11 @@ monitor_dashboard() {
     # net — the newest deltas as numbers, the history as two sparklines.
     frame+=" $(chart_pad "net  ${CHART_DOWN}$(human_bytes "${CHART_RX:-0}") ${CHART_UP}$(human_bytes "${CHART_TX:-0}")" "$lw")"
     frame+="rx $(series_spark RX_SERIES "$half_w") tx $(series_spark TX_SERIES "$half_w")"$'\n'
+
+    # tok — the agent's cumulative LLM token usage on its own row under net:
+    # the header is rationed (80 columns showed 't~' where the whole figure
+    # should be), and a number nobody has to squeeze is a number that fits.
+    frame+=" $(chart_pad "$tok_disp" "$(( w - 2 ))")"$'\n'
 
     frame+=$'\n'"$(printf 'destinations  this cycle: %d   total: %d   targets: %d' "$cycle_hits" "$hits" "${#DEST_LIST[@]}")"$'\n'
 
@@ -2512,9 +2572,10 @@ cmd_sh() {
 }
 
 # Live view of a running agent container: where its network requests go (TLS
-# SNI hostnames, plus full URLs for cleartext HTTP) alongside CPU, memory, pids
-# and net I/O. The sampling itself runs inside the container by the
-# 'pia-monitor' helper (docker/pia/monitor-inside.sh); this command only resolves the
+# SNI hostnames, plus full URLs for cleartext HTTP) alongside CPU, memory, pids,
+# net I/O and the agent's cumulative LLM token usage across all sessions
+# (read from pi's session files inside the container). The sampling itself runs inside the container by
+# the 'pia-monitor' helper (docker/pia/monitor-inside.sh); this command only resolves the
 # container and loops. The monitor writes nothing to disk anywhere — docker exec
 # streams the lines straight to this terminal. (The container may still keep a
 # destination log for 'pia urls'; this command neither reads nor writes it.)
@@ -2581,7 +2642,9 @@ cmd_monitor() {
                 echo "Usage: $(basename "$0") monitor [NAME] [OPTIONS]"
                 echo ""
                 echo "Watch a running agent container: request destinations (TLS SNI hostnames"
-                echo "and full cleartext HTTP URLs) plus CPU, memory, pids and net I/O."
+                echo "and full cleartext HTTP URLs) plus CPU, memory, pids, net I/O and the"
+                echo "agent's LLM token usage across all sessions stored in the container (in/out,"
+                echo "and cost when the provider reports one)."
                 echo ""
                 echo "On a terminal the sample is drawn as a chart dashboard (sparklines for"
                 echo "cpu/net history, a gauge for memory, the current pids in the header, a"
