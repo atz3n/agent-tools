@@ -47,7 +47,7 @@ The `pia` CLI lets you run multiple pi-agent containers in parallel, each with i
 | `pia restart [NAME] -m /path` | Stop/remove then run fresh |
 | `pia exec [NAME] [CMD]` | Execute a command in a running container |
 | `pia sh [NAME]` / `pia shell [NAME]` | Open an interactive bash shell in a running container (NAME may be omitted if only one is running) |
-| `pia monitor [NAME]` | Live view of where the container's requests go, plus CPU/memory/net (terminal only, the monitor itself logs nothing) |
+| `pia monitor [NAME]` | Live view of where the container's requests go, plus CPU/memory/net — drawn as charts on a terminal, one line per sample when piped (terminal only, the monitor itself logs nothing) |
 | `pia urls [NAME]` | Every destination/URL the container has called **since it was created** (aggregated; `--all` for every request) |
 | `pia dindlog [NAME]` | Nested-container guard refusals of the agent's throwaway Docker daemon (works even after a kill-switch exit) |
 | `pia keep [NAME] [SUFFIX]` | Protect a container from `pia clean` (renames it to `pia-keep-*`) |
@@ -176,8 +176,10 @@ Monitor options (`pia monitor`):
 
 | Option | Description |
 |--------|-------------|
-| `-i, --interval <sec>` | Seconds per resource sample (default `3`); with `--raw`, the length of one capture chunk (default `5`) |
+| `-i, --interval <sec>` | Seconds per resource sample (default `1`); with `--raw`, the length of one capture chunk (default `5`). `-i 5` makes for a calmer chart |
 | `--raw` | Stream destination lines continuously, without the resource summary |
+| `--chart` | Draw the chart dashboard even when stdout is not a terminal (escape codes then go into the pipe too — mostly for testing it) |
+| `--no-chart` | One line per sample, even on a terminal |
 | `-h, --help` | Display help message |
 
 URL-history options (`pia urls`):
@@ -196,7 +198,7 @@ URL-history options (`pia urls`):
 - `pia list` takes no arguments except `-a`/`--all` (which also shows the throwaway `NAME-dind` daemon containers, hidden by default); `pia clean` **takes no arguments** — an argument is rejected rather than ignored, so `pia clean --help` prints usage instead of removing containers
 - `pia ask` runs `pi --print` through `docker exec` (no TTY needed); in a named container the exchange is saved as a session you can later open with `pia rs`
 - `pia sh` (alias `pia shell`) opens `/bin/bash` in a *running* container for manual work; it uses a real TTY when you have one, and when `NAME` is omitted it picks the only running agent container (otherwise it asks for a name)
-- `pia monitor` reads the same "only running container" fallback as `pia sh`; it ends by itself if the container goes away, and it stops the capture inside the container when it ends — by Ctrl-C or otherwise (the URL logger that backs `pia urls` is deliberately *not* stopped — it runs for the container's whole life)
+- `pia monitor` reads the same "only running container" fallback as `pia sh`; it ends by itself if the container goes away, and it stops the capture inside the container when it ends — by Ctrl-C or otherwise (the URL logger that backs `pia urls` is deliberately *not* stopped — it runs for the container's whole life). It charts on a terminal and prints lines when piped, so `pia monitor proj > log.txt` stays readable
 - `pia urls` reads the request log the container's entrypoint keeps from creation onwards; it works any time, for the container's whole life (see [Request History](#request-history-pia-urls))
 - `pia ask` treats its first argument as a container `NAME` only if that container exists; otherwise the whole argument list is the prompt
 - `pia remove` (alias `pia rm`) is the only command that removes a running container; `pia clean` removes only stopped ones, and never removes kept (`pia-keep-*`) containers
@@ -216,19 +218,81 @@ host. (The container separately keeps a destination log for `pia urls`; the
 monitor neither reads nor writes it.)
 
 ```bash
-pia monitor                  # the only running container, 3-second samples
+pia monitor                  # the only running container, 1-second samples
 pia monitor myproj -i 10     # a named container, 10-second samples
 pia monitor myproj --raw     # just the destination lines, streaming
 ```
 
-Each sample prints the destinations seen in that interval, then one resource line:
+Each sample prints the destinations seen in that interval, then one resource line
+(this is the **line view** — what a terminal gets is [the dashboard
+below](#the-chart-dashboard), and a pipe always gets these lines):
 
 ```
 14:03:11  TLS   api.anthropic.com (142.250.72.1)   x3
 14:03:13  HTTP  GET localhost:8088/tasks?status=open
 14:03:14  TLS   registry.npmjs.org (104.16.0.0)
--- cpu 4.2% of 8 core(s)  mem 300.0MiB/2.0GiB (14.6%)  pids 12  net -12.0KiB +4.0KiB  [3s]
+-- cpu 4.2% of 8 core(s)  mem 300.0MiB/2.0GiB (14.6%)  pids 12  net -12.0KiB +4.0KiB  tok in 262.1k (in 8.2k + cached 254.0k) out 21.5k $0.42  [1s]
 ```
+
+### The chart dashboard
+
+On a terminal that same sample is **drawn** instead of printed: one frame per
+interval, replacing itself in place rather than scrolling.
+
+```bash
+pia monitor                      # charts, because stdout is a terminal
+pia monitor myproj -i 5          # a calmer frame: one redraw every 5 seconds
+pia monitor myproj --no-chart    # the line view above, on a terminal too
+pia monitor myproj | tee log.txt # the line view: a pipe gets no escape codes
+```
+
+```
+ pia-k3m9x2p1                up 01:02:05        pids 12   peak cpu 6.8%/mem 813.0MiB
+────────────────────────────────────────────────────────────────────────────────
+ cpu  4.2% of 8 cores          ▁▇▁▂▇▁▂▇▁▁
+ mem  300.0MiB/2.0GiB (14.6%)  ▇▇▇▇░░░░░░░░░░░░░░░░░░░░
+ net  ↓12.0KiB ↑4.0KiB         rx ▁▇▁▁▇▁▁▇▁▁ tx ▁▇▁▁▇▁▁▇▁▁
+ tok  in 25.2M (in 1.2M + cached 24M)  out 84k  $2.31
+
+destinations  this cycle: 18   total: 197   targets: 5
+ x22   HTTP  GET localhost:8088/tasks?status=open
+ x151   TLS   api.github.com (20.205.243.168)
+ x7    TLS   api.anthropic.com (142.250.72.1)
+ x14   TLS   registry.npmjs.org (104.16.0.0)
+ x3    HTTP  POST localhost:8086/repos/x/y/pulls
+
+Ctrl-C to stop · every 1s · -i 5 for a calmer chart · --no-chart for the line view
+```
+
+What is on it, and why:
+
+| Part | Shows | Notes |
+|------|-------|-------|
+| header | name, uptime, current `pids` and the run's **peak cpu/memory** | peaks describe the whole session, so they sit next to the uptime; on a narrow terminal the tail is truncated with `~` rather than wrapped |
+| `tok` | the agent's **token usage**, cumulative across **all sessions** the container stores, on its own row under `net` — the input **total** with the uncached + cache-read split in parentheses, and output, like pi's own `/usage`, plus cost when the provider reports one | cached reads and fresh prompt tokens are different money, and the cached side dwarfs the other once a session settles — the row leads with the whole and shows the parts, so nobody does token arithmetic mid-glance. Sessions live on the container's filesystem: the total survives stop/start and `pia resume`, and ends with `pia remove`. The row exists because this figure did not survive a squeezed header |
+| `cpu` | newest percent + sparkline of the run | scaled to the run's own maximum, so a container that goes busy after an hour of quiet still lights up — but one step below the top: the highest block is never drawn, so a busy container shows a line with a gap above it, and dips stay visible instead of flattening into a wall |
+| `mem` | gauge against the limit | with no limit there is no percentage to gauge, so the row prints `unlimited` and shows the history instead — the same call line mode makes; the run's peak is in the header |
+| `net` | newest ↓/↑ deltas + two sparklines | rx and tx are separate series: a download and an upload are not the same story |
+| destinations | one row per URL, **most recently called first** (the last sample a destination appeared in), its accumulated hits as the tie-break | what the container is talking to NOW sits on top, and a page the agent stopped looking at sinks; counts still add up across samples, so a polled URL keeps one stable, growing row instead of flickering between `x1` and `x0`. No gauge trails the URL: the count is the whole story, and the freed columns show longer URLs in full |
+
+Three properties worth knowing:
+
+- **The frame lives on the alternate screen** (`ESC[?1049h`), so when the monitor
+  ends the terminal is exactly as it was — scrollback included. Nothing is left
+  behind visually, just as nothing is left behind in the container.
+- **The history is in memory and ends with the monitor.** Sparklines are the
+  samples *this* monitor watched, not the container's history: no file is written,
+  in chart mode or out of it. For the whole life of the container there is
+  [`pia urls`](#request-history-pia-urls).
+- **The sample itself is machine-readable.** The helper prints one more line per
+  cycle (`#stats cpu=… mem=… rx=… tx=… tok_in=… tok_cache=… tok_out=…`) and the host charts
+  *that*, rather than parsing numbers back out of the human summary line. An image built before that
+  line existed prints a normal cycle, so the monitor notices, says so once, and
+  finishes in the line view — rebuild and `pia restart` to get charts.
+
+`--chart` forces a frame even when stdout is not a terminal. That is what the test
+suite uses to drive the renderer without a pty; normally you want the automatic
+choice, which keeps pipes and log files free of escape codes.
 
 How it works: `docker exec` runs `pia-monitor` inside the container (from
 `docker/pia/monitor-inside.sh`), which captures with `tshark` on the container's own
@@ -298,7 +362,7 @@ restart loop, runs unbounded by design, and is covered in
 | `TLS <host> (<ip>)` | TLS ClientHello SNI | the *hostname only* — the URL path of an `https://` request is inside the encrypted envelope and is never visible to a packet capture |
 | `HTTP <method> <url>` | cleartext HTTP | full URL, so the local proxies (`8086`/`8087`/`8088`) show in detail |
 | `cpu` | `cpu.stat` usage delta | percent of the container's whole CPU allowance (`cores × interval`) |
-| `mem`, `pids` | `memory.current`, `pids.current` | container limits shown when set (`unlimited` otherwise) |
+| `mem`, `pids` | `memory.current` − `inactive_file`, `pids.current` | the page cache charged to the cgroup is reclaimable, so it is not counted as used — the same rule `docker stats` applies (without it, a download-heavy spell shows as gigabytes 'in use'); container limits shown when set (`unlimited` otherwise). Never compare with the agent's `/proc/meminfo`: inside a container that is the **host's** memory |
 | `net` | `/proc/net/dev` delta | bytes received / sent by this container during the interval |
 
 Requirements and caveats:
@@ -308,7 +372,8 @@ Requirements and caveats:
 - The image must be built with `tshark` and the `pia-monitor` helper. Containers
   created from an older image get a hint to rebuild and `pia restart`. The
   capture tools are the bulk of that rebuild (`tshark` and its dissection
-  library add roughly 250MB to the image).
+  library add roughly 250MB to the image). Charts additionally need the helper's
+  `#stats` sample line; an image without it still monitors, in the line view.
 - This is a passive listener: it never touches the traffic, and it works on a
   container that was already running. It cannot see request *contents* — for that
   you would need a man-in-the-middle proxy plus trusted CA and proxy settings, which is

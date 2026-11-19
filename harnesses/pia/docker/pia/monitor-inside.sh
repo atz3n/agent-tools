@@ -11,7 +11,13 @@
 # only to the destination log that backs 'pia urls'.
 #
 # Usage:
-#   pia-monitor cycle [SECONDS]   capture for SECONDS, print flows + summary
+#   pia-monitor cycle [SECONDS] [stats]
+#                                 capture for SECONDS, print flows + summary;
+#                                 with 'stats' also print one '#stats k=v ...'
+#                                 machine-readable line, which is what the
+#                                 host-side 'pia monitor' chart draws its
+#                                 sparklines from (the human summary stays,
+#                                 so a hand-run cycle is unchanged)
 #   pia-monitor raw [SECONDS]     stream flows as they happen (no summary);
 #                                 without SECONDS it runs until interrupted,
 #                                 which is how it is started by hand — stop it
@@ -37,8 +43,11 @@ set -uo pipefail
 
 MODE="${1:-cycle}"
 DURATION="${2:-}"
+# Third argument of 'cycle': 'stats' asks for the machine-readable sample line
+# that backs 'pia monitor' charts. Anything else is a typo, caught below.
+STATS="${3:-}"
 IFACE="${PIA_MONITOR_IFACE:-any}"
-CG=/sys/fs/cgroup
+CG="${PIA_MONITOR_CGROUP:-/sys/fs/cgroup}"
 # Destination log backing 'pia urls' — written only by the 'log' mode.
 URL_LOG="${PIA_URL_LOG:-/var/log/pia-urls.log}"
 
@@ -91,18 +100,38 @@ cpu_usec() {
     fi
 }
 
-# '<used> <limit>', limit may be 'max'
+# '<used> <limit>', limit may be 'max'.
+#
+# 'used' is NOT the raw usage counter: memory.current also counts the page
+# cache charged to this cgroup, so after a read-heavy spell (an agent that
+# curl'd the internet for an hour) the container 'uses' 12 GiB while its
+# processes hold ~1 GiB — the rest is kernel page cache the kernel hands back
+# the moment anything needs it. That is not 'in use', so the reclaimable part
+# is subtracted, exactly like 'docker stats': usage minus inactive_file on
+# v2, usage minus total_inactive_file on v1. (What the agent inside sees via
+# /proc/meminfo is yet another basis — HOST-WIDE, since there is no lxcfs —
+# which is why its numbers never match the monitor either way.)
 mem_bytes() {
-    local used limit
+    local used limit stat="" key="" cache
     if [ -r "$CG/memory.current" ]; then
         used="$(cat "$CG/memory.current")"
         limit="$(cat "$CG/memory.max" 2>/dev/null || echo max)"
+        stat="$CG/memory.stat"
+        key="inactive_file"
     elif [ -r "$CG/memory/memory.usage_in_bytes" ]; then
         used="$(cat "$CG/memory/memory.usage_in_bytes")"
         limit="$(cat "$CG/memory/memory.limit_in_bytes" 2>/dev/null || echo max)"
+        stat="$CG/memory/memory.stat"
+        key="total_inactive_file"
     else
         used=0
         limit=max
+    fi
+    if [ -n "$stat" ] && [ -r "$stat" ]; then
+        cache="$(awk -v k="$key" '$1 == k { print $2; exit }' "$stat")"
+        [[ "$cache" =~ ^[0-9]+$ ]] || cache=0
+        used=$(( used - cache ))
+        [ "$used" -lt 0 ] && used=0
     fi
     # v1 reports 'unlimited' where v2 reports 'max'
     [ "$limit" = "unlimited" ] && limit=max
@@ -143,6 +172,47 @@ human() {
     }'
 }
 
+# Token counts with a decimal k/M suffix — 262.1k reads better in a header
+# than 262144, and tokens are never binary-sized.
+human_tok() {
+    awk -v n="$1" 'BEGIN {
+        if (n >= 1000000) printf "%.1fM", n / 1000000
+        else if (n >= 1000) printf "%.1fk", n / 1000
+        else printf "%d", n
+    }'
+}
+
+# ---------------------------------------------------------------------------
+# token usage — the other half of 'what is this agent costing'
+#
+# pi writes every assistant message's usage into its session JSONLs under
+# ~/.pi/agent/sessions; tok_usage prints '<in> <cache> <out> <cost>' CUMULATED
+# ACROSS ALL SESSIONS the container stores — the running one plus every
+# session it has ever had. Input is split the way pi's own /usage shows it:
+# uncached prompt tokens ('in') and cache reads ('cache') are different money,
+# and after an agent has settled into a session the cached side dwarfs the
+# other — lumping them together hid what is actually being paid for.
+# They live on the container's own filesystem, so the total survives
+# stop/start and 'pia resume' and ends with 'pia remove' — the ledger of this
+# container's agent, which is the question the monitor answers. Cost is
+# whatever the providers reported (0 for local models). Files are summed one
+# jq call each: the newest line of a LIVE session can be half-written, and a
+# per-file parse error must cost that file's tail, never the whole ledger.
+# Without jq (a stripped image) the fields report -1 and the host shows
+# 'tok ?'.
+tok_usage() {
+    local dir="${PIA_PI_SESSIONS:-$HOME/.pi/agent/sessions}" f
+    command -v jq >/dev/null 2>&1 || { echo "-1 -1 -1 -1"; return 0; }
+    [ -d "$dir" ] || { echo "0 0 0 0"; return 0; }
+    find "$dir" -name '*.jsonl' -type f -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+        jq -r 'select(type == "object") | (.message.usage // empty)
+               | [(.input // 0), (.cacheRead // 0), (.output // 0), (.cost.total // 0)] | @tsv' \
+            "$f" 2>/dev/null
+    done |
+    awk '{ i += $1; ca += $2; o += $3; c += $4 } END { printf "%d %d %d %.6g\n", i, ca, o, c }'
+}
+
 # ---------------------------------------------------------------------------
 # flow formatting: turn tshark's 'time|ip|ip6|sni|method|host|uri' records into one
 # readable line per destination.
@@ -169,13 +239,18 @@ _flush_run() {
     prev=""; count=0
 }
 
+# Matched as a variable operand, not inline: bash 3.2 (macOS' /bin/bash,
+# should this helper ever be run on a host) aborts on unquoted parentheses
+# inside '[[ =~ ]]'.
+RE_HMS='([0-9][0-9]:[0-9][0-9]:[0-9][0-9])'
+
 flows() {
     local stream="${1:-0}" t ip ip6 sni method host uri peer target what prev="" first="" count=0
 
     while IFS='|' read -r t ip ip6 sni method host uri; do
         peer="$ip"; [ -n "$peer" ] || peer="$ip6"
         # the time field looks like: Nov  3, 2026 17:21:32.415311341 UTC
-        if [[ "$t" =~ ([0-9][0-9]:[0-9][0-9]:[0-9][0-9]) ]]; then
+        if [[ "$t" =~ $RE_HMS ]]; then
             t="${BASH_REMATCH[1]}"
         else
             t="--:--:--"
@@ -299,8 +374,10 @@ run_cycle() {
     net2=($(net_bytes))
 
     local mem used limit mem_pct mem_field cpu_pct pids
+    local tok_in tok_cache tok_out tok_cost tok_field
     mem="$(mem_bytes)"
     pids="$(pids_count)"
+    read -r tok_in tok_cache tok_out tok_cost <<< "$(tok_usage)"
 
     cpu_pct="$(awk -v a="$cpu1" -v b="$cpu2" -v d="$DURATION" -v n="$cores" \
         'BEGIN { t = d * n * 1000000; printf "%.1f", (t > 0) ? (b - a) * 100 / t : 0 }')"
@@ -324,11 +401,32 @@ run_cycle() {
         exit 2
     fi
 
-    printf -- '-- cpu %s%% of %s core(s)  mem %s  pids %s  net -%s +%s  [%ss]\n' \
+    if [ "$tok_in" = "-1" ]; then
+        tok_field="tok ?"
+    else
+        tok_field="tok in $(human_tok "$(awk -v i="$tok_in" -v c="$tok_cache" 'BEGIN { printf "%d", i + c }')") (in $(human_tok "$tok_in") + cached $(human_tok "$tok_cache")) out $(human_tok "$tok_out")"
+        # the price only when a provider actually reported one
+        tok_field="$tok_field$(awk -v c="$tok_cost" 'BEGIN { if (c + 0 > 0) printf " $%.2f", c + 0 }')"
+    fi
+
+    printf -- '-- cpu %s%% of %s core(s)  mem %s  pids %s  net -%s +%s  %s  [%ss]\n' \
         "$cpu_pct" "$cores" "$mem_field" "$pids" \
         "$(human "$(( net2[0] - net1[0] ))")" \
         "$(human "$(( net2[1] - net1[1] ))")" \
-        "$DURATION"
+        "$tok_field" "$DURATION"
+
+    # The same sample in machine-readable form, for 'pia monitor' charts. Raw
+    # byte counts and plain numbers on purpose: the host does its own scaling,
+    # so nothing here has to be parsed back out of a human string. 'pids' may
+    # be '?' (no pids cgroup), 'mem_max' may be 'max', and the tok_* fields are
+    # cumulative across ALL sessions the container stores; the host handles
+    # all of them.
+    if [ "$STATS" = "stats" ]; then
+        printf '#stats cpu=%s cores=%s mem=%s mem_max=%s pids=%s rx=%s tx=%s secs=%s tok_in=%s tok_cache=%s tok_out=%s tok_cost=%s\n' \
+            "$cpu_pct" "$cores" "$used" "$limit" "$pids" \
+            "$(( net2[0] - net1[0] ))" "$(( net2[1] - net1[1] ))" "$DURATION" \
+            "$tok_in" "$tok_cache" "$tok_out" "$tok_cost"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -463,7 +561,8 @@ run_urls() {
 
 # A duration is always a whole number of seconds; 'pia monitor' validates its
 # own arguments, so anything else here means a hand-typed call. Only the
-# monitor modes take one.
+# monitor modes take one. The only accepted third argument is 'stats', and only
+# for 'cycle' — 'raw' streams flows and has no sample to describe.
 case "$MODE" in
     (cycle | raw)
         case "$DURATION" in
@@ -474,6 +573,11 @@ case "$MODE" in
         esac
         ;;
 esac
+
+if [ -n "$STATS" ] && { [ "$MODE" != "cycle" ] || [ "$STATS" != "stats" ]; }; then
+    echo "[ERROR] Unknown option for 'pia-monitor cycle': '${STATS}' (expected 'stats')." >&2
+    exit 2
+fi
 
 case "$MODE" in
     raw)   run_raw ;;

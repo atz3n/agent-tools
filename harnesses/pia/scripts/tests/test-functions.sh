@@ -1432,3 +1432,446 @@ else
     echo -e "  ${RED}FAIL${NC}: pia_ps should keep the name-prefix filter"
     FAIL=$((FAIL + 1))
 fi
+
+# =============================================================================
+# SECTION 18: 'pia monitor' chart helpers (sparkline, bar, ingest, dashboard)
+# =============================================================================
+echo ""
+echo -e "${YELLOW}=== SECTION 18: monitor chart helpers ===${NC}"
+
+# The whole chart block: constants, glyph set, renderers and the sample parser.
+# Everything in it is pure — no docker, no files — so it can be sourced and
+# driven with fake samples.
+eval "$(sed -n '/^CHART_HISTORY=/,/^# Name of the only running/p' "$AGENTS" | sed '$d')"
+
+# Glyphs are forced rather than detected: 'locale charmap' answers UTF-8 only on
+# a system that has the locale installed, and these assertions are about the
+# maths and the layout, not about the host's fonts. Letters keep every expected
+# value ASCII, so a failure message stays readable anywhere.
+chart_init
+CHART_GLYPHS=(a b c d e f g h)
+CHART_EMPTY='.'
+CHART_RULE='-'
+CHART_MID='-'
+CHART_DOWN='v'
+CHART_UP='^'
+
+# dest_hits LIST_NAME COUNTS_NAME KEY — the hits recorded for KEY in a parallel
+# (list, counts) pair, or 0. Destinations are held in indexed arrays rather than
+# associative ones (bash 3.2 has no 'declare -A'), so a lookup goes through
+# chart_index exactly as the monitor does it.
+dest_hits() {
+    chart_index "$1" "$3"
+    [ "$CHART_IDX" -ge 0 ] || { printf '0'; return 0; }
+    eval "printf '%s' \"\${$2[$CHART_IDX]}\""
+}
+
+assert_helper "agd." "$(sparkline 4 0 10 5)" "sparkline scales to the maximum of what it shows, one step below the top — free slots stay '.' placeholders"
+assert_helper "fg" "$(sparkline 2 1 2 3 4)" "sparkline shows the LAST width values, not the first"
+assert_helper "gg......" "$(sparkline 8 7 7)" "a flat series sits one glyph below the top — the ceiling glyph stays a gap, so 'all up' still reads as a line, not a wall"
+assert_helper "aaa" "$(sparkline 3 0 0 0)" "sparkline of an all-zero series is the lowest glyph"
+assert_helper "..." "$(sparkline 3)" "sparkline with no values is a row of '.' placeholders — the chart reserves its width and 'no data yet' is visible"
+assert_helper "ag.." "$(sparkline 4 -5 10)" "sparkline clamps a negative value instead of indexing off the end"
+
+assert_helper "ggggg....." "$(bar 10 50)" "bar 10 50 fills half"
+assert_helper "gggg" "$(bar 4 150)" "bar clamps above 100%"
+assert_helper "...." "$(bar 4 -5)" "bar clamps below 0%"
+assert_helper "....." "$(bar 5 0)" "bar of nothing is the empty glyph"
+assert_helper "0" "$(bar 6 100 | grep -c h || true)" "a FULL bar still leaves the ceiling free — the gauge gap matches the sparklines"
+
+assert_helper "0B" "$(human_bytes 0)" "human_bytes 0"
+assert_helper "2.0KiB" "$(human_bytes 2048)" "human_bytes KiB"
+assert_helper "1.0MiB" "$(human_bytes 1048576)" "human_bytes MiB"
+assert_helper "-2.0KiB" "$(human_bytes -2048)" "human_bytes keeps the sign of a counter that went backwards"
+
+assert_helper "999" "$(human_count 999)" "human_count below a thousand is plain"
+assert_helper "262.1k" "$(human_count 262144)" "human_count scales tokens to k"
+assert_helper "1.5M" "$(human_count 1500000)" "human_count scales tokens to M"
+
+assert_helper "abc   " "$(chart_pad abc 6)" "chart_pad pads to the column width"
+assert_helper "abcd~" "$(chart_pad abcdefg 5)" "chart_pad truncates with a ~ marker"
+assert_helper "ab" "$(chart_pad ab 30 | sed 's/ *$//')" "chart_pad never truncates a short string"
+
+assert_helper "12" "$(chart_positive 12)" "chart_positive passes a number through"
+assert_helper "0" "$(chart_positive '?')" "chart_positive turns 'pids ?' (no cgroup) into 0"
+assert_helper "0" "$(chart_positive -5)" "chart_positive turns a negative counter into 0"
+
+# --- series_push / series_spark / series_max --------------------------------
+
+CPU_SERIES=()
+series_push CPU_SERIES 3
+series_push CPU_SERIES 20
+series_push CPU_SERIES 7
+assert_helper "bgc......." "$(series_spark CPU_SERIES 10)" "series_spark renders the series it is given, padded with '.' to full width"
+assert_helper "20" "$(series_max CPU_SERIES)" "series_max reports the peak, not the last value"
+assert_helper "20.0" "$(series_max CPU_SERIES '%.1f')" "series_max formats the peak when asked (percents keep a decimal)"
+series_push CPU_SERIES "not-a-number"
+assert_helper "4" "${#CPU_SERIES[@]}" "series_push keeps one sample per cycle even when the value is unreadable"
+
+CHART_HISTORY=3
+MEM_SERIES=()
+for v in 1 2 3 4 5; do series_push MEM_SERIES "$v"; done
+assert_helper "3" "${#MEM_SERIES[@]}" "series_push trims a series to CHART_HISTORY"
+assert_helper "5" "$(series_max MEM_SERIES)" "the trimmed series keeps the newest values"
+CHART_HISTORY=240
+
+CPU_SERIES=()
+assert_helper ".." "$(series_spark CPU_SERIES 2)" "series_spark of an empty series is '.' placeholders (and survives 'set -u')"
+assert_helper "0" "$(series_max CPU_SERIES)" "series_max of an empty series is 0"
+
+# --- chart_index ------------------------------------------------------------
+
+DEST_LIST=(); DEST_TOTAL=()
+DEST_LIST=("TLS   a.example (1.2.3.4)" "HTTP  GET localhost:8088/x" "TLS   b.example (5.6.7.8)")
+DEST_TOTAL=(3 1 40)
+chart_index DEST_LIST "HTTP  GET localhost:8088/x"
+assert_helper "1" "$CHART_IDX" "chart_index finds an entry by its exact text"
+chart_index DEST_LIST "TLS   nope (9.9.9.9)"
+assert_helper "-1" "$CHART_IDX" "chart_index reports a miss as -1"
+assert_helper "40" "$(dest_hits DEST_LIST DEST_TOTAL "TLS   b.example (5.6.7.8)")" "the parallel counts line up with the list"
+assert_helper "0" "$(dest_hits DEST_LIST DEST_TOTAL "TLS   nope (9.9.9.9)")" "a missing destination reads as no hits"
+DEST_LIST=(); DEST_TOTAL=()
+chart_index DEST_LIST "anything"
+assert_helper "-1" "$CHART_IDX" "chart_index on an empty list is a miss, not an error"
+
+# --- monitor_ingest ---------------------------------------------------------
+
+MON_CYCLE='14:03:11  TLS   api.github.com (20.205.243.168)   x14
+14:03:12  HTTP  GET localhost:8088/tasks?status=open
+-- cpu 4.2% of 8 core(s)  mem 300.0MiB/2.0GiB (14.6%)  pids 12  net -12.0KiB +4.0KiB  tok in 262.1k (in 8.2k + cached 254.0k) out 21.5k $0.42  [3s]
+#stats cpu=4.2 cores=8 mem=314572800 mem_max=2147483648 pids=12 rx=12288 tx=4096 secs=3 tok_in=8192 tok_cache=253952 tok_out=21504 tok_cost=0.42'
+
+CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+monitor_ingest "$MON_CYCLE"
+assert_exit_code 0 0 "monitor_ingest accepts a cycle that carries a '#stats' line"
+assert_helper "14" "$(dest_hits DEST_CUR DEST_CUR_N "TLS   api.github.com (20.205.243.168)")" "monitor_ingest reads the xN counter of a flow line"
+assert_helper "1" "$(dest_hits DEST_CUR DEST_CUR_N "HTTP  GET localhost:8088/tasks?status=open")" "monitor_ingest counts an un-numbered flow line as one hit"
+assert_helper "1" "${#CPU_SERIES[@]}" "monitor_ingest pushes one cpu sample per cycle"
+assert_helper "1" "${CHART_SAMPLES}" "monitor_ingest counts the sample"
+assert_helper "8" "$CHART_CORES" "monitor_ingest parses the cores field"
+assert_helper "2147483648" "$CHART_MEM_MAX" "monitor_ingest parses the memory limit"
+
+# A second cycle: the per-cycle counters reset, the lifetime totals do not.
+monitor_ingest '14:03:15  TLS   api.github.com (20.205.243.168)   x2
+-- cpu 1.0% of 8 core(s)  mem 1.0MiB/unlimited  pids 3  net -0B +0B  [3s]
+#stats cpu=1.0 cores=8 mem=1048576 mem_max=max pids=3 rx=0 tx=0 secs=3'
+assert_helper "2" "$(dest_hits DEST_CUR DEST_CUR_N "TLS   api.github.com (20.205.243.168)")" "the newest cycle holds only that cycle's hits"
+assert_helper "16" "$(dest_hits DEST_LIST DEST_TOTAL "TLS   api.github.com (20.205.243.168)")" "DEST_TOTAL accumulates across cycles"
+assert_helper "2" "$(dest_hits DEST_LIST DEST_LAST "TLS   api.github.com (20.205.243.168)")" "DEST_LAST stamps the sample a destination last appeared in"
+assert_helper "2" "${#DEST_LIST[@]}" "DEST_LIST records each destination once, in order"
+assert_helper "max" "$CHART_MEM_MAX" "'mem_max=max' (no limit) is read as 'max'"
+
+# An image from before charts exists answers a normal cycle: no '#stats' line.
+# monitor_ingest says so, and cmd_monitor falls back to the line view.
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=()
+if monitor_ingest '14:03:20  TLS   example.org (1.2.3.4)
+-- cpu 1.0% of 8 core(s)  mem 1.0MiB/unlimited  pids 3  net -0B +0B  [3s]'; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: monitor_ingest should report a sample without '#stats'"
+    FAIL=$((FAIL + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: monitor_ingest reports a sample without '#stats' (old image)"
+    PASS=$((PASS + 1))
+fi
+
+# A stray warning inside the output is neither a flow line nor a sample, and must
+# not be counted as a destination.
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+monitor_ingest 'cannot open device
+-- cpu 0.0% of 8 core(s)  mem 1B/unlimited  pids 1  net -0B +0B  [3s]
+#stats cpu=0 cores=1 mem=1 mem_max=max pids=1 rx=0 tx=0 secs=3'
+assert_helper "0" "${#DEST_LIST[@]}" "monitor_ingest ignores a line that is not a flow record"
+assert_helper "1" "${CHART_SAMPLES}" "... but still counts the sample it came with"
+
+# The counter is separated from the destination by its own run of spaces, so
+# stripping it must not leave trailing blanks behind: '…(1.2.3.4) ' and
+# '…(1.2.3.4)' would otherwise be two different keys, and a destination that is
+# polled in one cycle and hit once in the next would split into two rows.
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+monitor_ingest '14:03:11  TLS   example.org (1.2.3.4)   x5
+14:03:12  TLS   example.org (1.2.3.4)
+-- cpu 0.0% of 8 core(s)  mem 1B/unlimited  pids 1  net -0B +0B  [3s]
+#stats cpu=0 cores=1 mem=1 mem_max=max pids=1 rx=0 tx=0 secs=3'
+assert_helper "1" "${#DEST_LIST[@]}" "a destination with and without its xN counter is one destination"
+assert_helper "6" "$(dest_hits DEST_CUR DEST_CUR_N "TLS   example.org (1.2.3.4)")" "... and their hits add up"
+
+# --- monitor_uptime ---------------------------------------------------------
+
+up_out="$(monitor_uptime 0)"
+assert_helper "" "$up_out" "monitor_uptime says nothing when the start time is unknown"
+up_out="$(monitor_uptime $(( $(date +%s) - 3725 )))"
+TOTAL=$((TOTAL + 1))
+if printf '%s' "$up_out" | grep -Eq '^up [0-9]{2}:[0-9]{2}:[0-9]{2}$'; then
+    echo -e "  ${GREEN}PASS${NC}: monitor_uptime formats elapsed time as 'up HH:MM:SS' ($up_out)"
+    PASS=$((PASS + 1))
+else
+    echo -e "  ${RED}FAIL${NC}: monitor_uptime should print 'up HH:MM:SS' (got '$up_out')"
+    FAIL=$((FAIL + 1))
+fi
+up_out="$(monitor_uptime 400000)"
+TOTAL=$((TOTAL + 1))
+if printf '%s' "$up_out" | grep -Eq '^up [0-9]+d [0-9]{2}:[0-9]{2}$'; then
+    echo -e "  ${GREEN}PASS${NC}: monitor_uptime switches to days past 99h, so the header column holds ($up_out)"
+    PASS=$((PASS + 1))
+else
+    echo -e "  ${RED}FAIL${NC}: monitor_uptime should print 'up Nd HH:MM' for a long run (got '$up_out')"
+    FAIL=$((FAIL + 1))
+fi
+assert_helper "" "$(monitor_uptime not-a-number)" "monitor_uptime ignores a timestamp it cannot use"
+
+# --- monitor_dashboard ------------------------------------------------------
+
+CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+CHART_STARTED_EPOCH=$(( $(date +%s) - 61 ))
+# Deterministic frame size: on a real terminal 'tput' would report whatever
+# width the suite happens to run in, and header assertions (which show every
+# field) would depend on the machine. 100 columns shows everything.
+chart_term_size() { CHART_COLS="${FRAME_COLS:-100}"; CHART_LINES=24; }
+FRAME_COLS=100
+monitor_ingest "$MON_CYCLE"
+frame_out="$(monitor_dashboard pia-testframe 3)"
+case "$frame_out" in ($'\e[H\e[2J'*) frame_home=yes ;; (*) frame_home=no ;; esac
+assert_helper "yes" "$frame_home" "the frame homes the cursor and clears the whole screen, so no tail of a previous frame survives (resize, or a frame that shrank)"
+assert_output_contains "cpu" "$frame_out" "the frame draws the cpu row"
+assert_output_contains "mem  300.0MiB/2.0GiB (14.6%)" "$frame_out" "the frame shows memory against its limit"
+assert_output_contains "pids 12" "$frame_out" "the frame shows the current pids in the header"
+assert_output_contains "peak cpu 4.2%/mem 300.0MiB" "$frame_out" "the header carries the run's peak cpu and peak memory next to the uptime"
+assert_output_contains "tok in 262.1k (in 8.2k + cached 254.0k)  out 21.5k  \$0.42" "$frame_out" "the tok row leads with the input total and labels the uncached and cached parts of it"
+net_line="$(printf '%s' "$frame_out" | grep -n '^ net ' | head -1 | cut -d: -f1)"
+tok_line="$(printf '%s' "$frame_out" | grep -n '^ tok ' | head -1 | cut -d: -f1)"
+assert_helper "yes" "$([ "${tok_line:-0}" -eq "$(( ${net_line:-0} + 1 ))" ] && echo yes)" "the tok row sits directly under the net line"
+assert_helper "8192" "$CHART_TOK_IN" "monitor_ingest parses the cumulative token fields"
+assert_helper "253952" "$CHART_TOK_CACHE" "... including the cached-input split"
+# a stale image (helper from before the split) sends tok_in but no tok_cache:
+# the row must fall back to the old combined form, not claim zero cache reads
+unset CHART_TOK_CACHE
+monitor_ingest "$(printf '%s\n' "$MON_CYCLE" | grep '^#stats' | sed 's/ tok_cache=[0-9]*//')"
+assert_helper "" "${CHART_TOK_CACHE-}" "a pre-split stats line leaves tok_cache unset"
+assert_output_contains "tok 8.2k/21.5k" "$(monitor_dashboard pia-testframe 1)" \
+    "a pre-split image renders the old combined token form rather than lying about zero cache"
+# restore the split token state (assigning, not re-ingesting — a second
+# MON_CYCLE ingest would double the destination counts the tests below assert)
+CHART_TOK_IN=8192; CHART_TOK_CACHE=253952; CHART_TOK_OUT=21504; CHART_TOK_COST=0.42
+assert_output_not_contains "peak 300.0MiB" "$frame_out" "the mem row no longer trails its peak"
+assert_output_not_contains "sample" "$frame_out" "the sample counter is bookkeeping, not frame content"
+assert_helper "1" "$(printf '%s' "$frame_out" | grep -c 'pids 12')" "pids appears once — the header, not also a chart row"
+assert_output_contains "x14   TLS   api.github.com" "$frame_out" "the destinations pane shows the accumulated hits per URL"
+dest_row="$(printf '%s' "$frame_out" | grep -F 'x14   TLS   api.github.com' | head -1)"
+assert_helper "" "$(printf '%s' "${dest_row#*')'}" | tr -d ' ')" "destination rows end with the URL — no bar trails it any more"
+assert_output_contains "api.github.com" "$frame_out" "the frame lists the busiest destination"
+assert_output_contains "targets: 2" "$frame_out" "the frame counts the destinations"
+assert_output_contains "Ctrl-C" "$frame_out" "the frame reminds how to stop"
+
+# No row of the frame may reach the terminal's last column: a wrapped row plus
+# the explicit '\n' scrolls one line per frame, so every following frame draws
+# onto a screen shifted by one — the 'two net rows / ghosted iew / mixed
+# counters' smear a wide terminal produced. Rows are built with '%-*s', which
+# pads to the column width even for the multi-byte glyphs (a terminal counts
+# columns too), so this measures what the terminal will see.
+clean_frame="${frame_out#$'\e[H\e[2J'}"
+clean_frame="${clean_frame%$'\e[K'}"
+max_row=0
+while IFS= read -r frline; do
+    # ${#s} counts CHARACTERS — the same metric 'printf %-Ns' pads to and the
+    # terminal counts, so a row passing here cannot wrap.
+    [ "${#frline}" -gt "$max_row" ] && max_row="${#frline}"
+done <<< "$clean_frame"
+assert_helper "yes" "$([ "$max_row" -le "$(( FRAME_COLS - 1 ))" ] && echo yes || echo "no (widest row: ${max_row} of ${FRAME_COLS})")" \
+    "no frame row reaches the last column — nothing wraps, so the frame cannot drift on the screen"
+
+# 80-column regression: an earlier header gave the tail only 40 columns and
+# the token summary — the number the user asked for — died as 't~'. The
+# token figure must survive an 80-column frame.
+FRAME_COLS=80
+narrow_out="$(monitor_dashboard pia-testframe 1)"
+assert_output_contains "tok in 262.1k" "$narrow_out" "the token summary survives an 80-column frame (was truncated to 't~')"
+FRAME_COLS=100
+if printf '%s' "$frame_out" | grep -q 'bgc\|gggg\|gggggg'; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: the frame actually contains chart glyphs"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: the frame has no chart glyphs (output: $(printf '%s' "$frame_out" | tr '\n' '|'))"
+    FAIL=$((FAIL + 1))
+fi
+
+# The pane accumulates per destination: another cycle to the same URL adds its
+# hits to the SAME row (14 + 2 = 16) instead of resetting or starting a second
+# line — the whole point of counting per URL across samples.
+monitor_ingest '14:03:15  TLS   api.github.com (20.205.243.168)   x2
+-- cpu 1.0% of 8 core(s)  mem 1.0MiB/unlimited  pids 3  net -0B +0B  [1s]
+#stats cpu=1.0 cores=8 mem=1048576 mem_max=max pids=3 rx=0 tx=0 secs=1'
+accum_out="$(monitor_dashboard pia-testframe 1)"
+assert_output_contains "x16   TLS   api.github.com" "$accum_out" "destination hits accumulate per URL across cycles (14 + 2 = 16)"
+assert_helper "1" "$(printf '%s' "$accum_out" | grep -c 'api.github.com')" "... into ONE row per destination, not a new row per cycle"
+
+# Recency leads: the pane is ordered by the LAST sample a destination appeared
+# in, so the URL called now sits above one the container stopped talking to —
+# even when the dormant one has a hundred times the lifetime hits.
+CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=()
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+monitor_ingest '10:00:01  TLS   big.example (9.9.9.9)   x100
+10:00:01  TLS   small.example (8.8.8.8)
+-- cpu 1.0% of 2 core(s)  mem 1B/max  pids 1  net -0B +0B  [1s]
+#stats cpu=1 cores=2 mem=1 mem_max=max pids=1 rx=0 tx=0 secs=1'
+monitor_ingest '10:00:02  TLS   small.example (8.8.8.8)
+-- cpu 1.0% of 2 core(s)  mem 1B/max  pids 1  net -0B +0B  [1s]
+#stats cpu=1 cores=2 mem=1 mem_max=max pids=1 rx=0 tx=0 secs=1'
+recency_out="$(monitor_dashboard pia-testframe 1)"
+small_line="$(printf '%s' "$recency_out" | grep -n -F 'small.example' | head -1 | cut -d: -f1)"
+big_line="$(printf '%s' "$recency_out" | grep -n -F 'big.example' | head -1 | cut -d: -f1)"
+assert_helper "yes" "$([ "${small_line:-9999}" -lt "${big_line:-9999}" ] && echo yes)" \
+    "the most recently called destination is listed above the dormant one, despite fewer hits"
+assert_output_contains "x100  TLS   big.example" "$recency_out" "... while the dormant destination keeps its accumulated count"
+
+# No limit: there is no percentage to gauge, so the row says 'unlimited' (the
+# same call line mode makes) rather than a meaningless bar.
+CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=()
+monitor_ingest '14:03:20  TLS   example.org (1.2.3.4)
+-- cpu 0.0% of 8 core(s)  mem 1.0MiB/unlimited  pids 1  net -0B +0B  [3s]
+#stats cpu=0.5 cores=8 mem=1048576 mem_max=max pids=1 rx=0 tx=0 secs=3'
+unlimited_out="$(monitor_dashboard pia-testframe 3)"
+assert_output_contains "unlimited" "$unlimited_out" "the memory row says 'unlimited' when there is no limit"
+
+# An empty monitor (no samples yet, nothing requested) still draws a frame.
+CPU_SERIES=(); MEM_SERIES=(); RX_SERIES=(); TX_SERIES=(); PIDS_SERIES=()
+DEST_LIST=(); DEST_TOTAL=(); DEST_LAST=(); DEST_CUR=(); DEST_CUR_N=(); CHART_SAMPLES=0
+empty_out="$(monitor_dashboard pia-testframe 3)"
+assert_output_contains "targets: 0" "$empty_out" "an idle monitor draws a frame, it does not crash"
+
+# --- the chart is wired into the command ------------------------------------
+
+if grep -q "trap 'monitor_screen_off" "$AGENTS" && grep -q 'monitor_screen_off; monitor_stop_sampler' "$AGENTS"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: both monitor exit paths leave the alternate screen first"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: the monitor traps must leave the alternate screen before reporting"
+    FAIL=$((FAIL + 1))
+fi
+
+if grep -qF -- '?1049h' "$AGENTS" && grep -qF -- '?1049l' "$AGENTS"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: the chart enters and leaves the alternate screen (terminal is left clean)"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: monitor_screen_on/off must enter and leave the alternate screen"
+    FAIL=$((FAIL + 1))
+fi
+
+# The in-container helper has to be the one that offers the machine-readable
+# sample; the host only draws what it gets.
+HELPER="$SCRIPT_DIR/../docker/pia/monitor-inside.sh"
+if [ -f "$HELPER" ] && grep -q "printf '#stats cpu=" "$HELPER"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: pia-monitor cycle prints the '#stats' sample line the charts need"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: pia-monitor cycle must print a '#stats' sample line for the charts"
+    FAIL=$((FAIL + 1))
+fi
+
+if [ -f "$HELPER" ] && grep -q "pia-monitor cycle \[SECONDS\] \[stats\]" "$HELPER"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: the helper's own usage documents the 'stats' argument"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: the helper's usage should document the 'stats' argument"
+    FAIL=$((FAIL + 1))
+fi
+
+# --- mem_bytes: page cache is not 'in use' ----------------------------------
+
+# The '12 GiB' lies bug: memory.current counts the PAGE CACHE charged to the
+# cgroup, so an agent that just streamed a lot of traffic left ~11 GiB of
+# reclaimable cache behind and the monitor called it 12 GiB 'used' while the
+# processes held ~1 GiB. The helper now subtracts the reclaimable part
+# (inactive_file / v1 total_inactive_file) exactly like 'docker stats'.
+eval "$(sed -n '/^mem_bytes()/,/^}/p' "$HELPER")"
+FAKE_CG="$(mktemp -d)"
+printf '12884901888' > "$FAKE_CG/memory.current"              # 12.0 GiB charged
+printf '21474836480' > "$FAKE_CG/memory.max"                  # 20.0 GiB limit
+printf 'anon 1288489984\nfile 11596411904\ninactive_file 11596411904\n' > "$FAKE_CG/memory.stat"
+CG="$FAKE_CG"
+assert_helper "1288489984 21474836480" "$(mem_bytes)" \
+    "mem_bytes subtracts reclaimable page cache — 12 GiB charged, 10.8 GiB cache, ~1 GiB real"
+printf '1048576' > "$FAKE_CG/memory.current"
+printf 'anon 0\nfile 10485760\ninactive_file 10485760\n' > "$FAKE_CG/memory.stat"
+assert_helper "0 21474836480" "$(mem_bytes)" "... and never reports a negative number when the cache exceeds the charge"
+rm -f "$FAKE_CG/memory.current" "$FAKE_CG/memory.max" "$FAKE_CG/memory.stat"
+mkdir -p "$FAKE_CG/memory"
+printf '3221225472' > "$FAKE_CG/memory/memory.usage_in_bytes"
+printf 'unlimited' > "$FAKE_CG/memory/memory.limit_in_bytes"
+printf 'total_inactive_file 1073741824\n' > "$FAKE_CG/memory/memory.stat"
+assert_helper "2147483648 max" "$(mem_bytes)" "the cgroup v1 branch subtracts total_inactive_file too"
+rm -rf "$FAKE_CG"
+CG="/sys/fs/cgroup"
+
+# --- tok_usage: the agent's own token accounting ----------------------------
+
+# pi writes every assistant message's usage into its session JSONLs; tok_usage
+# sums EVERY session the container stores, not just the running one. 'in'
+# includes cache reads (the big number is normal), and a half-written last
+# line — a session captured WHILE the agent runs — must cost that file's
+# tail, never the whole ledger.
+eval "$(sed -n '/^tok_usage()/,/^}/p' "$HELPER")"
+FAKE_SESS="$(mktemp -d)"; mkdir -p "$FAKE_SESS/--x--" "$FAKE_SESS/--y--"
+printf '%s\n' \
+    '{"type":"session","version":3,"id":"u","timestamp":"t","cwd":"/w"}' \
+    '{"type":"message","message":{"role":"assistant","usage":{"input":100,"output":40,"cacheRead":900,"cost":{"total":0.01}}}}' \
+    '{"type":"message","message":{"role":"assistant","usage":{"input":200,"output":60,"cacheRead":0,"cost":{"total":0.02}}}}' \
+    '{"type":"message","message":{"role":"user","content":[{"type":"tex' > "$FAKE_SESS/--x--/s.jsonl"
+assert_helper "300 900 100 0.03" "$(PIA_PI_SESSIONS="$FAKE_SESS" tok_usage)" \
+    "tok_usage sums a pi session — uncached and cached input apart, a truncated live tail tolerated"
+printf '%s\n' \
+    '{"type":"session","version":3,"id":"v","timestamp":"t","cwd":"/w2"}' \
+    '{"type":"message","message":{"role":"assistant","usage":{"input":50,"output":10,"cacheRead":50,"cost":{"total":0.01}}}}' > "$FAKE_SESS/--y--/older.jsonl"
+assert_helper "350 950 110 0.04" "$(PIA_PI_SESSIONS="$FAKE_SESS" tok_usage)" \
+    "tok_usage accumulates across ALL sessions the container stores, not just the running one"
+rm -rf "$FAKE_SESS"
+
+# The chart must never be the only way to see a sample: the line view stays
+# reachable, and a non-terminal stays on it.
+if grep -q -- '--no-chart' "$AGENTS" && grep -q '\[ -t 1 \]' "$AGENTS"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: --no-chart exists and the chart is chosen by 'is stdout a terminal'"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: the line view must stay selectable and non-terminals must not get escape codes"
+    FAIL=$((FAIL + 1))
+fi
+
+# 'pia' runs on macOS' /bin/bash, which is still 3.2 — and 'declare -A' is a bash 4
+# feature, so a top-level one aborts the entire CLI at load time (it did: 'pia run'
+# died with "declare: -A: invalid option" before the monitor was anywhere near
+# involved). The chart state therefore uses parallel indexed arrays.
+if grep -Eq '(declare|local|typeset) -A ' "$AGENTS"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: pia.sh must stay bash 3.2 compatible — no associative arrays (see 'chart_index')"
+    FAIL=$((FAIL + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: pia.sh stays bash 3.2 compatible (no associative arrays)"
+    PASS=$((PASS + 1))
+fi
+
+# ... and the same for the other 4.x-only constructs that are easy to reach for.
+if grep -Eq 'mapfile|readarray|declare -n|local -n |\$\{[A-Za-z_]+(\^\^|,,)\}|EPOCHSECONDS' "$AGENTS"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: pia.sh uses a bash 4+ construct that macOS' /bin/bash will not parse"
+    FAIL=$((FAIL + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: no bash 4+ builtins/expansions in pia.sh (mapfile, namerefs, case conversion)"
+    PASS=$((PASS + 1))
+fi

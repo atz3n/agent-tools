@@ -21,6 +21,7 @@ set -euo pipefail
 #   pia exec    [NAME] [CMD]    Execute a command in a running container
 #   pia sh      [NAME]          Open an interactive bash shell in a running container
 #   pia monitor [NAME]          Live view: request destinations + CPU/mem/net
+#                               (a chart dashboard on a terminal, a line per sample when piped)
 #   pia urls  [NAME]            Every URL/destination called since the container was created
 #   pia keep    [NAME] [SUFFIX] Protect a container from 'pia clean' (rename to pia-keep-*)
 #   pia unkeep  [NAME]          Remove the keep protection (rename back to pia-*)
@@ -51,8 +52,10 @@ set -euo pipefail
 #   -h, --help         Display this help message
 #
 # Command options (monitor):
-#   -i, --interval <sec>  Seconds per resource sample (default: 3)
+#   -i, --interval <sec>  Seconds per resource sample (default: 1)
 #       --raw             Stream destinations continuously, no resource summary
+#       --chart           Draw the dashboard even when stdout is not a terminal
+#       --no-chart        The line view, even on a terminal
 #
 # Command options (urls):
 #   -a, --all             Every logged request in order, no aggregation
@@ -86,7 +89,7 @@ PREFIX="pia-"
 KEEP_PREFIX="pia-keep-"   # kept containers (pia-keep-*) are protected from 'pia clean'
 RANDOM_SUFFIX_LENGTH=8
 PROJECT_NAME="pia"        # project every pia container belongs to (label value)
-MONITOR_CYCLE_SECONDS="3"  # default sample length for 'pia monitor' (see cmd_monitor)
+MONITOR_CYCLE_SECONDS="1"  # default sample length for 'pia monitor' (see cmd_monitor)
 MONITOR_RAW_CHUNK="5"      # default capture chunk for 'pia monitor --raw'; '-i' overrides it
 DIND_SUFFIX="-dind"               # suffix of an agent's throwaway daemon container
 DIND_IMAGE_DEFAULT="pia-dind"     # built daemon image (tag = guard version); PIA_DIND_IMAGE overrides fully
@@ -248,7 +251,8 @@ Commands:
                              daemon — the refusal reasons behind opaque 'runc did not
                              terminate successfully' errors from nested docker runs
   monitor [NAME] [OPTIONS]   Live view of a running container: where its requests go
-                             (TLS SNI / cleartext HTTP URLs) + CPU, memory, net I/O
+                             (TLS SNI / cleartext HTTP URLs) + CPU, memory, net I/O.
+                             Charts on a terminal, one line per sample when piped
                              (terminal only, nothing is logged; Ctrl-C to stop)
   urls    [NAME] [OPTIONS]   Every destination (TLS SNI) and cleartext HTTP URL the
                              container has called since it was created, with counts
@@ -289,8 +293,10 @@ Command options (run/create/restart):
   -h, --help         Display this help message
 
 Command options (monitor):
-  -i, --interval <sec>  Seconds per resource sample (default: 3)
+  -i, --interval <sec>  Seconds per resource sample (default: 1)
       --raw             Stream destinations continuously, no resource summary
+      --chart           Draw the chart dashboard even when stdout is not a terminal
+      --no-chart        One line per sample, even on a terminal
 
 Command options (urls):
   -a, --all             Every logged request in order, no aggregation
@@ -1942,6 +1948,558 @@ monitor_stop_sampler() {
     return 0
 }
 
+###################################################################################################
+# 'pia monitor' CHARTS — rendering helpers
+#
+# The samples reach the host one 'docker exec' at a time, so the rolling history
+# lives in the globals below (nothing on disk: 'pia monitor' still writes no log
+# files, in chart mode or out of it). None of these helpers call docker or read
+# files, which is what makes them unit-testable in
+# scripts/tests/test-functions.sh.
+###################################################################################################
+
+CHART_HISTORY="240"      # samples kept per series (the sparkline shows the last few dozen)
+CHART_ROWS="10"          # destination rows in the top-destinations pane, if the terminal is tall enough
+CHART_LABEL_WIDTH="30"   # the 'cpu 12.4% of 8 cores' column
+
+# Glyph set, decided once: the eight one-eighth blocks, or an ASCII ramp.
+# 'locale charmap' is the check rather than '[[ $LANG == *UTF-8 ]]', which misses
+# the LANG unset / LC_ALL=C cases where the blocks would print as mojibake.
+chart_init() {
+    [ -n "${CHART_GLYPHS[*]:-}" ] && return 0
+    case "$(locale charmap 2>/dev/null || echo '')" in
+        (UTF-8 | utf8)
+            CHART_GLYPHS=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+            CHART_EMPTY='░'
+            CHART_RULE='─'
+            CHART_MID='·'
+            CHART_DOWN='↓'
+            CHART_UP='↑'
+            ;;
+        (*)
+            # Every glyph quoted: an unquoted '#' would start a comment inside
+            # the array assignment and swallow the rest of the case item.
+            CHART_GLYPHS=('_' '.' ':' '-' '=' '+' '*' '#')
+            CHART_EMPTY='-'
+            CHART_RULE='-'
+            CHART_MID='-'
+            CHART_DOWN='v'
+            CHART_UP='^'
+            ;;
+    esac
+}
+
+# Terminal size for the frame, re-read every cycle so a resized window is
+# noticed. tput answers nothing (or nothing sensible) when stdout is not a
+# terminal, hence the floor — the frame is then drawn for a sane 80x24.
+chart_term_size() {
+    CHART_COLS="$(tput cols 2>/dev/null || echo 0)"
+    CHART_LINES="$(tput lines 2>/dev/null || echo 0)"
+    [[ "$CHART_COLS" =~ ^[0-9]+$ ]] && [ "$CHART_COLS" -ge 48 ] || CHART_COLS=80
+    [[ "$CHART_LINES" =~ ^[0-9]+$ ]] && [ "$CHART_LINES" -ge 14 ] || CHART_LINES=24
+    # Past this the frame would draw a rule across a wall; the extra columns
+    # buy no information. An 'if', not '&&': a failing AND-list would be this
+    # function's exit status, and 'set -e' in the caller reads that as a fatal
+    # error — on every normal terminal.
+    if [ "$CHART_COLS" -gt 100 ]; then CHART_COLS=100; fi
+}
+
+# Byte counts with a binary suffix — the same ramp the in-container helper
+# prints, so a number reads identically in the chart and in line mode.
+human_bytes() {
+    awk -v b="${1:-0}" 'BEGIN {
+        if (b < 0) { printf "-"; b = -b }
+        if (b >= 1073741824)   printf "%.1fGiB", b / 1073741824
+        else if (b >= 1048576) printf "%.1fMiB", b / 1048576
+        else if (b >= 1024)    printf "%.1fKiB", b / 1024
+        else                   printf "%dB", b
+    }'
+}
+
+# Token counts with a decimal k/M suffix (same rule as the helper's
+# human_tok): 262144 tokens is 262.1k, never 256KiB — tokens are not bytes.
+human_count() {
+    awk -v n="${1:-0}" 'BEGIN {
+        if (n >= 1000000) printf "%.1fM", n / 1000000
+        else if (n >= 1000) printf "%.1fk", n / 1000
+        else printf "%d", n
+    }'
+}
+
+# chart_pad TEXT WIDTH — pad (or truncate, with a '~') to WIDTH columns so the
+# chart columns line up. Padding is counted with ${#s} and printed as plain
+# spaces, because 'printf %-Ns' counts BYTES and a padded string can well
+# contain a three-byte arrow or block glyph.
+chart_pad() {
+    local s="$1" w="$2"
+    [ "$w" -gt 0 ] || return 0
+    if [ "${#s}" -gt "$w" ]; then
+        printf '%s~' "${s:0:w - 1}"
+    else
+        printf '%s%*s' "$s" "$(( w - ${#s} ))" ''
+    fi
+}
+
+# sparkline WIDTH VALUE... — the last at-most-WIDTH values as a sparkline,
+# scaled to the maximum of what is shown (so a quiet container that starts
+# working still lights up, instead of drawing a flat line at 1% of a peak from
+# an hour ago) but to SIX levels, not seven: the topmost block is never drawn,
+# so there is always a one-glyph gap above the series. Without it a busy
+# container painted a solid line against the top of the row and 'all values
+# equal' was indistinguishable from 'pinned at the maximum' — dips only became
+# visible once they were measured from an invisible ceiling. awk emits level
+# INDICES and bash maps them to glyphs, because mawk splits strings into bytes
+# and the blocks are three bytes each.
+sparkline() {
+    local width="${1:-20}" out="" lv
+    shift
+    # slots without a sample yet are '.', not blank: the chart reserves its
+    # full width from the first cycle (nothing shifts as history grows) and
+    # 'no data yet' is something you can see
+    [ $# -gt 0 ] || { printf '%*s' "$width" '' | tr ' ' '.'; return 0; }
+    for lv in $(printf '%s\n' "$@" | awk -v w="$width" '
+        { v[++n] = $1 + 0; if (v[n] < 0) v[n] = 0 }
+        END {
+            if (n == 0) exit
+            s = (n > w) ? n - w + 1 : 1
+            m = 0
+            for (i = s; i <= n; i++) if (v[i] > m) m = v[i]
+            for (i = s; i <= n; i++) printf "%d ", (m > 0) ? int(v[i] / m * 6 + 0.5) : 0
+        }'); do
+        out+="${CHART_GLYPHS[$lv]}"
+    done
+    while [ "${#out}" -lt "$width" ]; do out+="."; done
+    printf '%s' "$out"
+}
+
+# bar WIDTH PCT — a horizontal gauge for a 0..100 percentage, clamped at both
+# ends (a cgroup reading can exceed 100 or go negative after a counter reset).
+# The fill glyph is the SECOND-tallest block, like the sparkline ceiling: a
+# full gauge must not touch the top of its row either, or it welds itself to
+# the chart above (cpu's ▇ sitting on mem's █ read as one solid block, while
+# mem-over-net, where both leave the ceiling free, showed the small gap the
+# rows are meant to have).
+bar() {
+    local width="${1:-20}" pct="${2:-0}" filled out="" i
+    [[ "$width" =~ ^[0-9]+$ ]] || width=20
+    filled="$(awk -v p="$pct" -v w="$width" 'BEGIN {
+        f = int(p * w / 100 + 0.5); if (f < 0) f = 0; if (f > w) f = w; print f
+    }')"
+    for ((i = 0; i < width; i++)); do
+        if [ "$i" -lt "$filled" ]; then out+="${CHART_GLYPHS[6]}"; else out+="$CHART_EMPTY"; fi
+    done
+    printf '%s' "$out"
+}
+
+# --- chart state -------------------------------------------------------------
+
+# Indexed arrays throughout, and 'declare' spelled out: bash 3.2 — still the
+# /bin/bash macOS ships — has neither 'declare -A' nor 'local -A', and a
+# top-level one aborts the whole CLI at load time, monitor or not. A linear
+# lookup costs nothing at the number of destinations a container touches in one
+# interval, and it keeps 'pia' runnable where it has always run.
+CPU_SERIES=()
+MEM_SERIES=()
+RX_SERIES=()
+TX_SERIES=()
+declare -a DEST_LIST=()  # every destination ever seen, in order of first sight
+declare -a DEST_TOTAL=() # hits per destination since the monitor started (parallel to DEST_LIST)
+declare -a DEST_LAST=()  # the sample number each destination last appeared in
+                         # (the pane leads with what is being called NOW)
+declare -a DEST_CUR=()   # the destinations of the newest cycle... (parallel with...)
+declare -a DEST_CUR_N=() # ... their hits in that cycle
+CHART_IDX="-1"           # chart_index's answer
+
+# Numeric patterns for the fields parsed out of a sample. They live in
+# variables and are matched as '$re', not written inline: bash 3.2's parser
+# for '[[ =~ ]]' — still macOS' /bin/bash — aborts on unquoted parentheses
+# in an expression ('syntax error: unexpected token `('), and quoting the
+# pattern instead makes it a LITERAL string. A variable operand is the only
+# form that parses on every bash and still matches as a regex.
+RE_SIGNED_NUM='^-?[0-9]+(\.[0-9]+)?$'  # a counter delta — may go negative after a reset
+RE_COUNT='^[0-9]+(\.[0-9]+)?$'         # pids, bytes: never negative
+RE_FLOW_COUNT=' x([0-9]+)$'            # the '   x14' repeat-count suffix of a flow line
+
+# series_push NAME VALUE — append to a series and trim it to CHART_HISTORY.
+# 'eval' rather than a nameref because bash 4.2 (still shipped on older distros
+# and in macOS' /bin/bash) has no 'local -n'.
+series_push() {
+    local __name="$1" __val="${2:-0}" __len
+    [[ "$__val" =~ $RE_SIGNED_NUM ]] || __val=0
+    eval "${__name}+=(\"\$__val\")"
+    eval "__len=\${#${__name}[@]}"
+    if [ "$__len" -gt "$CHART_HISTORY" ]; then
+        eval "${__name}=(\"\${${__name}[@]: -$CHART_HISTORY}\")"
+    fi
+}
+
+# series_spark NAME WIDTH — the sparkline of a series, blank (not an error) while
+# it is still empty. The empty-array check is also what keeps '${arr[@]}' from
+# tripping 'set -u' on bash older than 4.4.
+series_spark() {
+    local __name="$1" __w="${2:-20}" __n
+    eval "__n=\${#${__name}[@]}"
+    [ "${__n:-0}" -gt 0 ] || { printf '%*s' "$__w" '' | tr ' ' '.'; return 0; }
+    eval "sparkline \"\$__w\" \"\${${__name}[@]}\""
+}
+
+# series_max NAME [FMT] — the largest value a series ever held (0 when it is
+# empty), printed with FMT (default '%d' — byte counts; '%.1f' for percents).
+# Used for the header's peak cpu/memory figures, the history worth a number.
+series_max() {
+    local __name="$1" __fmt="${2:-%d}" __n
+    eval "__n=\${#${__name}[@]}"
+    [ "${__n:-0}" -gt 0 ] || { printf '0'; return 0; }
+    eval "printf '%s\n' \"\${${__name}[@]}\"" | awk -v f="$__fmt" 'BEGIN { m = 0 } $1 + 0 > m { m = $1 + 0 } END { printf f, m }'
+}
+
+# chart_index LIST KEY — the position of KEY in the named list, left in
+# CHART_IDX (-1 when it is not there). The answer is a global rather than stdout
+# because a command substitution would fork once per flow line, per cycle, for a
+# search that is a handful of string comparisons. Only the array NAME is eval'd
+# (always a literal from here); the key stays a quoted variable, so a destination
+# with spaces, parentheses or globs in it is compared, never executed.
+chart_index() {
+    local __list="$1" __key="$2" __i=0 __n=0 __val
+    eval "__n=\${#${__list}[@]}"
+    while [ "$__i" -lt "$__n" ]; do
+        eval "__val=\"\${${__list}[__i]}\""
+        if [ "$__val" = "$__key" ]; then
+            CHART_IDX="$__i"
+            return 0
+        fi
+        __i=$(( __i + 1 ))
+    done
+    CHART_IDX="-1"
+    return 0
+}
+
+# monitor_ingest TEXT — fold one cycle's output into the chart state: the
+# '#stats' line into the rolling series, every flow line into the destination
+# counters. The human '-- cpu ...' line is dropped on purpose: the frame IS that
+# line, drawn as charts. Returns 1 when the sample carried no '#stats' line,
+# which means the image inside the container predates charts.
+monitor_ingest() {
+    local out="$1" line dest n kv stats_line="" value i seq
+    local -a words
+
+    DEST_CUR=()
+    DEST_CUR_N=()
+    # CHART_SAMPLES counts the samples ingested SO FAR, so this cycle is the
+    # next number — the stamp DEST_LAST keeps, and the pane sorts by.
+    seq=$(( ${CHART_SAMPLES:-0} + 1 ))
+    while IFS= read -r line; do
+        case "$line" in
+            ('#stats '*) stats_line="$line"; continue ;;
+            ('-- cpu '* | '') continue ;;
+        esac
+        # A flow line is '<time>  <what>' — drop the timestamp. A line without
+        # the two-space separator is neither a flow nor a sample (a stray
+        # warning, say) and is ignored rather than counted as a destination.
+        dest="${line#*  }"
+        [ "$dest" != "$line" ] || continue
+        n=1
+        if [[ "$dest" =~ $RE_FLOW_COUNT ]]; then
+            n="${BASH_REMATCH[1]}"
+            dest="${dest%"${BASH_REMATCH[0]}"}"
+        fi
+        # The counter is separated by its own run of spaces ('<what>   x3'), so
+        # stripping it leaves trailing blanks — they would make the same
+        # destination two different keys when one cycle repeats it and another
+        # does not.
+        dest="${dest%"${dest##*[![:space:]]}"}"
+        chart_index DEST_CUR "$dest"
+        if [ "$CHART_IDX" -ge 0 ]; then
+            DEST_CUR_N[$CHART_IDX]=$(( ${DEST_CUR_N[$CHART_IDX]} + n ))
+        else
+            DEST_CUR+=("$dest")
+            DEST_CUR_N+=("$n")
+        fi
+        chart_index DEST_LIST "$dest"
+        if [ "$CHART_IDX" -ge 0 ]; then
+            DEST_TOTAL[$CHART_IDX]=$(( ${DEST_TOTAL[$CHART_IDX]} + n ))
+            DEST_LAST[$CHART_IDX]="$seq"
+        else
+            DEST_LIST+=("$dest")
+            DEST_TOTAL+=("$n")
+            DEST_LAST+=("$seq")
+        fi
+    done <<< "$out"
+
+    [ -n "$stats_line" ] || return 1
+
+    # '#stats cpu=1.2 cores=8 mem=... mem_max=max pids=12 rx=... tx=... secs=3
+    #         tok_in=... tok_cache=... tok_out=... tok_cost=...'
+    # (the tok_* fields are cumulative across ALL pi sessions the container
+    # stores, with input split into uncached and cached like pi's /usage; an
+    # image built before tokens existed simply omits them and the tok row
+    # shows 'tok ?')
+    read -r -a words <<< "${stats_line#'\#stats '}"
+    i=0
+    while [ "$i" -lt "${#words[@]}" ]; do
+        kv="${words[i]}"
+        value="${kv#*=}"
+        case "$kv" in
+            (cpu=*)     CHART_CPU="$value" ;;
+            (cores=*)   CHART_CORES="$value" ;;
+            (mem=*)     CHART_MEM="$value" ;;
+            (mem_max=*) CHART_MEM_MAX="$value" ;;
+            (pids=*)    CHART_PIDS="$value" ;;
+            (rx=*)      CHART_RX="$value" ;;
+            (tx=*)      CHART_TX="$value" ;;
+            (secs=*)    CHART_SECS="$value" ;;
+            (tok_in=*)  CHART_TOK_IN="$value" ;;
+            (tok_cache=*) CHART_TOK_CACHE="$value" ;;
+            (tok_out=*) CHART_TOK_OUT="$value" ;;
+            (tok_cost=*) CHART_TOK_COST="$value" ;;
+        esac
+        i=$(( i + 1 ))
+    done
+
+    series_push CPU_SERIES "${CHART_CPU:-0}"
+    series_push MEM_SERIES "${CHART_MEM:-0}"
+    series_push RX_SERIES "$(chart_positive "${CHART_RX:-0}")"
+    series_push TX_SERIES "$(chart_positive "${CHART_TX:-0}")"
+    # 'pids' is deliberately NOT pushed to a series: the dashboard shows the
+    # current count in the header — a process leak is caught by watching that
+    # number grow, a history row bought nothing.
+    CHART_SAMPLES=$(( ${CHART_SAMPLES:-0} + 1 ))
+    return 0
+}
+
+# chart_positive VALUE — a counter reading for a sparkline: a stray non-number
+# and a net counter that went backwards both become 0, so neither can poison
+# the maximum a series is scaled by.
+chart_positive() {
+    local v="${1:-0}"
+    [[ "$v" =~ $RE_COUNT ]] && { printf '%s' "$v"; return 0; }
+    printf '0'
+}
+
+# monitor_start_epoch NAME — when the container started, in epoch seconds, or 0
+# when neither date dialect can parse the timestamp. The frame then simply
+# leaves the uptime out. GNU date parses ISO 8601 with '-d'; BSD date (macOS)
+# has no '-d' and wants '-j -f FORMAT' without fractional seconds, so the
+# '.123456789' in docker's '…T10:00:00.123456789Z' is stripped for it. '-u'
+# matters on both branches: docker stamps STARTED_AT in UTC, and BSD date
+# without '-u' reads the parsed time as LOCAL — every uptime then carries the
+# timezone offset (a container started two minutes ago reports 'up 01:01:45'
+# on a +01:00 laptop).
+monitor_start_epoch() {
+    local started
+    started="$(docker inspect --format '{{.State.StartedAt}}' "$1" 2>/dev/null || echo '')"
+    [ -n "$started" ] || { printf '0'; return 0; }
+    date -u -d "$started" +%s 2>/dev/null \
+        || date -ju -f '%Y-%m-%dT%H:%M:%SZ' "${started%%.*}Z" +%s 2>/dev/null \
+        || printf '0'
+}
+
+# monitor_uptime EPOCH — 'up HH:MM:SS', or empty when the start time is unknown.
+# Past 99 hours the hour field would grow the column and push the header apart,
+# so the count switches to days (a container running for days is a fact worth
+# reading at a glance, not four digits to parse).
+monitor_uptime() {
+    local base="${1:-0}" now secs
+    [[ "$base" =~ ^[0-9]+$ ]] && [ "$base" -gt 0 ] || return 0
+    now="$(date +%s)"; secs=$(( now - base ))
+    [ "$secs" -ge 0 ] || secs=0
+    if [ "$secs" -ge 359600 ]; then
+        printf 'up %dd %02d:%02d' "$(( secs / 86400 ))" "$(( secs % 86400 / 3600 ))" "$(( secs % 3600 / 60 ))"
+    else
+        printf 'up %02d:%02d:%02d' "$(( secs / 3600 ))" "$(( secs % 3600 / 60 ))" "$(( secs % 60 ))"
+    fi
+}
+
+# monitor_dashboard NAME INTERVAL — draw one frame. Everything on it comes from
+# the state monitor_ingest() maintains; this function calls no docker, reads no
+# files and spawns one 'sort' for the destination ranking, so a frame costs one
+# write to the terminal. The frame is one write to the alternate screen, so it
+# homes the cursor and clears the WHOLE screen first: erasing only below the
+# cursor leaves the right-hand tail of any row a previous frame wrote longer —
+# a resize, or a frame that shrank by a row — ghosting beside unrelated rows.
+# No row may reach the terminal's last column either (see half_w): a wrapped
+# row scrolls one line per frame and every later frame draws on a shifted
+# screen.
+monitor_dashboard() {
+    local name="$1" interval="$2"
+    local w lw="$CHART_LABEL_WIDTH" rule spark_w half_w bar_w rows
+    local frame="" line dest hits=0 cycle_hits=0 shown=0 mem_field mem_pct mem_peak cpu_peak up tok_disp
+    local i n rest
+    local -a ranked=()
+
+    chart_term_size
+    w="$CHART_COLS"
+    # The rule is built by appending, not with 'tr': tr is byte-oriented and
+    # would turn one '─' into the first byte of a three-byte character.
+    rule=""
+    while [ "${#rule}" -lt "$(( w - 1 ))" ]; do rule+="$CHART_RULE"; done
+    # a full-width row is ' ' + label(lw) + spark(spark_w) = w-1 — the last
+    # column stays empty, since anything that touches it wraps and a wrapped
+    # frame drifts. sparks no longer shrink while short on samples ('.'
+    # placeholders hold the width), so this budget is now always exercised.
+    spark_w=$(( w - lw - 2 )); [ "$spark_w" -lt 8 ] && spark_w=8
+    # The net row prints 'rx ' + spark + ' tx ' + spark after the label column,
+    # so half_w is HALF of what is left AFTER those seven characters, not half
+    # of spark_w. At 100 columns the old (spark_w / 2) made the row 106 wide:
+    # it wrapped, the explicit \n then scrolled one line per frame, and every
+    # next frame drew over a screen shifted by one — the 'duplicated net row'
+    # and ghosted tails a wide terminal produced.
+    # 'rx ' + ' tx ' cost 7 columns; halves of floor((spark_w-7)/2) keep the
+    # full-width net row at 1 + lw + 7 + 2*half_w ≤ w-1 as well
+    half_w=$(( (spark_w - 7) / 2 )); [ "$half_w" -lt 4 ] && half_w=4
+    bar_w=$(( spark_w / 2 )); [ "$bar_w" -lt 8 ] && bar_w=8
+    [ "$bar_w" -gt 24 ] && bar_w=24
+
+    # Fixed overhead of the frame is 11 lines (the tok row under net counts);
+    # whatever is left is destination
+    # rows, capped so a huge terminal does not get 60 mostly-empty rows.
+    rows=$(( CHART_LINES - 11 ))
+    [ "$rows" -lt 1 ] && rows=1
+    [ "$rows" -gt "$CHART_ROWS" ] && rows="$CHART_ROWS"
+
+    i=0
+    n=0
+    while [ "$i" -lt "${#DEST_CUR_N[@]}" ]; do
+        cycle_hits=$(( cycle_hits + DEST_CUR_N[i] ))
+        i=$(( i + 1 ))
+    done
+    i=0
+    while [ "$i" -lt "${#DEST_TOTAL[@]}" ]; do
+        hits=$(( hits + DEST_TOTAL[i] ))
+        i=$(( i + 1 ))
+    done
+
+    up="$(monitor_uptime "${CHART_STARTED_EPOCH:-0}")"
+    # The header is the 'right now + worst-case' line: name, uptime, pids and
+    # the PEAK cpu/memory of the run — peaks belong next to the uptime (they
+    # describe the whole session) rather than trailing their row's gauge.
+    # Since the token summary moved to its own row, the items get generous
+    # gaps again: name 24, uptime 17, and the tail keeps its own spacing —
+    # the whole line still fits an 80-column frame (the 80-col regression
+    # test guards that). chart_pad guards the tail as a last resort
+    # ('~' beats a wrapped frame).
+    mem_peak="$(human_bytes "$(series_max MEM_SERIES)")"
+    cpu_peak="$(series_max CPU_SERIES '%.1f')"
+    # Token usage across ALL pi sessions the container stores, cumulative,
+    # with the input split the way pi's own /usage shows it: uncached prompt
+    # tokens and cache reads are different money (once an agent settles into
+    # a session the cached side dwarfs the other — one lump figure hid what
+    # is actually being paid for). The price rides along only when a provider
+    # reported one. '-1' means the image has no jq — an unknown is shown as
+    # '?', never as zero.
+    if [ -z "${CHART_TOK_IN:-}" ] || [ "${CHART_TOK_IN:-}" = "-1" ]; then
+        tok_disp="tok ?"
+    elif [ -z "${CHART_TOK_CACHE:-}" ]; then
+        # an image from before the split reports the lumped input only —
+        # render the old combined form rather than lie about zero cache reads
+        tok_disp="tok $(human_count "${CHART_TOK_IN:-0}")/$(human_count "${CHART_TOK_OUT:-0}")"
+    else
+        # the total leads — 'what has the agent fed the models' is the first
+        # question — and the split pi's /usage draws (uncached + cache reads,
+        # different money) rides along in parentheses, so nobody does token
+        # arithmetic mid-glance
+        tok_disp="tok in $(human_count "$(awk -v i="${CHART_TOK_IN:-0}" -v c="${CHART_TOK_CACHE:-0}" 'BEGIN { printf "%d", i + c }')") (in $(human_count "${CHART_TOK_IN:-0}") + cached $(human_count "${CHART_TOK_CACHE:-0}"))  out $(human_count "${CHART_TOK_OUT:-0}")"
+    fi
+    [ "$(awk -v c="${CHART_TOK_COST:-0}" 'BEGIN { print (c + 0 > 0) ? 1 : 0 }')" = "1" ] &&\
+        tok_disp+="  $(printf '$%.2f' "${CHART_TOK_COST}")"
+    frame+=" $(chart_pad "$name" 24)$(chart_pad "${up:-up ?}" 17)$(chart_pad "pids ${CHART_PIDS:-?}   peak cpu ${cpu_peak}%/mem ${mem_peak}" "$(( w - 43 ))")"
+    frame+=$'\n'"$rule"$'\n'
+
+    # cpu — percent of the container's whole allowance, as in line mode.
+    frame+=" $(chart_pad "cpu  ${CHART_CPU:-0}% of ${CHART_CORES:-?} cores" "$lw")$(series_spark CPU_SERIES "$spark_w")"$'\n'
+
+    # mem — a gauge against the limit when there is one (line mode prints
+    # 'unlimited' for the same reason; with no limit there is no percentage to
+    # gauge, so the column shows the history instead). The run's peak lives in
+    # the header now, so this row carries only the live figure.
+    if [ "${CHART_MEM_MAX:-max}" = "max" ]; then
+        mem_field="mem  $(human_bytes "${CHART_MEM:-0}")/unlimited"
+        frame+=" $(chart_pad "$mem_field" "$lw")$(series_spark MEM_SERIES "$spark_w")"$'\n'
+    else
+        mem_pct="$(awk -v u="${CHART_MEM:-0}" -v l="${CHART_MEM_MAX}" 'BEGIN { printf "%.1f", (l + 0 > 0) ? u * 100 / (l + 0) : 0 }')"
+        mem_field="mem  $(human_bytes "${CHART_MEM:-0}")/$(human_bytes "${CHART_MEM_MAX}") (${mem_pct}%)"
+        frame+=" $(chart_pad "$mem_field" "$lw")$(bar "$bar_w" "$mem_pct")"$'\n'
+    fi
+
+    # net — the newest deltas as numbers, the history as two sparklines.
+    frame+=" $(chart_pad "net  ${CHART_DOWN}$(human_bytes "${CHART_RX:-0}") ${CHART_UP}$(human_bytes "${CHART_TX:-0}")" "$lw")"
+    frame+="rx $(series_spark RX_SERIES "$half_w") tx $(series_spark TX_SERIES "$half_w")"$'\n'
+
+    # tok — the agent's cumulative LLM token usage on its own row under net:
+    # the header is rationed (80 columns showed 't~' where the whole figure
+    # should be), and a number nobody has to squeeze is a number that fits.
+    frame+=" $(chart_pad "$tok_disp" "$(( w - 2 ))")"$'\n'
+
+    frame+=$'\n'"$(printf 'destinations  this cycle: %d   total: %d   targets: %d' "$cycle_hits" "$hits" "${#DEST_LIST[@]}")"$'\n'
+
+    # Ranking: most RECENTLY called first — a destination's sort key is the
+    # last sample it appeared in, so the URLs the container is talking to NOW
+    # sit on top and a page the agent stopped looking at sinks, whatever its
+    # lifetime count. The accumulated hits are the tie-break (destinations seen
+    # in the same sample keep a stable, meaningful order), and every
+    # destination ever seen stays listed, so one sort ranks them all.
+    i=0
+    while [ "$i" -lt "${#DEST_LIST[@]}" ]; do
+        ranked+=("$(printf '%s\t%s\t%s' "${DEST_LAST[$i]}" "${DEST_TOTAL[$i]}" "${DEST_LIST[$i]}")")
+        i=$(( i + 1 ))
+    done
+    local tab
+    tab=$'\t'
+    if [ "${#ranked[@]}" -eq 0 ]; then
+        frame+=$'\n'"    (nothing requested since the monitor started)"$'\n'
+    else
+        while IFS=$'\t' read -r n rest dest && [ "$shown" -lt "$rows" ]; do
+            # 'n' is the last-seen sample (the sort key, never printed) and
+            # 'rest' the accumulated hits. The hit counts are column-aligned:
+            # a ranking you cannot scan vertically is not a ranking.
+            frame+=" $(chart_pad "$(printf 'x%-4s %s' "$rest" "$dest")" "$(( w - 2 ))")"$'\n'
+            shown=$(( shown + 1 ))
+        done < <(printf '%s\n' "${ranked[@]}" | sort -t$'\t' -k1,1nr -k2,2nr)
+        [ "${#ranked[@]}" -gt "$rows" ] &&\
+            frame+=" $(printf '... %d more destination(s) — the line view shows them all' "$(( ${#ranked[@]} - rows ))")"$'\n'
+    fi
+
+    # The hints only fit on a wide frame; a narrow one keeps the one that
+    # matters — and chart_pad truncates whatever is left, because a hint that
+    # reaches the last column wraps and scrolls the frame one line per draw.
+    line="Ctrl-C to stop ${CHART_MID} every ${interval}s"
+    [ "$w" -ge 80 ] &&\
+        line+=" ${CHART_MID} -i 5 for a calmer chart ${CHART_MID} --no-chart for the line view"
+    line="$(chart_pad "$line" "$(( w - 1 ))")"
+    # A blank before the hint only when the pane above did not already end in
+    # one: 'no destinations' and the '... N more' line already carry their own
+    # spacer, and two blank lines here would push the hint off a short screen
+    # (which scrolls the frame and smears the next one).
+    if [ "${#ranked[@]}" -eq 0 ] || [ "${#ranked[@]}" -le "$rows" ]; then
+        frame+="$line"$'\n'
+    else
+        frame+=$'\n'"$line"$'\n'
+    fi
+
+    # Home, CLEAR THE WHOLE SCREEN, then draw — erasing only below the cursor
+    # leaves the right-hand tail of every row that a previous frame wrote
+    # LONGER (a resize, or simply a frame that shrank by a row): '…line view'
+    # ghosting to 'iew' beside an unrelated row was exactly that. The frame is
+    # one write to the alternate screen, so a full clear costs no flicker.
+    # '\e[K' after the frame trims the cursor's own row — the last row's tail
+    # is above the cursor and would otherwise survive a shrink.
+    printf '\e[H\e[2J%s\e[K' "$frame"
+}
+
+# Entering and leaving the chart. The alternate screen is what keeps the promise
+# that a monitor leaves nothing behind: everything it drew is thrown away on
+# exit and the terminal comes back exactly as it was, scrollback included.
+monitor_screen_on() {
+    printf '\e[?1049h\e[?25l'
+    CHART_ACTIVE="yes"
+}
+
+monitor_screen_off() {
+    [ "${CHART_ACTIVE:-no}" = "yes" ] || return 0
+    CHART_ACTIVE="no"
+    printf '\e[?25h\e[?1049l'
+}
+
 # Name of the only running agent container, or empty if there is not exactly
 # one. Lets 'pia sh' work without a name in the common single-container case.
 sole_running_container() {
@@ -2014,9 +2572,10 @@ cmd_sh() {
 }
 
 # Live view of a running agent container: where its network requests go (TLS
-# SNI hostnames, plus full URLs for cleartext HTTP) alongside CPU, memory, pids
-# and net I/O. The sampling itself runs inside the container by the
-# 'pia-monitor' helper (docker/pia/monitor-inside.sh); this command only resolves the
+# SNI hostnames, plus full URLs for cleartext HTTP) alongside CPU, memory, pids,
+# net I/O and the agent's cumulative LLM token usage across all sessions
+# (read from pi's session files inside the container). The sampling itself runs inside the container by
+# the 'pia-monitor' helper (docker/pia/monitor-inside.sh); this command only resolves the
 # container and loops. The monitor writes nothing to disk anywhere — docker exec
 # streams the lines straight to this terminal. (The container may still keep a
 # destination log for 'pia urls'; this command neither reads nor writes it.)
@@ -2075,7 +2634,7 @@ cmd_dindlog() {
 }
 
 cmd_monitor() {
-    local name="" interval="" mode="cycle"
+    local name="" interval="" mode="cycle" chart=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2083,16 +2642,29 @@ cmd_monitor() {
                 echo "Usage: $(basename "$0") monitor [NAME] [OPTIONS]"
                 echo ""
                 echo "Watch a running agent container: request destinations (TLS SNI hostnames"
-                echo "and full cleartext HTTP URLs) plus CPU, memory, pids and net I/O."
+                echo "and full cleartext HTTP URLs) plus CPU, memory, pids, net I/O and the"
+                echo "agent's LLM token usage across all sessions stored in the container (in/out,"
+                echo "and cost when the provider reports one)."
+                echo ""
+                echo "On a terminal the sample is drawn as a chart dashboard (sparklines for"
+                echo "cpu/net history, a gauge for memory, the current pids in the header, a"
+                echo "ranked destination pane) that redraws one frame per sample. Piped or"
+                echo "redirected, it prints the line view instead: destinations, then one resource"
+                echo "line per sample."
                 echo ""
                 echo "Output goes to the terminal only — no log files are written by the monitor."
                 echo "For the full request history since container creation, use 'urls'."
                 echo "Press Ctrl-C to stop."
                 echo ""
                 echo "Options:"
-                echo "  -i, --interval <sec>  Seconds per sample cycle (default: 3); with --raw"
-                echo "                        it is the length of one capture chunk (default: 5)"
+                echo "  -i, --interval <sec>  Seconds per sample cycle (default: 1); with --raw"
+                echo "                        it is the length of one capture chunk (default: 5)."
+                echo "                        '-i 5' makes for a calmer chart."
                 echo "      --raw             Stream destinations continuously, no resource summary"
+                echo "      --chart           Draw the dashboard even when stdout is not a terminal"
+                echo "                        (the escape codes then go into the pipe too — mostly"
+                echo "                        for testing it; charts need cycle mode, not --raw)"
+                echo "      --no-chart        The line view, even on a terminal"
                 echo ""
                 echo "Notes:"
                 echo "  * HTTPS hides the URL path — only the hostname (SNI) is visible. Full"
@@ -2100,6 +2672,8 @@ cmd_monitor() {
                 echo "  * NAME may be omitted when exactly one container is running."
                 echo "  * Ctrl-C, or the container stopping, also stops the capture inside"
                 echo "    the container — nothing is left running behind us."
+                echo "  * The dashboard uses the alternate screen, so the terminal is exactly as"
+                echo "    it was afterwards; the sparklines live in memory and end with the monitor."
                 exit 0 ;;
             -i|--interval)
                 shift
@@ -2111,6 +2685,10 @@ cmd_monitor() {
                 interval="$1" ;;
             --raw)
                 mode="raw" ;;
+            --chart)
+                chart="yes" ;;
+            --no-chart)
+                chart="no" ;;
             *)
                 if [ -z "$name" ]; then
                     name="$1"
@@ -2138,6 +2716,22 @@ cmd_monitor() {
     if ! [[ "$interval" =~ ^[0-9]+$ ]] || [ "$interval" -lt 1 ]; then
         log_error "Interval must be a whole number of seconds (got '${interval}')."
         exit 1
+    fi
+
+    # Charts need a frame to draw on and something to draw. So: on by default
+    # when stdout is a terminal, never with --raw (which streams flows and has no
+    # sample), and '--chart' overrides the terminal check — the escape codes then
+    # go into the pipe as well, which is mostly useful for the mock test suite
+    # (it has no pty), and '--no-chart' keeps the log-friendly line view.
+    if [ "$mode" = "raw" ]; then
+        if [ "$chart" = "yes" ]; then
+            log_error "--chart needs cycle mode: --raw streams destinations and has no sample to chart."
+            log_error "Drop --raw, or drop --chart."
+            exit 1
+        fi
+        chart="no"
+    elif [ -z "$chart" ]; then
+        [ -t 1 ] && chart="yes" || chart="no"
     fi
 
     # Ensure prefix on custom name
@@ -2184,8 +2778,21 @@ cmd_monitor() {
     # INT/TERM one — a broken capture, or the container disappearing. The name is
     # interpolated because it is a function-local, already gone by the time the
     # script exits.
-    trap 'printf "\n"; log_info "Monitor stopped."; exit 0' INT TERM
-    trap "monitor_stop_sampler '$name'" EXIT
+    #
+    # Leaving the alternate screen comes first in both, so the closing message
+    # lands on the user's own screen and a chart that ended by any path restores
+    # the terminal before anything else is printed. monitor_screen_off is a no-op
+    # when no chart was drawn, so the line view behaves exactly as before.
+    #
+    # HUP and PIPE are here for the same reason as INT: without a handler the
+    # shell dies from the signal and NO trap runs at all — measured with
+    # 'pia monitor --chart | head', which left the terminal on the alternate
+    # screen and the sampler alive until its own duration expired. The '|| true'
+    # guards matter on exactly those paths: writing to the dead pipe (or the dead
+    # terminal) fails, and 'set -e' would otherwise abandon the handler half-way
+    # — before the 'exit' that makes it stick.
+    trap 'monitor_screen_off || true; printf "\n" 2>/dev/null || true; log_info "Monitor stopped."; exit 0' HUP INT TERM PIPE
+    trap "monitor_screen_off; monitor_stop_sampler '$name'" EXIT
 
     # Each pass is one 'docker exec' of the in-container helper, so a container
     # that disappears mid-monitoring ends the loop instead of erroring forever.
@@ -2204,25 +2811,64 @@ cmd_monitor() {
     local sampler_mode="$mode" sampler_seconds="$interval"
     if [ "$mode" = "raw" ]; then
         log_info "Streaming destinations from '${name}' — Ctrl-C to stop."
+    elif [ "$chart" = "yes" ]; then
+        log_info "Monitoring '${name}' — dashboard, one frame every ${interval}s. Ctrl-C to stop."
     else
         log_info "Monitoring '${name}' — destinations every cycle, resources every ${interval}s. Ctrl-C to stop."
     fi
-    log_info "Legend: 'TLS host (ip)' = HTTPS peer, path stays encrypted · 'HTTP <method> <url>' = cleartext request"
+    if [ "$chart" != "yes" ]; then
+        log_info "Legend: 'TLS host (ip)' = HTTPS peer, path stays encrypted · 'HTTP <method> <url>' = cleartext request"
+    fi
 
-    local rc=0
+    # The frame is drawn on the alternate screen, so the banners above stay in
+    # the scrollback and the dashboard never leaves a trace when it ends.
+    if [ "$chart" = "yes" ]; then
+        chart_init
+        chart_term_size
+        CHART_STARTED_EPOCH="$(monitor_start_epoch "$name")"
+        CHART_SAMPLES=0
+        monitor_screen_on
+    fi
+
+    local rc=0 cycle_out=""
     while container_is_running "$name"; do
         rc=0
-        docker exec "$name" pia-monitor "$sampler_mode" "$sampler_seconds" || rc=$?
+        if [ "$chart" = "yes" ]; then
+            # The frame replaces this pass's own output, so the exec is captured
+            # rather than streamed. stderr is deliberately NOT captured: a broken
+            # capture explains itself inside the container, and that message
+            # should reach the terminal — the loop exits right afterwards anyway.
+            # 'stats' asks the helper for its machine-readable sample line.
+            cycle_out="$(docker exec "$name" pia-monitor cycle "$interval" stats)" || rc=$?
+            if [ "$rc" -eq 0 ] && ! monitor_ingest "$cycle_out"; then
+                # An image built before charts existed prints a normal cycle and
+                # no '#stats' line. Draw nothing from it, say so once, drop back
+                # to the line view and show what this pass produced.
+                chart="no"
+                monitor_screen_off
+                log_warn "The image used by '${name}' has no chart sample line — using the line view."
+                log_warn "Rebuild it (bash scripts/build-docker.sh), then 'pia restart ${name}' for charts."
+                printf '%s\n' "$cycle_out"
+            elif [ "$rc" -eq 0 ]; then
+                monitor_dashboard "$name" "$interval"
+            fi
+        else
+            docker exec "$name" pia-monitor "$sampler_mode" "$sampler_seconds" || rc=$?
+        fi
         # A sampler that stopped together with the container is not a broken
         # capture — the loop condition turns that into the plain 'it is gone'
         # ending. Any other non-zero exit already explained itself inside the
         # container (missing CAP_NET_RAW, vanished interface, ...).
         if [ "$rc" -ne 0 ] && container_is_running "$name"; then
+            monitor_screen_off
             log_warn "Monitor stopped — the sampler exited with code ${rc}."
             exit 1
         fi
     done
 
+    # Leave the frame before the closing message, otherwise the warning is
+    # written to the alternate screen and vanishes with it.
+    monitor_screen_off
     log_warn "Container '${name}' is no longer running — monitor ended."
 }
 

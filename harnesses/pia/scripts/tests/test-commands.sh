@@ -2006,6 +2006,8 @@ rm -rf "$MON_SHIM_DIR"; mkdir -p "$MON_SHIM_DIR"
 #   stubborn 'yes' if a helper survives 'pkill' (models a hand-started one that
 #            ignores signals); 'pkill' then reports 0 = "killed something" forever,
 #            while 'no' reports the real 1 = "no process matched"
+#   stats    'yes' (default) if the helper prints the '#stats' sample line the
+#            charts need, 'no' for an image built before charts existed
 #   calls    every 'docker exec' argument list, one per line, so a test can assert
 #            on what actually ran inside the container, not just on the message
 cat > "$MON_SHIM_DIR/docker" <<SHIM
@@ -2043,6 +2045,7 @@ case "\$1" in
                 exit 0 ;;
             *"pia-monitor "*)
                 echo "shim-sample: cpu 1.0%"
+                [ "\$(mon_read stats)" = "no" ] || echo "#stats cpu=1.0 cores=2 mem=1048576 mem_max=max pids=3 rx=1024 tx=2048 secs=1 tok_in=1500 tok_cache=100000 tok_out=1000 tok_cost=0.03"
                 exit "\$(mon_read sampler)" ;;
             *"pkill "*)
                 # Real pkill answers 1 ('no process matched') once the helper is
@@ -2057,12 +2060,13 @@ exit 0
 SHIM
 chmod +x "$MON_SHIM_DIR/docker"
 
-# mon_setup STATE HELPER SAMPLER [STUBBORN] — configure the mock for one scenario.
+# mon_setup STATE HELPER SAMPLER [STUBBORN] [STATS] — configure the mock for one scenario.
 mon_setup() {
     printf '%s' "$1" > "$MON_SHIM_DIR/state"
     printf '%s' "$2" > "$MON_SHIM_DIR/helper"
     printf '%s' "$3" > "$MON_SHIM_DIR/sampler"
     printf '%s' "${4:-no}" > "$MON_SHIM_DIR/stubborn"
+    printf '%s' "${5:-yes}" > "$MON_SHIM_DIR/stats"
     : > "$MON_SHIM_DIR/calls"
     rm -f "$MON_SHIM_DIR/checks"
 }
@@ -2105,6 +2109,20 @@ mon_assert_no_calls() {
     TOTAL=$((TOTAL + 1))
     if grep -Eq -- "$pattern" "$MON_SHIM_DIR/calls" 2>/dev/null; then
         echo -e "  ${RED}FAIL${NC}: $description (calls were: $(tr '\n' ' ' < "$MON_SHIM_DIR/calls" 2>/dev/null))"
+        FAIL=$((FAIL + 1))
+    else
+        echo -e "  ${GREEN}PASS${NC}: $description"
+        PASS=$((PASS + 1))
+    fi
+}
+
+# mon_assert_not_in_output PHRASE DESCRIPTION — the monitor must not print this
+# at all (as opposed to mon_assert, which checks it does).
+mon_assert_not_in_output() {
+    local phrase="$1" description="$2"
+    TOTAL=$((TOTAL + 1))
+    if printf '%s' "$MON_OUT" | grep -qF -- "$phrase"; then
+        echo -e "  ${RED}FAIL${NC}: $description (output was: $MON_OUT)"
         FAIL=$((FAIL + 1))
     else
         echo -e "  ${GREEN}PASS${NC}: $description"
@@ -2198,6 +2216,52 @@ mon_assert_calls "exec $MON_NAME pia-monitor raw 5" "--raw without --interval us
 mon_setup running:2 yes 0 yes
 mon_run test-monmock -i 1
 mon_assert 0 "still running" "monitor reports a helper that survives the stop signal"
+
+# --- charts -----------------------------------------------------------------
+
+# On a pipe — which is what 'mon_run' is, it has no pty — the monitor keeps the
+# line view. A frame's escape codes in a log file help nobody, and the sampler is
+# then called exactly as it always was: no 'stats' argument to ask for.
+mon_setup running:2 yes 0
+mon_run test-monmock -i 1
+mon_assert_no_calls "pia-monitor cycle 1 stats" "monitor does not ask for chart samples when stdout is not a terminal"
+
+# '--chart' forces the dashboard anyway — the documented way to drive it from a
+# script or a test, and what draws the frame instead of printing the sample.
+mon_setup running:2 yes 0
+mon_run --chart test-monmock -i 1
+mon_assert 0 "Ctrl-C to stop" "--chart draws the dashboard frame"
+mon_assert 0 "cpu  1.0% of 2 cores" "the frame charts the sample the helper sent"
+mon_assert_calls "exec $MON_NAME pia-monitor cycle 1 stats" "--chart asks the helper for its machine-readable sample line"
+mon_assert_not_in_output "shim-sample" "--chart replaces the helper's own output instead of echoing it"
+mon_assert_calls "pkill .*pia-monitor" "--chart still stops the in-container sampler on the way out"
+
+# An image built before charts existed answers a normal cycle with no '#stats'
+# line. Drawing an empty frame forever would read as an idle container, so the
+# monitor says what it found, once, and finishes in the line view.
+mon_setup running:2 yes 0 no no
+mon_run --chart test-monmock -i 1
+mon_assert 0 "no chart sample line" "--chart on an image without the stats line says it falls back"
+mon_assert 0 "shim-sample" "... and shows the sample it did get"
+
+# A broken sampler explains itself inside the container; a frame must not
+# swallow that into an empty chart, and the loop must not spin on it.
+mon_setup running:5 yes 2
+mon_run --chart test-monmock -i 1
+mon_assert 1 "sampler exited with code 2" "--chart stops and fails when the sampler exits non-zero"
+
+# '--raw' streams flows and has no sample to chart, so the pair is refused
+# rather than quietly dropping one of the two modes.
+mon_setup running:2 yes 0
+mon_run --raw --chart
+mon_assert 1 "needs cycle mode" "--raw --chart is refused with an explanation"
+
+# '--no-chart' is the escape hatch back to the log-friendly view, and it must not
+# change what runs in the container either.
+mon_setup running:2 yes 0
+mon_run --no-chart test-monmock -i 1
+mon_assert 0 "shim-sample" "--no-chart keeps the line view"
+mon_assert_no_calls "pia-monitor cycle 1 stats" "--no-chart does not ask for chart samples"
 
 rm -rf "$MON_SHIM_DIR"
 fi
