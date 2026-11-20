@@ -1,6 +1,6 @@
 # agent-tools
 
-A repository of lightweight proxy servers, agent skills, and templates for AI agents. It contains three Dockerized services (GitHub API proxy, Odoo task proxy, tasks server), a wiki template, and agent skills.
+A repository of lightweight proxy servers, agent skills, and templates for AI agents. It contains four Dockerized services (GitHub API proxy, Odoo task proxy, tasks server, LLM inference proxy), a wiki template, and agent skills.
 
 ---
 
@@ -15,6 +15,7 @@ This repo provides **agent-facing tools** — small, focused services that expos
 | **github-proxy** | 8086 | Reverse proxy for GitHub REST API, restricted to PR/review/issue endpoints only. Injects a PAT from `secrets/`. |
 | **odoo-proxy** | 8087 | Application server for Odoo task data. Manages an Odoo login session internally and exposes `/task/data`, `/task/messages`, and `/task/message`. |
 | **tasks-server** | 8088 | REST API for managing tasks stored as markdown files with YAML frontmatter. Includes a zero-dependency web UI. |
+| **llm-proxy** | 8089 | Credential-injecting reverse proxy for LLM inference. One host:port, one path prefix per provider (`/openrouter` → openrouter.ai, `/mlx-serve` → local OpenAI-compatible server), per-route endpoint whitelist, optional model allowlist and client token gate, unbuffered SSE passthrough. Format pass-through only — no dialect translation; model selection stays in the agent. |
 | **skills/** | — | Agent skill markdown files organized by feature. |
 | **templates/llm-wiki/** | — | Template for LLM-assisted knowledge bases (idea file + format spec + init prompt). |
 | **harnesses/** | — | Isolated agent runtimes — currently `pia`: Pi agent harness with Docker setup and `pia` multi-instance manager.
@@ -25,9 +26,10 @@ This repo provides **agent-facing tools** — small, focused services that expos
 Agent → curl → localhost:8086 (github-proxy)  → api.github.com
 Agent → curl → localhost:8087 (odoo-proxy)    → Odoo instance
 Agent → curl → localhost:8088 (tasks-server)  → /data/tasks/ (markdown files)
+Agent → curl → localhost:8089 (llm-proxy)     → openrouter.ai / local model server
 ```
 
-All three services use a package-based structure (`github_proxy/`, `odoo_proxy/`, `tasks_server/`) with separate `config.py`, `whitelist.py`, and `server.py` modules, `python:3.14-alpine` base images, and run via Docker Compose.
+All four services use a package-based structure (`github_proxy/`, `odoo_proxy/`, `tasks_server/`) with separate `config.py`, `whitelist.py`, and `server.py` modules, `python:3.14-alpine` base images, and run via Docker Compose.
 
 ---
 
@@ -62,6 +64,15 @@ agent-tools/
 │   │   ├── spec/              # OpenAPI spec (openapi.yml)
 │   │   ├── ui/                # Zero-dependency web UI (index.html, css/, js/)
 │   │   ├── data/              # Task markdown files organized by project (gitignored)
+│   │   ├── pyproject.toml     # Python project config
+│   │   └── README.md          # Server-specific docs
+│   ├── llm-proxy/             # LLM inference proxy (credential injection + route policy)
+│   │   ├── llm_proxy/         # Package: config.py, whitelist.py (route table), server.py
+│   │   ├── docker/            # Dockerfile + docker-compose.yml
+│   │   ├── scripts/           # build/run/pause/stop/lint/test/clean scripts
+│   │   ├── secrets/           # OpenRouter key + optional client token (gitignored)
+│   │   ├── spec/              # Upstream OpenAPI specs (openrouter/)
+│   │   ├── tests/             # unittest test suite
 │   │   ├── pyproject.toml     # Python project config
 │   │   └── README.md          # Server-specific docs
 ├── skills/                    # Agent skill markdown files (shared)
@@ -153,6 +164,29 @@ echo "password" > secrets/odoo-password.txt
 ./scripts/stop-docker.sh
 ```
 
+### llm-proxy
+
+```bash
+cd servers/llm-proxy
+
+# 1. Set your OpenRouter key (optional — only the /openrouter route needs it)
+echo "sk-or-v1-your-key" > secrets/openrouter-api-key.txt
+
+# 2. Optional: shared-secret gate for all requests
+echo "some-random-token" > secrets/llm-proxy-token.txt
+
+# 3. Build and run
+./scripts/build-docker.sh
+./scripts/run-docker.sh
+
+# Proxy is now at http://localhost:8089
+#   POST /openrouter/v1/chat/completions  -> openrouter.ai/api/v1/... (key injected)
+#   POST /mlx-serve/v1/chat/completions       -> MLX_SERVE_URL (auth stripped)
+
+# Stop
+./scripts/stop-docker.sh
+```
+
 ### Testing
 
 Each proxy has its own test suite using Python's `unittest`:
@@ -168,6 +202,10 @@ python3 -m unittest tests.test_server -v
 
 # tasks-server tests
 cd servers/tasks-server
+python3 -m unittest tests.test_server -v
+
+# llm-proxy tests
+cd servers/llm-proxy
 python3 -m unittest tests.test_server -v
 ```
 
@@ -279,13 +317,13 @@ To use: copy the template into a project and run the initialization prompt from 
 - **Package-based structure**: Each proxy is a Python package (`github_proxy/`, `odoo_proxy/`, `tasks_server/`) with separate modules: `config.py` (configuration and logging), `whitelist.py` (endpoint patterns), and `server.py` (HTTP handler). The odoo-proxy also has `session.py` for Odoo session management. The tasks-server has `storage.py` for markdown file CRUD operations.
 - **No external dependencies**: All code uses only Python stdlib (`http.server`, `json`, `re`, `os`, `signal`, `http.client`, `urllib.parse`, etc.).
 - **Endpoint whitelisting**: All services use compiled regex patterns to whitelist allowed paths. Non-matching paths return 403 (github-proxy), 404 (odoo-proxy, tasks-server), or 405 (tasks-server for unsupported methods).
-- **Configuration via env vars**: `PROXY_PORT`, `GITHUB_PERSONAL_ACCESS_TOKEN` (github-proxy), `ODOO_DB`, `ODOO_URL`, `ODOO_USER`, `ODOO_PASSWORD`, `ODOO_SESSION_TIMEOUT` (odoo-proxy), `TASKS_DIR` (tasks-server). Credentials are loaded from `secrets/` files by the Docker scripts and passed as env vars.
+- **Configuration via env vars**: `PROXY_PORT`, `GITHUB_PERSONAL_ACCESS_TOKEN` (github-proxy), `ODOO_DB`, `ODOO_URL`, `ODOO_USER`, `ODOO_PASSWORD`, `ODOO_SESSION_TIMEOUT` (odoo-proxy), `TASKS_DIR` (tasks-server), `OPENROUTER_API_KEY`, `MLX_SERVE_URL`, `LLM_PROXY_TOKEN`, `ALLOWED_MODELS`, `LLM_UPSTREAM_TIMEOUT` (llm-proxy). Credentials are loaded from `secrets/` files by the Docker scripts and passed as env vars.
 - **Graceful shutdown**: All servers register SIGTERM/SIGINT handlers that call `server.shutdown()`.
 - **Logging**: All requests log to `stderr` in format `[proxy] <ISO-8601> <METHOD> <PATH> <STATUS> from <IP>`.
 
 ### Docker
 
-- All three services use `python:3.14-alpine` base images.
+- All four services use `python:3.14-alpine` base images.
 - Docker Compose files bind to `127.0.0.1` to avoid exposing ports to the host network.
 - Build scripts use `docker compose -p <project-name>` for project-scoped container naming.
 - Each server has scripts for: `build-docker.sh`, `run-docker.sh`, `pause-docker.sh`, `stop-docker.sh`, `lint-project.sh`, `test-project.sh`, `clean-project.sh`.
@@ -293,7 +331,7 @@ To use: copy the template into a project and run the initialization prompt from 
 ### Tests
 
 - Tests use `unittest` with `unittest.mock` for patching.
-- Tests cover: endpoint whitelist (allowed + blocked paths), query parameter handling, configuration loading, credential loading (env vars validated at startup), logging format, HTTP method support, session management (odoo-proxy), graceful shutdown, frontmatter parsing, task CRUD, project management (list, create), counter persistence, and handler methods (tasks-server).
+- Tests cover: endpoint whitelist (allowed + blocked paths), query parameter handling, configuration loading, credential loading (env vars validated at startup), logging format, HTTP method support, session management (odoo-proxy), graceful shutdown, frontmatter parsing, task CRUD, project management (list, create), counter persistence, handler methods (tasks-server), route resolution, prefix stripping, credential injection/stripping, model allowlist, token gate, SSE passthrough, and 502 handling (llm-proxy).
 - Tests import the server module directly by manipulating `sys.path` — no actual server is started.
 
 ### Code Quality
@@ -373,6 +411,14 @@ Containers are grouped under the `pia` project by plain `docker --label` stampin
 - **Project creation**: `POST /projects` creates a new project directory.
 - **Web UI**: Zero-dependency `ui/index.html` served at `/ui` — search, filters, task editing, create modal with inline project creation, delete confirmation, keyboard shortcuts.
 
+### llm-proxy
+
+- **Route table**: `whitelist.py` defines `Route` entries (prefix → target + `(method, path)` whitelist + optional path aliases). The prefix is stripped and aliases applied before forwarding — the public `/openrouter/v1/chat/completions` is rewritten to openrouter.ai's `/api/v1/chat/completions`, while `/mlx-serve` passes through unchanged; unknown prefixes 404, whitelisted paths with the wrong method 405.
+- **No translation**: requests/responses pass through byte-for-byte in the provider's native dialect; SSE (`text/event-stream`) responses are copied chunk-by-chunk with a flush per chunk. The proxy never rewrites model ids or picks models — that stays in the agent.
+- **Credential handling**: the OpenRouter key is injected as a Bearer token (client `Authorization` overridden); for credential-free routes (mlx-serve) client auth is stripped. A route with missing credentials is disabled (404) rather than failing at startup.
+- **Policy**: optional `ALLOWED_MODELS` list polices the `model` field of `/chat/completions` bodies (403 if not listed); optional `LLM_PROXY_TOKEN` gates all requests with `Authorization: Bearer <token>` (401 otherwise) so other host processes can't ride the proxy.
+- **HTTP/1.0 responses**: `Transfer-Encoding` is stripped, so connection close is what signals end-of-body for streamed responses; `ThreadingHTTPServer` with daemon threads keeps concurrent sessions independent of shutdown.
+
 ---
 
 ## Version Control
@@ -385,4 +431,5 @@ Containers are grouped under the `pia` project by plain `docker --label` stampin
 - The github-proxy PAT is stored as a file in `secrets/` (gitignored) and injected as a Bearer token — agents never see it.
 - The odoo-proxy credentials are stored as files in `secrets/` (gitignored) and injected into backend requests internally — agents never see them.
 - The tasks-server has no secrets; it writes task files to a local volume (`/data/tasks/`).
-- Both proxies reject all non-whitelisted endpoints, minimizing the attack surface.
+- The llm-proxy OpenRouter key is stored as a file in `secrets/` (gitignored) and injected into backend requests internally — agent containers configured against the proxy never hold a provider key. The proxy is intentionally unauthenticated by default (localhost-only publish, single-user host, agents you control); pair it with a dedicated openrouter key carrying a small per-key spend limit, and set `LLM_PROXY_TOKEN` before the host is shared or the port is reachable beyond localhost.
+- All proxies reject non-whitelisted endpoints, minimizing the attack surface.
