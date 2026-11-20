@@ -204,7 +204,7 @@ URL-history options (`pia urls`):
 - `pia remove` (alias `pia rm`) is the only command that removes a running container; `pia clean` removes only stopped ones, and never removes kept (`pia-keep-*`) containers
 - `pia keep` / `pia unkeep` / `pia rename` work on running and stopped containers alike (they only rename, never stop or remove)
 - Sessions are stored inside the container — deleting the container deletes the session
-- `pia` forwards the OpenRouter key into containers **only when you pass `--openrouter` (`-o`)** — by default containers start with no credentials, even when a key is available on the host (see [Inference via OpenRouter](#inference-via-openrouter))
+- `pia` never forwards provider credentials into containers — inference runs through [llm-proxy](../../servers/llm-proxy/), which injects keys server-side (see [Inference via llm-proxy](#inference-via-llm-proxy))
 - Options can be placed before or after the name (e.g., `pia run -m /path myproj` or `pia run myproj -m /path`)
 - `--docker-dev` is `--docker` plus exactly one bind: it **requires** `-m`, mounts that directory into the *daemon* at the same path so nested bind mounts resolve, and recreates the daemon when the workspace changes. `pia ask` accepts it only for ephemeral sessions (see [docs/docker.md](docs/docker.md))
 - Containers are labelled with the `pia` project (see [Container Project](#container-project)); `pia list`, `pia clean`, and `pia rs` match them by the `pia-` name prefix or by that label
@@ -431,73 +431,39 @@ Caveats:
 - If the logger is `SIGKILLed` its capture lingers until the container stops;
   the next container start brings it back. Nothing else restarts it mid-run.
 
-## Inference via OpenRouter
+## Inference via llm-proxy
 
-`configs/models.json` routes inference through the [llm-proxy](../../servers/llm-proxy/)
-service (port 8089): `mlx-serve` points at its `/mlx-serve` route, and
-`openrouter` is a **`baseUrl` override of Pi's built-in provider** pointing at
-its `/openrouter` route — Pi keeps the built-in model catalog (and per-key
-model filtering); only the endpoint changes. Pi sends the dummy `apiKey`
-(`"none"`) from `models.json`, and the proxy injects the real OpenRouter key
-internally, so **containers carry no inference credentials** and `llm-proxy`
-must be running for the OpenRouter models to work. The legacy key-forwarding
-path below still exists (`-o`), but is not needed when the proxy is up — the
-key would only reach the proxy, which replaces it anyway.
-
-Historically: Pi ships OpenRouter as a **built-in provider** and only needs the
-API key in its environment — `pia` did **not** forward it by default: containers
-should not carry credentials they do not use (e.g. when inference runs against a
-local model). Pass `--openrouter` (`-o`) to
-`pia run` / `pia create` / `pia restart` to opt in; `pia` then resolves the key
-for you — put it in an `openrouter-key.txt` file once and you never export
-anything.
+All inference goes through the [llm-proxy](../../servers/llm-proxy/) service
+(port 8089); `configs/models.json` points both providers at it: `mlx-serve`
+is a custom provider on its `/mlx-serve` route, and `openrouter` is a
+**`baseUrl` override of Pi's built-in provider** on its `/openrouter` route —
+Pi keeps the built-in model catalog (and per-key model filtering); only the
+endpoint changes. Pi sends the dummy `apiKey` (`"none"`) from `models.json`,
+the proxy injects the real OpenRouter key internally, so **containers carry no
+inference credentials at all** — `pia` never reads, exports or forwards any
+provider key, and `docker inspect` shows none.
 
 ```bash
-# one-time setup — plain key, nothing else.
-mkdir -p ~/.pia/secrets && chmod 700 ~/.pia/secrets
-# replace YOUR_KEY_HERE with your key first, then run:
-echo 'YOUR_KEY_HERE' > ~/.pia/secrets/openrouter-key.txt && chmod 600 ~/.pia/secrets/openrouter-key.txt
+# start the proxy once (needs servers/llm-proxy/secrets/openrouter-api-key.txt)
+cd ../../servers/llm-proxy && ./scripts/run-docker.sh
 
-pia run myproj -o             # forwards the key; without the flag the container gets none
-# inside pi: /model → openrouter → e.g. anthropic/claude-sonnet-4.5
+pia run myproj
+# inside pi: /model → openrouter → e.g. anthropic/claude-sonnet-4.5,
+#            or mlx-serve → a locally loaded model
 ```
 
-With `--openrouter`, `pia` looks for the key, in this order:
+Caveats:
 
-1. `OPENROUTER_API_KEY` in the environment (wins if set)
-2. `$PIA_OPENROUTER_KEY_FILE`, if you point it at a file explicitly (if that
-   file does not exist, `pia` **stops with an error** — it never falls back
-   to a different key behind your back)
-3. `~/.pia/secrets/openrouter-key.txt` — the standard location. `install-pia.sh`
-   creates the `~/.pia/secrets/` folder; you place the key file there yourself
-
-Without `--openrouter`/`-o` none of this happens — no key is read, exported or
-forwarded, even when `OPENROUTER_API_KEY` is set on the host. `pia ask` takes
-no flags and never forwards the key; to ask an OpenRouter-powered container,
-`pia create myproj --openrouter` first, then `pia ask myproj <PROMPT>`.
-
-The key is passed to docker **by name only** (never as `-e VAR=value`), so it
-never appears in the `docker run` command line in `ps` or the debug log. Inside
-the container, pick a model with `/model` (OpenRouter models look like
-`openrouter/anthropic/claude-sonnet-4.5`); with a key, Pi lists only the models
-that key may use.
-
-Alternatives, and caveats:
-
-- **llm-proxy must be up.** With `models.json` pointing at `host.docker.internal:8089`, a stopped proxy means every model fails — start it with `servers/llm-proxy/scripts/run-docker.sh`.
-- **`/login openrouter`** inside a container stores the key in the container's
-  `auth.json`. It survives `pia stop` / `pia rs` of that same container, but a
-  **new** container starts clean — the key-file route works for every instance.
+- **llm-proxy must be up.** With `models.json` pointing at
+  `host.docker.internal:8089`, a stopped proxy means every model fails —
+  `servers/llm-proxy/scripts/run-docker.sh`.
 - **Default model**: to make OpenRouter the default instead of the local
   `mlx-serve` model, set `defaultProvider`/`defaultModel` in
-  `configs/settings.json` (e.g. `"openrouter"` +
-  `"anthropic/claude-sonnet-4.5"`) and rebuild the image — or just pick it with
-  `/model` per session.
-- The key lives in the container's environment, so it is visible in
-  `docker inspect` output for that container — another reason forwarding stays
-  opt-in (`--openrouter`).
-- With `pia monitor`/`pia urls` you can verify the agent only talks to
-  `openrouter.ai` when using this provider.
+  `configs/settings.json` and rebuild the image — or just pick with `/model`
+  per session.
+- With `pia monitor`/`pia urls` you can verify a session only talks to the
+  proxy (cleartext, `host.docker.internal:8089`) — never to a provider host
+  or with any credential in hand.
 
 ## Docker Access (`--docker`)
 

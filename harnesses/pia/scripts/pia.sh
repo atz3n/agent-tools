@@ -47,8 +47,6 @@ set -euo pipefail
 #                      nested bind mounts resolve (needs -m)
 #       --docker-full  Mount the HOST socket — host-root-equivalent, loud
 #                      banner, refused by 'pia ask'
-#   -o, --openrouter   Forward the host OpenRouter API key into the container
-#                      (opt-in; without it the container starts with no key)
 #   -h, --help         Display this help message
 #
 # Command options (monitor):
@@ -67,7 +65,6 @@ set -euo pipefail
 #   pia run proj -m . --ssh  # Start with name, mount, and SSH
 #   pia run proj --docker    # Start with a throwaway sibling Docker daemon
 #   pia run proj -m . --docker-dev  # ... and the daemon sees the workspace
-#   pia run proj -o           # Start with the OpenRouter key forwarded
 #   pia create proj -m /path # Create stopped container for a later 'pia ask'
 #   pia --debug run proj     # Show debug output (global flag)
 #   pia list                   # List all containers
@@ -287,9 +284,6 @@ Command options (run/create/restart):
       --docker-full  Mount the HOST Docker socket; this is
                      host-root-equivalent by design: a loud banner
                      is shown and 'pia ask' refuses the mode
-  -o, --openrouter   Forward the host OpenRouter API key into the container
-                     (opt-in; without it the container starts with no key,
-                     even when OPENROUTER_API_KEY is set on the host)
   -h, --help         Display this help message
 
 Command options (monitor):
@@ -314,7 +308,6 @@ Examples:
   $(basename "$0") run proj --docker    # Start with a throwaway sibling Docker daemon
   $(basename "$0") run proj -m . --docker-dev # ... daemon sees /workspace (bind mounts work)
   $(basename "$0") run proj --docker-full # Host socket (host-root-equivalent!)
-  $(basename "$0") run proj -o          # Start with the OpenRouter key forwarded
   $(basename "$0") create proj -m /path # Create stopped container for a later 'pia ask'
   $(basename "$0") --debug run proj     # Show debug output (global flag)
   $(basename "$0") list                   # List all containers
@@ -346,7 +339,7 @@ EOF
 # Args can be in any order: name and options can be interleaved.
 # The first non-option, non-flag-value arg is treated as the name.
 # If no non-option arg exists, name is empty (auto-generated).
-# Outputs: NAME|HELP_REQUESTED|INVALID_OPTION|MOUNT_DIR|SSH_FLAG|DEBUG_FLAG|DOCKER_MODE|MISSING_VALUE|OPENROUTER_FLAG
+# Outputs: NAME|HELP_REQUESTED|INVALID_OPTION|MOUNT_DIR|SSH_FLAG|DEBUG_FLAG|DOCKER_MODE|MISSING_VALUE
 # Field 7 is the --docker MODE string ('' | dind | dind-mount | socket), not a
 # yes/no flag: --docker → dind, --docker-dev → dind-mount, --docker-full → socket.
 extract_name_and_options() {
@@ -358,7 +351,6 @@ extract_name_and_options() {
     local ssh_flag=""
     local debug_flag=""
     local docker_mode=""
-    local openrouter_flag=""
     local missing_value=0
 
     for arg in "$@"; do
@@ -386,9 +378,6 @@ extract_name_and_options() {
                 ;;
             --docker-full)
                 docker_mode="socket"
-                ;;
-            -o|--openrouter)
-                openrouter_flag="yes"
                 ;;
             -h|--help)
                 help_requested=1
@@ -425,74 +414,7 @@ extract_name_and_options() {
         missing_value=1
     fi
 
-    echo "${name}|${help_requested}|${invalid_option}|${mount_dir:-}|${ssh_flag:-}|${debug_flag:-}|${docker_mode:-}|${missing_value}|${openrouter_flag:-}"
-}
-
-# Locate the OpenRouter key file ('openrouter-key.txt'), printing one path or
-# nothing when no file exists. Search order:
-#   1. $PIA_OPENROUTER_KEY_FILE          — explicit override
-#   2. ~/.pia/secrets/openrouter-key.txt — the standard location, created by
-#      'install-pia.sh' and filled in by the user (see the README).
-#      pia is always run from the installed location, so this folder is the
-#      only place it looks besides the override above.
-# An override that is set but missing is a hard error (return 1): the caller
-# asked for one specific key file, so falling back to a different key would
-# be a silent credential swap — abort instead.
-openrouter_key_file() {
-    local candidate
-    if [ -n "${PIA_OPENROUTER_KEY_FILE:-}" ]; then
-        if [ ! -f "${PIA_OPENROUTER_KEY_FILE}" ]; then
-            log_error "PIA_OPENROUTER_KEY_FILE is set to '${PIA_OPENROUTER_KEY_FILE}' but no such file exists."
-            return 1
-        fi
-        echo "$PIA_OPENROUTER_KEY_FILE"
-        return 0
-    fi
-    candidate="${HOME}/.pia/secrets/openrouter-key.txt"
-    if [ -f "$candidate" ]; then
-        echo "$candidate"
-    fi
-}
-
-# Resolve the OpenRouter API key in the CURRENT shell and export it — but
-# ONLY when the caller opted in with '--openrouter' (OPENROUTER_FLAG). By
-# default the key is never forwarded, even when OPENROUTER_API_KEY is
-# exported on the host: containers should not carry credentials they do not
-# use (e.g. when inference runs against a local model). Pi has
-# OpenRouter as a built-in provider, so the key in the environment is all it
-# takes — no models.json entry needed; 'pi' then lists the key's models under
-# 'openrouter/...' in /model. Priority: an exported OPENROUTER_API_KEY, then
-# an 'openrouter-key.txt' file (see openrouter_key_file).
-# This MUST run in the main shell, right before docker is called: build_docker_args
-# is consumed through a process substitution, and docker takes the value of a
-# name-only '-e VAR' from the environment of the 'docker run' process — an
-# export made inside that subshell would be gone before docker starts.
-resolve_openrouter_key() {
-    # Opt-in only — without '--openrouter' nothing is resolved, exported or
-    # forwarded, no matter what the host environment holds.
-    [ -n "${OPENROUTER_FLAG:-}" ] || return 0
-    [ -n "${OPENROUTER_API_KEY:-}" ] && return 0
-    local key_file key
-    # A broken PIA_OPENROUTER_KEY_FILE override (log_error already printed by
-    # openrouter_key_file) aborts the whole command — 'exit' works here
-    # because resolve runs in the MAIN shell, right before docker is called.
-    if ! key_file="$(openrouter_key_file)"; then
-        exit 1
-    fi
-    # 'return 0', not a bare 'return': a bare return would propagate the failed
-    # [ -n ] status (1) and, under 'set -e', abort the caller (cmd_run etc.)
-    # when no key file exists — which is the normal case.
-    if [ -z "$key_file" ]; then
-        log_warn "--openrouter requested but no OpenRouter key found — container starts without it."
-        return 0
-    fi
-    key="$(tr -d ' \t\r\n' < "$key_file" 2>/dev/null)" || key=''
-    if [ -n "$key" ]; then
-        OPENROUTER_API_KEY="$key"
-        export OPENROUTER_API_KEY
-    else
-        log_warn "OpenRouter key file '${key_file}' is empty — key not forwarded."
-    fi
+    echo "${name}|${help_requested}|${invalid_option}|${mount_dir:-}|${ssh_flag:-}|${debug_flag:-}|${docker_mode:-}|${missing_value}"
 }
 
 # Build docker run arguments shared between run and restart
@@ -519,20 +441,6 @@ build_docker_args() {
         else
             log_warn "SSH_AUTH_SOCK is not set or socket not found — SSH agent is not available."
         fi
-    fi
-
-    # OpenRouter API key — only forwarded when the caller opted in with
-    # '--openrouter' (OPENROUTER_FLAG); by default the container gets no key,
-    # even when OPENROUTER_API_KEY is exported on the host. When opted in,
-    # callers run resolve_openrouter_key in the main shell first
-    # (see its comment); an export here would not survive the process
-    # substitution this function is read from. The variable is passed to
-    # docker by NAME only (no '=value') so the key itself never appears in
-    # the 'docker run' command line that 'ps' and the debug log show; docker
-    # reads the value from pia's environment. Without a resolved key no '-e'
-    # is emitted and pi simply starts without the OpenRouter credential.
-    if [ -n "${OPENROUTER_FLAG:-}" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; then
-        printf '%s\n' "-e" "OPENROUTER_API_KEY"
     fi
 
     # Mount directory
@@ -1385,7 +1293,6 @@ cmd_create() {
     SSH_FLAG="$(echo "$result" | cut -d'|' -f5)"
     DEBUG_FLAG="${DEBUG_FLAG:-$(echo "$result" | cut -d'|' -f6)}"
     DOCKER_MODE="$(echo "$result" | cut -d'|' -f7)"
-    OPENROUTER_FLAG="$(echo "$result" | cut -d'|' -f9)"
 
     # Handle help flag
     if [ "$help_req" -eq 1 ]; then
@@ -1441,7 +1348,6 @@ cmd_create() {
     prepare_dind_daemon "$name" || exit 1
 
     # Create (without starting)
-    resolve_openrouter_key
     log_info "Creating agent container '${name}' from image '${IMAGE_NAME}' (not started)..."
     local docker_args=()
     while IFS= read -r arg; do
@@ -1476,7 +1382,6 @@ cmd_run() {
     SSH_FLAG="$(echo "$result" | cut -d'|' -f5)"
     DEBUG_FLAG="${DEBUG_FLAG:-$(echo "$result" | cut -d'|' -f6)}"
     DOCKER_MODE="$(echo "$result" | cut -d'|' -f7)"
-    OPENROUTER_FLAG="$(echo "$result" | cut -d'|' -f9)"
 
     # Handle help flag
     if [ "$help_req" -eq 1 ]; then
@@ -1562,7 +1467,6 @@ cmd_run() {
     prepare_dind_daemon "$name" || exit 1
 
     # Build and run
-    resolve_openrouter_key
     log_info "Starting agent container '${name}' from image '${IMAGE_NAME}'..."
     local docker_args=()
     while IFS= read -r arg; do
@@ -1767,7 +1671,6 @@ cmd_restart() {
     SSH_FLAG="$(echo "$result" | cut -d'|' -f5)"
     DEBUG_FLAG="${DEBUG_FLAG:-$(echo "$result" | cut -d'|' -f6)}"
     DOCKER_MODE="$(echo "$result" | cut -d'|' -f7)"
-    OPENROUTER_FLAG="$(echo "$result" | cut -d'|' -f9)"
 
     # Handle help flag
     if [ "$help_req" -eq 1 ]; then
@@ -1831,7 +1734,6 @@ cmd_restart() {
     prepare_dind_daemon "$name" || exit 1
 
     # Start a fresh container with the same name
-    resolve_openrouter_key
     log_info "Starting fresh agent container '${name}' from image '${IMAGE_NAME}'..."
     local docker_args=()
     while IFS= read -r arg; do
@@ -2973,15 +2875,14 @@ cmd_ask() {
     local ask_docker_mode=""
     local ask_mount=""
 
-    # build_docker_args reads these globals; 'ask' takes no ssh/openrouter
-    # flags and no '-m' except for an ephemeral '--docker-dev' session.
+    # build_docker_args reads these globals; 'ask' takes no ssh flag and no
+    # '-m' except for an ephemeral '--docker-dev' session.
     # --docker IS accepted, but only with the SAFE modes: '--docker-full' is
     # refused below — an unattended session must never hold a host-root-equivalent
     # credential nobody is watching.
     MOUNT_DIR=""
     SSH_FLAG=""
     DOCKER_MODE=""
-    OPENROUTER_FLAG=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -3103,8 +3004,6 @@ cmd_ask() {
 
     local started_by_us=""
     if [ -n "$ephemeral" ]; then
-        # No resolve_openrouter_key here: OPENROUTER_FLAG is forced empty
-        # above, so 'ask' never forwards a key (see README).
         log_info "Creating one-shot container '${name}'..."
         if dind_mode_active; then
             start_dind_sibling "$name" "$DIND_WS" || exit 1
