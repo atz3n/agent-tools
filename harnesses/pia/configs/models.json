@@ -1,26 +1,7 @@
 {
   "providers": {
-    "lm-studio": {
-      "baseUrl": "http://host.docker.internal:1234/v1",
-      "api": "openai-completions",
-      "apiKey": "none",
-      "models": [
-        {
-            "id": "qwen/qwen3.8-27b",
-            "contextWindow": 250000,
-            "input": ["text", "image"],
-            "reasoning": true
-        },
-        {
-            "id": "qwen/qwen3.6-35b-a3b",
-            "contextWindow": 250000,
-            "input": ["text", "image"],
-            "reasoning": true
-        }
-      ]
-    },
     "mlx-serve": {
-      "baseUrl": "http://host.docker.internal:11234/v1",
+      "baseUrl": "http://host.docker.internal:8089/mlx-serve/v1",
       "api": "openai-completions",
       "apiKey": "none",
       "models": [
@@ -37,6 +18,10 @@
             "reasoning": true
         }
       ]
+    },
+    "openrouter": {
+      "baseUrl": "http://host.docker.internal:8089/openrouter/v1",
+      "apiKey": "none"
     }
   }
 }

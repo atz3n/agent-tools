@@ -433,11 +433,21 @@ Caveats:
 
 ## Inference via OpenRouter
 
-Pi ships OpenRouter as a **built-in provider** — nothing has to be added to
-`configs/models.json` (which only defines the local `lm-studio` and `mlx-serve`
-providers). Pi only needs the API key in its environment — but `pia` does **not**
-forward it by default: containers should not carry credentials they do not use
-(e.g. when inference runs against a local model). Pass `--openrouter` (`-o`) to
+`configs/models.json` routes inference through the [llm-proxy](../../servers/llm-proxy/)
+service (port 8089): `mlx-serve` points at its `/mlx-serve` route, and
+`openrouter` is a **`baseUrl` override of Pi's built-in provider** pointing at
+its `/openrouter` route — Pi keeps the built-in model catalog (and per-key
+model filtering); only the endpoint changes. Pi sends the dummy `apiKey`
+(`"none"`) from `models.json`, and the proxy injects the real OpenRouter key
+internally, so **containers carry no inference credentials** and `llm-proxy`
+must be running for the OpenRouter models to work. The legacy key-forwarding
+path below still exists (`-o`), but is not needed when the proxy is up — the
+key would only reach the proxy, which replaces it anyway.
+
+Historically: Pi ships OpenRouter as a **built-in provider** and only needs the
+API key in its environment — `pia` did **not** forward it by default: containers
+should not carry credentials they do not use (e.g. when inference runs against a
+local model). Pass `--openrouter` (`-o`) to
 `pia run` / `pia create` / `pia restart` to opt in; `pia` then resolves the key
 for you — put it in an `openrouter-key.txt` file once and you never export
 anything.
@@ -474,6 +484,7 @@ that key may use.
 
 Alternatives, and caveats:
 
+- **llm-proxy must be up.** With `models.json` pointing at `host.docker.internal:8089`, a stopped proxy means every model fails — start it with `servers/llm-proxy/scripts/run-docker.sh`.
 - **`/login openrouter`** inside a container stores the key in the container's
   `auth.json`. It survives `pia stop` / `pia rs` of that same container, but a
   **new** container starts clean — the key-file route works for every instance.
