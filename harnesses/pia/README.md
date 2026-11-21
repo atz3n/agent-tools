@@ -431,17 +431,27 @@ Caveats:
 - If the logger is `SIGKILLed` its capture lingers until the container stops;
   the next container start brings it back. Nothing else restarts it mid-run.
 
-## Inference via llm-proxy
+## Inference via llm-proxy (`extensions/llm-proxy.ts`)
 
 All inference goes through the [llm-proxy](../../servers/llm-proxy/) service
-(port 8089); `configs/models.json` points both providers at it: `mlx-serve`
-is a custom provider on its `/mlx-serve` route, and `openrouter` is a
-**`baseUrl` override of Pi's built-in provider** on its `/openrouter` route —
-Pi keeps the built-in model catalog (and per-key model filtering); only the
-endpoint changes. Pi sends the dummy `apiKey` (`"none"`) from `models.json`,
-the proxy injects the real OpenRouter key internally, so **containers carry no
-inference credentials at all** — `pia` never reads, exports or forwards any
-provider key, and `docker inspect` shows none.
+(port 8089). One pi provider extension — `extensions/llm-proxy.ts`, baked
+into the image at `~/.pi/agent/extensions/` — registers **both** providers;
+there is **no `models.json` at all**. Every inference setting lives in that
+one file plus two env vars:
+
+| Provider | Registration | Model catalog |
+|---|---|---|
+| `openrouter` | `baseUrl` **override of pi's built-in provider**, pointed at the proxy's `/openrouter/v1` route | pi's built-in curated catalog — thinking-level maps, `~latest` virtual models, per-key filtering, Anthropic dialect for Claude models. Never copy a model list into the override. |
+| `mlx-serve` | native **dynamic** provider on the `/mlx-serve/v1` route | fetched live from mlx-serve's `GET /v1/models` (through the proxy) — loading, renaming or requantizing a local model needs no config edit and no image rebuild; models appear with their real context window, output budget, reasoning and vision flags. |
+
+| Env var (on the container) | Default | Meaning |
+|---|---|---|
+| `LLM_PROXY_URL` | `http://host.docker.internal:8089` | proxy base URL; the extension appends the route prefixes itself |
+| `LLM_PROXY_TOKEN` | *(unset → dummy `"none"`)* | optional shared-secret Bearer sent on every request, both providers — set it to the **same value** as the proxy's `LLM_PROXY_TOKEN` to enable the gate. The proxy validates it, then injects the real OpenRouter key (or strips auth on credential-free routes). |
+
+The extension only ever sends these credentials **to the proxy**, so
+**containers carry no inference secrets at all** — `pia` never reads, exports
+or forwards any provider key, and `docker inspect` shows none.
 
 ```bash
 # start the proxy once (needs servers/llm-proxy/secrets/openrouter-api-key.txt)
@@ -452,9 +462,27 @@ pia run myproj
 #            or mlx-serve → a locally loaded model
 ```
 
+mlx-serve discovery details:
+
+- Only entries with the `chat` capability are listed (FLUX/LTX/TTS models are
+  filtered out); ready models sort before unloaded ones — an unloaded model
+  still works, mlx-serve loads it on request, the first token just waits for
+  the load.
+- Refresh timing: the extension fetches once at pi startup (bounded by a 3 s
+  timeout, so a down mlx-serve never stalls boot), pi refreshes live catalogs
+  at startup and when `/model` searches, and the fetched list is persisted to
+  pi's model store — print mode (`pi --print`, used by `pia ask`) never runs
+  catalog refreshes itself, so it relies on the persisted list or the
+  extension's startup fetch.
+- The catalog is live state: `configs/settings.json`'s `defaultModel` must
+  name a model id the catalog actually reports (`mlx-serve/<id>`), otherwise
+  pi falls back to its own default selection at startup.
+- Unit tests: `node --test harnesses/pia/extensions/__test__/` (needs pi
+  installed globally; mocks the catalog, no server required).
+
 Caveats:
 
-- **llm-proxy must be up.** With `models.json` pointing at
+- **llm-proxy must be up.** With the extension pointing at
   `host.docker.internal:8089`, a stopped proxy means every model fails —
   `servers/llm-proxy/scripts/run-docker.sh`.
 - **Default model**: to make OpenRouter the default instead of the local

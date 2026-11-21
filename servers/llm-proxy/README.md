@@ -66,11 +66,31 @@ With `LLM_PROXY_TOKEN` unset the proxy authenticates **no one**: anything that c
 - Everything **local** can: any host process, and containers with host access (pia via `host.docker.internal`). That is the trust you are extending.
 - Browsers largely cannot ride it: JSON `POST`s trigger a CORS preflight the proxy never answers, and form-encoded fallbacks are rejected upstream.
 
-What the open port cannot bound by itself is a *misbehaving or compromised agent* burning credits. The bound belongs at the provider: **use a dedicated openrouter key with a small per-key spend limit** for this proxy. Enable the token (`secrets/llm-proxy-token.txt` + `"apiKey": "<token>"` in models.json) the moment the box is shared, long-running, or reachable beyond localhost — one file and one JSON field, no rebuild beyond a container restart.
+What the open port cannot bound by itself is a *misbehaving or compromised agent* burning credits. The bound belongs at the provider: **use a dedicated openrouter key with a small per-key spend limit** for this proxy. Enable the token (`secrets/llm-proxy-token.txt`) the moment the box is shared, long-running, or reachable beyond localhost — and give the client the same value: `LLM_PROXY_TOKEN` on the pia container (the provider extension sends it as the Bearer credential on every request; see *Wiring pi to it*), or `"apiKey": "<token>"` in a plain `models.json` setup.
 
 ## Wiring pi to it
 
-Point providers at the proxy in `models.json` — the harness gets one host, dummy keys, and keeps its own model picker:
+The pia harness wires pi to the proxy with a **single provider extension** —
+`harnesses/pia/extensions/llm-proxy.ts`, installed into
+`~/.pi/agent/extensions/` — and **no `models.json` at all**. It registers
+both providers in one place:
+
+- `openrouter` — a `baseUrl` **override of pi's built-in provider**
+  (`${LLM_PROXY_URL}/openrouter/v1`); the built-in catalog, thinking-level
+  maps, `~latest` virtual models, per-key filtering and Anthropic-dialect
+  handling are all preserved.
+- `mlx-serve` — a native **dynamic** provider whose catalog is discovered
+  live from `/mlx-serve/v1/models` (issue #14).
+
+Configuration is two container env vars, mirrored on the proxy side:
+`LLM_PROXY_URL` (base URL, default `http://host.docker.internal:8089`) and
+the optional gate token — set `LLM_PROXY_TOKEN` to the **same value** on both
+sides; pi then sends it as the Bearer credential on every request, the proxy
+validates it and swaps in the real provider key. With the token unset the
+extension sends the dummy `"none"`, matching the proxy's default open posture.
+
+For setups without the extension, plain `models.json` still works — the
+harness gets one host, dummy keys, and keeps its own model picker:
 
 ```json
 {
@@ -91,7 +111,7 @@ Point providers at the proxy in `models.json` — the harness gets one host, dum
 
 With `LLM_PROXY_TOKEN` set, use `"apiKey": "<token>"` instead — pi sends it as a Bearer header and the proxy validates it, then swaps in the real provider credential.
 
-The `openrouter` entry above is a **built-in provider override**, not a custom provider: pi keeps its built-in catalog (context windows, thinking levels, per-key filtering) and only the endpoint changes. Its `baseUrl` ends in `/openrouter/v1` because pi speaks *two* dialects to OpenRouter through that one base — the OpenAI implementation appends `/chat/completions`, the Anthropic SDK appends `/v1/messages` — and the route's alias normalizes both (`/v1/v1/...` collapses to `/api/v1/...`). A custom provider (like `mlx-serve`) is different: pi knows nothing about it, so its `models` must be declared explicitly with metadata.
+The `openrouter` entry above is a **built-in provider override**, not a custom provider: pi keeps its built-in catalog (context windows, thinking levels, per-key filtering) and only the endpoint changes. Its `baseUrl` ends in `/openrouter/v1` because pi speaks *two* dialects to OpenRouter through that one base — the OpenAI implementation appends `/chat/completions`, the Anthropic SDK appends `/v1/messages` — and the route's alias normalizes both (`/v1/v1/...` collapses to `/api/v1/...`). A custom provider (like `mlx-serve`) is different: pi knows nothing about it, so its `models` must be declared explicitly with metadata — the static `models` list above is the no-extension fallback; the extension above replaces it with live discovery from the proxy's catalog.
 
 ## Logging
 
