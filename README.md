@@ -30,7 +30,7 @@ pia list                                   # all agent instances
 pia stop myproj && pia rs                  # stop, then resume the last session
 ```
 
-**Watching an agent (`pia monitor`, `pia urls`).** Trust, but verify: a passive `tshark` capture inside each container shows *where the agent's requests actually go* — live with `pia monitor` (destinations plus CPU/memory/net per sample), or retrospectively with `pia urls`, which reports every destination the container has called since it was created, surviving stop/start cycles. HTTPS exposes the hostname (SNI); cleartext HTTP — your traffic to the local proxies on 8086/8087/8088 — shows full URLs. The monitor itself logs nothing.
+**Watching an agent (`pia monitor`, `pia urls`).** Trust, but verify: a passive `tshark` capture inside each container shows *where the agent's requests actually go* — live with `pia monitor` (destinations plus CPU/memory/net per sample), or retrospectively with `pia urls`, which reports every destination the container has called since it was created, surviving stop/start cycles. HTTPS exposes the hostname (SNI); cleartext HTTP — your traffic to the local proxies on 8086/8087/8088/8089 — shows full URLs. The monitor itself logs nothing.
 
 The rest of the `pia` surface is routine lifecycle management: `create`, `start/run`, `stop`, `remove`, `restart`, `exec`, `sh`, `clean`, plus `keep`/`unkeep`/`rename` to protect a session container from cleanup. Full command reference, monitor internals, and Docker-socket caveats: [harnesses/pia/README.md](harnesses/pia/README.md).
 
@@ -47,6 +47,7 @@ Handing an agent a GitHub token or an Odoo login is risky and noisy: the credent
 Agent (pia container) → curl → localhost:8086 (github-proxy)  → api.github.com
 Agent (pia container) → curl → localhost:8087 (odoo-proxy)    → your Odoo instance
 Agent (pia container) → curl → localhost:8088 (tasks-server)  → markdown files on a volume
+Agent (pia container) → curl → localhost:8089 (llm-proxy)     → openrouter.ai / local model server
 ```
 
 | Server | Port | What it does |
@@ -54,6 +55,7 @@ Agent (pia container) → curl → localhost:8088 (tasks-server)  → markdown f
 | [github-proxy](servers/github-proxy/) | 8086 | Reverse proxy for the GitHub REST API, restricted to pull requests, reviews, review comments, and issues. Injects a PAT as a Bearer token. |
 | [odoo-proxy](servers/odoo-proxy/) | 8087 | Application server over Odoo: manages the login session internally and exposes `/task/data`, `/task/messages`, and `/task/message` for project tasks. |
 | [tasks-server](servers/tasks-server/) | 8088 | REST API + zero-dependency web UI for tasks stored as markdown files with YAML frontmatter, organized per project with auto-incrementing IDs. |
+| [llm-proxy](servers/llm-proxy/) | 8089 | Credential-injecting reverse proxy for LLM inference. One host:port, one path prefix per provider (`/openrouter`, `/mlx-serve`), per-route endpoint whitelist, optional model allowlist, unbuffered SSE passthrough. |
 
 Each server has its own README with endpoints, setup, and configuration.
 
@@ -97,6 +99,11 @@ curl -s http://localhost:8086/user
 # tasks-server — no credentials needed, UI included:
 cd servers/tasks-server && ./scripts/build-docker.sh && ./scripts/run-docker.sh
 open http://localhost:8088/ui
+
+# llm-proxy — OpenRouter key optional (only the /openrouter route needs it):
+#   echo "sk-or-..." > secrets/openrouter-api-key.txt
+cd servers/llm-proxy && ./scripts/build-docker.sh && ./scripts/run-docker.sh
+curl -s http://localhost:8089/openrouter/v1/models
 
 # stop any service
 ./scripts/stop-docker.sh

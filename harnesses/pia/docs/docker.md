@@ -34,7 +34,6 @@ to mount: `docker` calls simply fail, which is the fully-contained mode.
 | (name) | `--name pia-<name>` (prefix auto-added; `pia-keep-*` containers are never removed by `pia clean`) |
 | `-m <dir>` | `-v <resolved-dir>:/workspace` |
 | `--ssh` | host SSH agent socket mounted read-only |
-| `-o` / `--openrouter` | `-e OPENROUTER_API_KEY=…` (opt-in; never for `pia ask`) |
 | `--docker` / `--docker-dev` | `--net container:NAME-dind` + `-e DOCKER_HOST=tcp://127.0.0.1:2375`, no socket mount |
 | `--docker-full` | `-v <DOCKER_SOCKET>:/var/run/docker.sock` |
 | (always) | labels: `com.docker.compose.project=pia`, `config-hash=…`, and for daemons `pia-role=dind`, `pia-parent=NAME`, `pia-dind-mounts=<ws>` |
@@ -559,10 +558,10 @@ install, from a client holding **nothing but the daemon's TCP API**:
   that strengthens this mode.
 - **`--docker-full` is host root by design.** The banner is a speed bump.
   Authz plugins on the host daemon are hardening only (they fail open).
-- The **agent container's own** mounts (workspace, `--ssh` agent) and the
-  forwarded OpenRouter key are not protected by any daemon mode: mode choice
-  bounds what *build workloads* can reach, not what the agent itself can
-  read, modify, or sign.
+- The **agent container's own** mounts (workspace, `--ssh` agent) are not
+  protected by any daemon mode: mode choice bounds what *build workloads* can
+  reach, not what the agent itself can read, modify, or sign. (Inference
+  credentials never enter the container at all — they live in llm-proxy.)
 
 ---
 

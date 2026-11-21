@@ -1,12 +1,14 @@
 #!/bin/bash
 
 # Main test runner for pia.sh
-# Sources individual test modules and runs them in order.
+# Sources individual test modules and runs them in order, then runs the
+# provider-extension unit tests (node --test) next to their source.
 #
 # Usage:
-#   ./run-tests.sh                    # Run all tests
+#   ./run-tests.sh                    # Run all tests (CLI suite + extension unit tests)
 #   ./run-tests.sh run stop           # Run only run and stop tests
 #   ./run-tests.sh clean resume       # Run only clean and resume tests
+#   ./run-tests.sh extensions         # Run only the extension unit tests
 
 PASS=0
 FAIL=0
@@ -183,6 +185,49 @@ $(docker ps -a --format '{{.Names}}' 2>/dev/null \
            "$TEST_CONTAINERS_FILE"
 }
 trap cleanup_test_containers EXIT
+
+# ─── Extension unit tests (node --test) ────────────────────────────
+
+# The pi provider extension's unit tests live next to the source in
+# extensions/__test__/. They need node (>= 23.6, type stripping) and pi
+# installed globally, but no Docker and no servers — fast, so they run
+# first. Section name for the filter: "extensions".
+
+if should_run_section "extensions"; then
+    echo ""
+    echo "═══ extensions: provider extension unit tests ═══"
+    UNIT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/extensions/__test__"
+    shopt -s nullglob
+    UNIT_FILES=("$UNIT_DIR"/*.mjs)
+    shopt -u nullglob
+    if ! command -v node > /dev/null 2>&1; then
+        # Loud failure, not a silent skip: "run all tests" must not go green
+        # when a whole layer could not run.
+        echo -e "  ${RED}FAIL${NC}: node not found — extension unit tests could not run"
+        TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1))
+    elif [ ${#UNIT_FILES[@]} -eq 0 ]; then
+        echo -e "  ${YELLOW}SKIP${NC}: no test files in $UNIT_DIR"
+    else
+        UNIT_OUTPUT=$(node --test "${UNIT_FILES[@]}" 2>&1)
+        UNIT_CODE=$?
+        # Per-test result lines + the tally, in the suite's own format.
+        echo "$UNIT_OUTPUT" | grep -E '^(✔|✖|ℹ (tests|pass|fail) )' || true
+        UNIT_PASS=$(echo "$UNIT_OUTPUT" | sed -n 's/^ℹ pass \([0-9]*\).*/\1/p' | tail -1)
+        UNIT_FAIL=$(echo "$UNIT_OUTPUT" | sed -n 's/^ℹ fail \([0-9]*\).*/\1/p' | tail -1)
+        if [ -z "$UNIT_PASS" ] || [ -z "$UNIT_FAIL" ]; then
+            # Unexpected node output shape — trust the exit code.
+            if [ "$UNIT_CODE" -eq 0 ]; then UNIT_PASS=1; UNIT_FAIL=0; else UNIT_PASS=0; UNIT_FAIL=1; fi
+        fi
+        PASS=$((PASS + UNIT_PASS))
+        FAIL=$((FAIL + UNIT_FAIL))
+        TOTAL=$((TOTAL + UNIT_PASS + UNIT_FAIL))
+        # On failure, show the details (assertion diffs) for triage.
+        if [ "$UNIT_FAIL" -gt 0 ]; then
+            echo ""
+            echo "$UNIT_OUTPUT" | sed -n '/failing tests:/,$p' | head -80
+        fi
+    fi
+fi
 
 # ─── Source test modules ─────────────────────────────────────────────
 

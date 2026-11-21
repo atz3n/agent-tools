@@ -76,8 +76,15 @@ RUN playwright-cli install-browser chromium
 
 # Add config
 COPY harnesses/pia/configs/settings.json /root/.pi/agent/settings.json
-COPY harnesses/pia/configs/models.json /root/.pi/agent/models.json
 COPY harnesses/pia/configs/cli.config.json /root/.playwright/cli.config.json
+
+# pi provider extension: registers both llm-proxy-backed providers — the
+# openrouter built-in endpoint override and the dynamic mlx-serve model
+# discovery (issue #14) — so no models.json is needed and LLM_PROXY_URL /
+# LLM_PROXY_TOKEN are the only inference configuration.
+# Pattern copy on purpose: the extension's __test__/ folder (node --test
+# unit tests) must stay out of the image.
+COPY harnesses/pia/extensions/*.ts /root/.pi/agent/extensions/
 
 # Copy agent skills
 COPY skills/ /root/.pi/agent/skills/
