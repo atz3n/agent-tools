@@ -5,6 +5,7 @@ services:
   gh-proxy:
     image: gh-proxy
     container_name: gh-proxy
+    restart: unless-stopped
     networks:
       - gh-proxy-network
     ports:

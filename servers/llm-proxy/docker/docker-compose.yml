@@ -5,6 +5,7 @@ services:
   llm-proxy:
     image: llm-proxy
     container_name: llm-proxy
+    restart: unless-stopped
     networks:
       - llm-proxy-network
     ports:

@@ -5,6 +5,7 @@ services:
   odoo-proxy:
     image: odoo-proxy
     container_name: odoo-proxy
+    restart: unless-stopped
     networks:
       - odoo-proxy-network
     ports:
