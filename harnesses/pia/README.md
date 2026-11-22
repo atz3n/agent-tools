@@ -44,7 +44,7 @@ The `pia` CLI lets you run multiple pi-agent containers in parallel, each with i
 | `pia clean` | Remove all stopped agent containers (kept `pia-keep-*` containers are never removed) |
 | `pia resume` / `pia rs` | Start the most recently stopped agent container and jump straight into its last pi session |
 | `pia ask [NAME] <prompt>` | One-shot non-interactive pi prompt (`pi --print`); omit NAME for an ephemeral container |
-| `pia restart [NAME] -m /path` | Stop/remove then run fresh |
+| `pia restart [NAME] [OPTIONS]` | Restart a named container, continuing its last pi session — unchanged/omitted flags resume in place, changed flags re-create but carry the conversation over, `--fresh` forces a recreate with a clean session |
 | `pia exec [NAME] [CMD]` | Execute a command in a running container |
 | `pia sh [NAME]` / `pia shell [NAME]` | Open an interactive bash shell in a running container (NAME may be omitted if only one is running) |
 | `pia monitor [NAME]` | Live view of where the container's requests go, plus CPU/memory/net — drawn as charts on a terminal, one line per sample when piped (terminal only, the monitor itself logs nothing) |
@@ -136,8 +136,12 @@ pia remove myproj
 # Remove all stopped agent containers at once (kept containers are preserved)
 pia clean
 
-# Restart fresh with a mount
+# Restart keeping the pi conversation: unchanged flags resume in place,
+# changed flags re-create the container but restore the session ('pi --continue')
 pia restart myproj -m . --ssh
+
+# Force a recreate with a clean pi session
+pia restart myproj --fresh
 
 # Resume the latest stopped container and continue its last pi session
 pia rs

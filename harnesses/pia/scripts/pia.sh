@@ -16,7 +16,9 @@ set -euo pipefail
 #   pia clean                     Remove all stopped agent containers (except kept pia-keep-*)
 #   pia resume                    Start the most recently stopped agent container and continue its last pi session
 #   pia rs                        Alias for resume
-#   pia restart [NAME] [OPTIONS] Restart a named container
+#   pia restart [NAME] [OPTIONS] Restart a named container, continuing its last pi session
+#                      (re-creates the container only when run flags change;
+#                      --fresh forces a recreate with a fresh pi session)
 #   pia ask   [NAME] [PROMPT]   Run a one-shot non-interactive pi prompt (pi --print)
 #   pia exec    [NAME] [CMD]    Execute a command in a running container
 #   pia sh      [NAME]          Open an interactive bash shell in a running container
@@ -49,6 +51,12 @@ set -euo pipefail
 #                      banner, refused by 'pia ask'
 #   -h, --help         Display this help message
 #
+# Command options (restart):
+#       --fresh        Force a recreate and start a FRESH pi session
+#                      (alias: --no-continue). Without it, restart continues
+#                      the last pi session and only re-creates the container
+#                      when the given flags actually differ from its config.
+#
 # Command options (monitor):
 #   -i, --interval <sec>  Seconds per resource sample (default: 1)
 #       --raw             Stream destinations continuously, no resource summary
@@ -70,7 +78,9 @@ set -euo pipefail
 #   pia list                   # List all containers
 #   pia stop my-project        # Stop named container
 #   pia remove my-project      # Remove named container
-#   pia restart my-project -m . # Restart with mount
+#   pia restart my-project -m . # Restart with a new mount, keeping the pi session
+#   pia restart my-project      # Run flags unchanged — plain resume (pi --continue)
+#   pia restart my-project --fresh # Recreate and start a clean pi session
 #   pia exec my-project ls /   # Run command in container
 #   pia sh my-project           # Open a bash shell inside the container
 #   pia monitor                 # Watch destinations + CPU/mem/net of the only running container
@@ -239,7 +249,11 @@ Commands:
   resume                     Start the most recently stopped agent container and continue its last pi session
                              (takes no NAME — use 'run <NAME>' to continue a specific container)
   rs                         Alias for resume
-  restart [NAME] [OPTIONS]   Restart a named container
+  restart [NAME] [OPTIONS]   Restart a named container, continuing its last pi session.
+                             Unchanged (or omitted) flags → plain resume in place; changed
+                             flags → re-create WITH the session carried over; --fresh → recreate
+                             with a clean session. Options you do not pass keep the
+                             container's current values.
   ask     [NAME] [PROMPT]    One-shot non-interactive pi prompt (pi --print); omit NAME if ephemeral
   exec    [NAME] [CMD]       Execute a command in a running container
   sh      [NAME]             Open an interactive bash shell in a running container (alias: shell)
@@ -286,6 +300,13 @@ Command options (run/create/restart):
                      is shown and 'pia ask' refuses the mode
   -h, --help         Display this help message
 
+Command options (restart):
+      --fresh        Force a recreate and start a FRESH pi session
+                     (alias: --no-continue). Without it, 'restart' continues
+                     the container's last pi session ('pi --continue') and
+                     re-creates the container only when the given flags
+                     actually differ from its current config.
+
 Command options (monitor):
   -i, --interval <sec>  Seconds per resource sample (default: 1)
       --raw             Stream destinations continuously, no resource summary
@@ -318,7 +339,9 @@ Examples:
   $(basename "$0") clean                  # Remove all stopped containers
   $(basename "$0") resume                 # Start the most recently stopped container, continue its last session
   $(basename "$0") rs                     # Alias for resume
-  $(basename "$0") restart my-project -m . # Restart with mount
+  $(basename "$0") restart my-project -m . # Restart with a new mount, keeping the pi session
+  $(basename "$0") restart my-project       # Flags unchanged — plain resume (pi --continue)
+  $(basename "$0") restart my-project --fresh # Recreate with a clean pi session
   $(basename "$0") exec my-project ls /   # Run command in container
   $(basename "$0") sh my-project          # Open a bash shell in the container
   $(basename "$0") sh                     # Shell in the only running container
@@ -339,9 +362,10 @@ EOF
 # Args can be in any order: name and options can be interleaved.
 # The first non-option, non-flag-value arg is treated as the name.
 # If no non-option arg exists, name is empty (auto-generated).
-# Outputs: NAME|HELP_REQUESTED|INVALID_OPTION|MOUNT_DIR|SSH_FLAG|DEBUG_FLAG|DOCKER_MODE|MISSING_VALUE
+# Outputs: NAME|HELP_REQUESTED|INVALID_OPTION|MOUNT_DIR|SSH_FLAG|DEBUG_FLAG|DOCKER_MODE|MISSING_VALUE|FRESH_FLAG
 # Field 7 is the --docker MODE string ('' | dind | dind-mount | socket), not a
 # yes/no flag: --docker → dind, --docker-dev → dind-mount, --docker-full → socket.
+# Field 9 is the restart-only --fresh flag ('yes' forces recreate + fresh session).
 extract_name_and_options() {
     local name=""
     local in_mount_value=0
@@ -352,6 +376,7 @@ extract_name_and_options() {
     local debug_flag=""
     local docker_mode=""
     local missing_value=0
+    local fresh_flag=""
 
     for arg in "$@"; do
         # If we're in a -m/--mount value, capture it
@@ -378,6 +403,10 @@ extract_name_and_options() {
                 ;;
             --docker-full)
                 docker_mode="socket"
+                ;;
+            --fresh|--no-continue)
+                # restart-only: recreate and start a fresh pi session
+                fresh_flag="yes"
                 ;;
             -h|--help)
                 help_requested=1
@@ -414,7 +443,7 @@ extract_name_and_options() {
         missing_value=1
     fi
 
-    echo "${name}|${help_requested}|${invalid_option}|${mount_dir:-}|${ssh_flag:-}|${debug_flag:-}|${docker_mode:-}|${missing_value}"
+    echo "${name}|${help_requested}|${invalid_option}|${mount_dir:-}|${ssh_flag:-}|${debug_flag:-}|${docker_mode:-}|${missing_value}|${fresh_flag:-}"
 }
 
 # Build docker run arguments shared between run and restart
@@ -433,7 +462,10 @@ build_docker_args() {
 
     # SSH agent socket
     if [ -n "$SSH_FLAG" ]; then
-        if [ -n "${SSH_AUTH_SOCK}" ] && [ -S "${SSH_AUTH_SOCK}" ]; then
+        # ':-' guards matter: under 'set -u' an unset SSH_AUTH_SOCK would
+        # abort build_docker_args mid-recreate and leave the agent without a
+        # container — warn about the missing socket instead.
+        if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
             echo "-v"
             echo "${SSH_AUTH_SOCK}:/tmp/ssh-agent.sock"
             printf '%s\n' "-e"
@@ -1237,6 +1269,89 @@ attach_session() {
 }
 
 ###################################################################################################
+# SESSION-PRESERVING RESTART (issue #15)
+###################################################################################################
+
+# Where pi keeps its conversation state inside the container (the image runs
+# as root). Recreating the container throws the whole filesystem away, so a
+# session-preserving restart copies this directory (plus the 'pia urls'
+# request log) out before 'docker rm' and back into the new container, then
+# starts 'pi --continue' — the conversation survives, the rest does not.
+PI_SESSIONS_DIR="/root/.pi/agent/sessions"
+PI_URLS_LOG="/var/log/pia-urls.log"
+
+# The container's CURRENT run options as 'MOUNT|SSH|DOCKER_MODE', derived from
+# what Docker actually has (mounts, env, daemon sibling) — the config-hash
+# label is a per-create nonce, not a config digest, so the live inspect data
+# is the honest comparison base for 'restart'.
+container_run_config() {
+    local name="$1"
+    local mount ssh="" mode="" dind ws
+
+    mount="$(docker container inspect -f '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}' "$name" 2>/dev/null)"
+
+    if docker container inspect -f '{{range .Mounts}}{{.Destination}}{{println}}{{end}}' "$name" 2>/dev/null | \
+       grep -qx '/tmp/ssh-agent.sock'; then
+        ssh="yes"
+    fi
+
+    if docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null | \
+       grep -q '^DOCKER_HOST=tcp://127\.0\.0\.1:2375$'; then
+        # 'dind' vs 'dind-mount' is invisible on the agent itself — the
+        # difference is what the daemon may see, recorded on its own label.
+        mode="dind"
+        dind="$(dind_siblings_for "$name" | head -1)"
+        if [ -n "$dind" ]; then
+            ws="$(docker container inspect -f '{{ index .Config.Labels "pia-dind-mounts" }}' "$dind" 2>/dev/null)"
+            if [ -n "$ws" ] && [ "$ws" != "<no value>" ]; then mode="dind-mount"; fi
+        fi
+    elif docker container inspect -f '{{range .Mounts}}{{.Destination}}{{println}}{{end}}' "$name" 2>/dev/null | \
+         grep -qx '/var/run/docker.sock'; then
+        mode="socket"
+    fi
+
+    echo "${mount:-}|${ssh}|${mode}"
+}
+
+# Copy the pi session state (and the urls request log) out of a container
+# into a fresh host temp dir. Prints the dir path, or nothing when the
+# container has no session directory (nothing to continue).
+save_session_state() {
+    local name="$1"
+    local tmp
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/pia-session-XXXXXX")" || return 0
+    if ! docker cp "${name}:${PI_SESSIONS_DIR}" "${tmp}/sessions" > /dev/null 2>&1; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    # Best effort — an image without the request logger simply has no log.
+    docker cp "${name}:${PI_URLS_LOG}" "${tmp}/pia-urls.log" > /dev/null 2>&1 || true
+    echo "$tmp"
+}
+
+# Copy a saved session (and request log) back into the freshly created,
+# already-started container, then discard the temp dir. Returns 0 only when
+# the session directory itself made it in — that is what gates 'pi --continue'.
+restore_session_state() {
+    local name="$1" tmp="$2"
+    [ -n "$tmp" ] && [ -d "$tmp" ] || return 1
+
+    local rc=0
+    if docker exec "$name" mkdir -p "$PI_SESSIONS_DIR" > /dev/null 2>&1; then
+        # '/.' copies the CONTENTS into the existing directory (a plain
+        # 'docker cp dir dir' would nest it as dir/dir).
+        docker cp "${tmp}/sessions/." "${name}:${PI_SESSIONS_DIR}/" > /dev/null 2>&1 || rc=1
+    else
+        rc=1
+    fi
+    if [ -f "${tmp}/pia-urls.log" ]; then
+        docker cp "${tmp}/pia-urls.log" "${name}:${PI_URLS_LOG}" > /dev/null 2>&1 || true
+    fi
+    rm -rf "$tmp"
+    return $rc
+}
+
+###################################################################################################
 # COMMANDS
 ###################################################################################################
 
@@ -1311,6 +1426,12 @@ cmd_create() {
     # extract_name_and_options already reported which option.
     if [ "$(echo "$result" | cut -d'|' -f8)" -eq 1 ]; then
         log_error "Run '$(basename "$0") create --help' for usage."
+        exit 1
+    fi
+
+    # '--fresh' is a restart-only escape hatch; create always starts clean.
+    if [ "$(echo "$result" | cut -d'|' -f9)" = "yes" ]; then
+        log_error "Option '--fresh' applies to 'restart' only."
         exit 1
     fi
 
@@ -1400,6 +1521,12 @@ cmd_run() {
     # extract_name_and_options already reported which option.
     if [ "$(echo "$result" | cut -d'|' -f8)" -eq 1 ]; then
         log_error "Run '$(basename "$0") run --help' for usage."
+        exit 1
+    fi
+
+    # '--fresh' is a restart-only escape hatch; run always creates fresh.
+    if [ "$(echo "$result" | cut -d'|' -f9)" = "yes" ]; then
+        log_error "Option '--fresh' applies to 'restart' only."
         exit 1
     fi
 
@@ -1671,6 +1798,8 @@ cmd_restart() {
     SSH_FLAG="$(echo "$result" | cut -d'|' -f5)"
     DEBUG_FLAG="${DEBUG_FLAG:-$(echo "$result" | cut -d'|' -f6)}"
     DOCKER_MODE="$(echo "$result" | cut -d'|' -f7)"
+    local fresh_flag
+    fresh_flag="$(echo "$result" | cut -d'|' -f9)"
 
     # Handle help flag
     if [ "$help_req" -eq 1 ]; then
@@ -1716,10 +1845,81 @@ cmd_restart() {
         exit 1
     fi
 
+    # Decide what 'restart' means for this call (issue #15): options the
+    # caller did NOT pass keep the container's current values, so plain
+    # 'pia restart NAME' never recreates. Only options that actually
+    # CONTRADICT the container config force a recreate — mounts, the SSH
+    # socket and the network namespace are fixed at creation (Docker cannot
+    # patch them on an existing container).
+    local cur_mount cur_ssh cur_mode
+    IFS='|' read -r cur_mount cur_ssh cur_mode < <(container_run_config "$name")
+
+    local flags_changed="" changed_list=""
+    if [ -n "$MOUNT_DIR" ]; then
+        local req_mount
+        req_mount="$(cd "$MOUNT_DIR" && pwd)"
+        if [ "$req_mount" != "$cur_mount" ]; then
+            flags_changed="yes"; changed_list="mount"
+        fi
+    fi
+    if [ -n "$SSH_FLAG" ] && [ -z "$cur_ssh" ]; then
+        flags_changed="yes"; changed_list="${changed_list:+$changed_list, }ssh"
+    fi
+    if [ -n "$DOCKER_MODE" ] && [ "$DOCKER_MODE" != "$cur_mode" ]; then
+        flags_changed="yes"; changed_list="${changed_list:+$changed_list, }--docker mode"
+    fi
+
+    if [ "$fresh_flag" != "yes" ] && [ -z "$flags_changed" ]; then
+        # ---- Resume path: run flags unchanged — same container, same pi
+        # conversation. Identical to 'pia run NAME' / 'pia resume', plus the
+        # bounce when the container is currently running.
+        if container_is_running "$name"; then
+            log_info "Run flags unchanged — bouncing container '${name}' and continuing its last pi session..."
+            log_cmd "docker stop ${name}"
+            docker stop "$name" > /dev/null 2>&1 || true
+            stop_dind_siblings "$name"
+        else
+            log_info "Run flags unchanged — resuming container '${name}' in place (no recreate)..."
+        fi
+        ensure_dind_siblings_started "$name"
+        local exit_code=0
+        attach_session "$name" || exit_code=$?
+        stop_dind_siblings "$name"
+        if [ $exit_code -eq 0 ]; then
+            log_info "Container '${name}' restarted successfully."
+        else
+            log_error "Container '${name}' exited with code ${exit_code}."
+        fi
+        exit $exit_code
+    fi
+
+    # ---- Recreate path ----
+    if [ "$fresh_flag" = "yes" ]; then
+        log_info "Re-creating container '${name}' with a FRESH pi session (--fresh)..."
+    else
+        log_info "Run flags changed (${changed_list}) — container '${name}' must be re-created..."
+        log_info "Preserved across the recreate: the pi conversation ('pi --continue') and the 'pia urls' request log."
+        log_warn "Reset by the recreate: the container filesystem (packages, edits outside the mount)"
+        log_warn "and any throwaway Docker daemon — images built inside it are lost."
+    fi
+
     # Stop the existing container
     log_info "Stopping container '${name}'..."
     log_cmd "docker stop ${name}"
     docker stop "$name" > /dev/null 2>&1 || true
+
+    # Carry the pi session across the recreate — must happen before 'docker
+    # rm' takes the container layer with it. Empty when the container has no
+    # session state (or --fresh): the new container then starts a clean pi.
+    local session_tmp=""
+    if [ "$fresh_flag" != "yes" ]; then
+        session_tmp="$(save_session_state "$name")"
+        if [ -n "$session_tmp" ]; then
+            log_info "Pi session state saved — the new container will continue it."
+        else
+            log_info "No pi session to preserve in '${name}' — the new container starts clean."
+        fi
+    fi
 
     # Remove the container
     log_info "Removing container '${name}'..."
@@ -1730,8 +1930,24 @@ cmd_restart() {
     # empty daemon, never a reused one with the previous session's images.
     remove_dind_siblings "$name"
 
+    # Options the caller did not pass carry over from the old container, so
+    # 'restart NAME --ssh' on a mounted agent recreates WITH the mount
+    # instead of silently dropping it. (--fresh keeps the historical
+    # 'unspecified = absent' semantics.)
+    if [ "$fresh_flag" != "yes" ]; then
+        if [ -z "$MOUNT_DIR" ] && [ -n "$cur_mount" ]; then MOUNT_DIR="$cur_mount"; fi
+        if [ -z "$SSH_FLAG" ]; then SSH_FLAG="$cur_ssh"; fi
+        if [ -z "$DOCKER_MODE" ] && [ -n "$cur_mode" ]; then
+            DOCKER_MODE="$cur_mode"
+            validate_docker_request || exit 1
+        fi
+    fi
+
     # --docker modes (same order as 'run': daemon first, agent second)
-    prepare_dind_daemon "$name" || exit 1
+    prepare_dind_daemon "$name" || {
+        if [ -n "$session_tmp" ]; then rm -rf "$session_tmp"; fi
+        exit 1
+    }
 
     # Start a fresh container with the same name
     log_info "Starting fresh agent container '${name}' from image '${IMAGE_NAME}'..."
@@ -1743,6 +1959,7 @@ cmd_restart() {
     local docker_cmd="docker run -d ${docker_args[*]}"
     log_cmd "$docker_cmd"
     if ! docker run -d "${docker_args[@]}" > /dev/null; then
+        if [ -n "$session_tmp" ]; then rm -rf "$session_tmp"; fi
         if dind_mode_active; then remove_dind_siblings "$name"; fi
         log_error "Failed to create container '${name}'."
         log_error "Make sure the image '${IMAGE_NAME}' exists. Run './scripts/build-docker.sh' first."
@@ -1750,8 +1967,15 @@ cmd_restart() {
     fi
 
     # Attach an interactive pi session; the container stops with the session.
+    # With the saved state restored the session CONTINUES ('pi --continue'
+    # via attach_session); otherwise this is the historical fresh start.
     local exit_code=0
-    start_session "$name" || exit_code=$?
+    if [ -n "$session_tmp" ] && restore_session_state "$name" "$session_tmp"; then
+        log_info "Pi session restored — continuing it with 'pi --continue'."
+        attach_session "$name" || exit_code=$?
+    else
+        start_session "$name" || exit_code=$?
+    fi
 
     # Session ended — daemon stops with the agent (see cmd_run).
     stop_dind_siblings "$name"

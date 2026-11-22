@@ -884,11 +884,12 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Restart the container — docker stop may hang, so we use a longer timeout
-# and verify the script went through the full restart flow
+# Restart the container (--fresh forces the historical recreate flow; a bare
+# restart with unchanged flags would take the resume branch) — docker stop
+# may hang, so we use a longer timeout and verify the full restart flow
 RESTART_OUTPUT=$()
 RESTART_EXIT=0
-RESTART_OUTPUT=$(timeout 15 bash "$AGENTS" restart "$RESTART_TEST" < /dev/null 2>&1) || RESTART_EXIT=$?
+RESTART_OUTPUT=$(timeout 15 bash "$AGENTS" restart "$RESTART_TEST" --fresh < /dev/null 2>&1) || RESTART_EXIT=$?
 
 # Verify the script went through the restart flow
 if echo "$RESTART_OUTPUT" | grep -q "Stopping container" && \
@@ -927,7 +928,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Restart should work on a stopped container too
+# Restart should work on a stopped container too (--fresh recreate flow)
 # Stop the current container
 docker stop "$RESTART_TEST" > /dev/null 2>&1 || docker kill "$RESTART_TEST" > /dev/null 2>&1 || true
 docker rm -f "$RESTART_TEST" > /dev/null 2>&1 || true
@@ -944,7 +945,7 @@ docker stop "$RESTART_TEST2" > /dev/null 2>&1 || docker kill "$RESTART_TEST2" > 
 # Restart should stop (already stopped), remove, and create fresh
 RESTART2_OUTPUT=$()
 RESTART2_EXIT=0
-RESTART2_OUTPUT=$(timeout 15 bash "$AGENTS" restart "$RESTART_TEST2" < /dev/null 2>&1) || RESTART2_EXIT=$?
+RESTART2_OUTPUT=$(timeout 15 bash "$AGENTS" restart "$RESTART_TEST2" --fresh < /dev/null 2>&1) || RESTART2_EXIT=$?
 
 # Verify the script went through the restart flow
 if echo "$RESTART2_OUTPUT" | grep -q "Removing container" && \
@@ -980,9 +981,182 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# --- Issue #15: session-preserving restart branches -------------------------
+
+# (a) restart with NO options on a container whose (empty) run config already
+#     matches → resume in place: same container, no stop/rm/run flow.
+R15_KEEP="pia-test-restart-keep-$$"
+register_test_container "$R15_KEEP"
+docker rm -f "$R15_KEEP" > /dev/null 2>&1 || true
+docker run -d --name "$R15_KEEP" alpine:latest sleep 3600 > /dev/null 2>&1
+R15_KEEP_ID=$(docker inspect --format '{{.Id}}' "$R15_KEEP" 2>/dev/null)
+
+R15_KEEP_OUT=$(timeout 15 bash "$AGENTS" restart "$R15_KEEP" < /dev/null 2>&1) || true
+
+if echo "$R15_KEEP_OUT" | grep -q "Run flags unchanged"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: restart with no flags takes the resume branch"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: restart with no flags should resume (got '$R15_KEEP_OUT')"
+    FAIL=$((FAIL + 1))
+fi
+
+if ! echo "$R15_KEEP_OUT" | grep -q "Removing container"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: restart with no flags does not re-create the container"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: restart with no flags must not remove/re-create (got '$R15_KEEP_OUT')"
+    FAIL=$((FAIL + 1))
+fi
+
+R15_KEEP_ID_AFTER=$(docker inspect --format '{{.Id}}' "$R15_KEEP" 2>/dev/null)
+if [ -n "$R15_KEEP_ID" ] && [ "$R15_KEEP_ID" = "$R15_KEEP_ID_AFTER" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: resume branch keeps the same container (session state intact)"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: resume branch must keep the container (before=$R15_KEEP_ID after=$R15_KEEP_ID_AFTER)"
+    FAIL=$((FAIL + 1))
+fi
+
+# (b) changed flags (-m on a container without a mount) → recreate, but the
+#     pi session state is saved out and restored, and pi is continued.
+R15_CARRY="pia-test-restart-carry-$$"
+register_test_container "$R15_CARRY"
+docker rm -f "$R15_CARRY" > /dev/null 2>&1 || true
+docker run -d --name "$R15_CARRY" alpine:latest sleep 3600 > /dev/null 2>&1
+docker exec "$R15_CARRY" sh -c 'mkdir -p /root/.pi/agent/sessions && echo "{\"id\":\"pia-test-session\"}" > /root/.pi/agent/sessions/s1.jsonl' > /dev/null 2>&1 || true
+R15_CARRY_ID=$(docker inspect --format '{{.Id}}' "$R15_CARRY" 2>/dev/null)
+
+R15_CARRY_OUT=$(timeout 20 bash "$AGENTS" restart "$R15_CARRY" -m /tmp < /dev/null 2>&1) || true
+
+if echo "$R15_CARRY_OUT" | grep -q "Run flags changed"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: restart with changed flags reports the recreate"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: changed flags should trigger recreate (got '$R15_CARRY_OUT')"
+    FAIL=$((FAIL + 1))
+fi
+
+if echo "$R15_CARRY_OUT" | grep -q "Pi session state saved" && \
+   echo "$R15_CARRY_OUT" | grep -q "Pi session restored"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: changed-flag restart saves and restores the pi session"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: session should be saved+restored (got '$R15_CARRY_OUT')"
+    FAIL=$((FAIL + 1))
+fi
+
+R15_CARRY_ID_AFTER=$(docker inspect --format '{{.Id}}' "$R15_CARRY" 2>/dev/null)
+if [ -n "$R15_CARRY_ID" ] && [ "$R15_CARRY_ID" != "$R15_CARRY_ID_AFTER" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: changed flags re-created the container (new ID)"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: container should have a new ID (before=$R15_CARRY_ID after=$R15_CARRY_ID_AFTER)"
+    FAIL=$((FAIL + 1))
+fi
+
+if docker cp "$R15_CARRY:/root/.pi/agent/sessions/s1.jsonl" - 2>/dev/null | grep -q "pia-test-session"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: pi session file survived the recreate"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: pi session file should survive the recreate"
+    FAIL=$((FAIL + 1))
+fi
+
+# (c) --fresh forces the historical recreate + fresh session even when the
+#     requested flags match the container exactly.
+R15_FRESH="pia-test-restart-fresh-$$"
+register_test_container "$R15_FRESH"
+docker rm -f "$R15_FRESH" > /dev/null 2>&1 || true
+docker run -d --name "$R15_FRESH" alpine:latest sleep 3600 > /dev/null 2>&1
+docker exec "$R15_FRESH" sh -c 'mkdir -p /root/.pi/agent/sessions && echo x > /root/.pi/agent/sessions/s1.jsonl' > /dev/null 2>&1 || true
+R15_FRESH_ID=$(docker inspect --format '{{.Id}}' "$R15_FRESH" 2>/dev/null)
+
+R15_FRESH_OUT=$(timeout 15 bash "$AGENTS" restart "$R15_FRESH" --fresh < /dev/null 2>&1) || true
+
+if echo "$R15_FRESH_OUT" | grep -q "FRESH pi session (--fresh)" && \
+   echo "$R15_FRESH_OUT" | grep -q "Removing container"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: --fresh recreates with a clean pi session"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: --fresh should force recreate + fresh session (got '$R15_FRESH_OUT')"
+    FAIL=$((FAIL + 1))
+fi
+
+R15_FRESH_ID_AFTER=$(docker inspect --format '{{.Id}}' "$R15_FRESH" 2>/dev/null)
+if [ -n "$R15_FRESH_ID" ] && [ "$R15_FRESH_ID" != "$R15_FRESH_ID_AFTER" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: --fresh produced a new container"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: --fresh must re-create the container"
+    FAIL=$((FAIL + 1))
+fi
+
+# (d) --fresh is restart-only; run/create reject it
+R15_RUN_FRESH=$(timeout 10 bash "$AGENTS" run some-container --fresh < /dev/null 2>&1) || true
+if echo "$R15_RUN_FRESH" | grep -q "applies to 'restart' only"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: run rejects the restart-only --fresh flag"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: run should reject --fresh (got '$R15_RUN_FRESH')"
+    FAIL=$((FAIL + 1))
+fi
+
+# (e) carry-over: a flag change unrelated to the mount must NOT drop the
+#     existing /workspace mount — unspecified options inherit the container's
+#     current config. Also guards the 'set -u' crash when SSH_AUTH_SOCK is
+#     unset (build_docker_args used to abort mid-recreate and lose the agent).
+R15_INH="pia-test-restart-inherit-$$"
+register_test_container "$R15_INH"
+docker rm -f "$R15_INH" > /dev/null 2>&1 || true
+docker run -d --name "$R15_INH" -v /tmp:/workspace alpine:latest sleep 3600 > /dev/null 2>&1
+
+R15_INH_OUT=$(timeout 20 bash "$AGENTS" restart "$R15_INH" --ssh < /dev/null 2>&1) || true
+
+R15_INH_MOUNT=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}' "$R15_INH" 2>/dev/null)
+if echo "$R15_INH_OUT" | grep -q "Run flags changed (ssh)" && [ "$R15_INH_MOUNT" = "/tmp" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: unspecified mount is inherited across a flag-change recreate"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: mount should be carried over (mount='$R15_INH_MOUNT', out='$R15_INH_OUT')"
+    FAIL=$((FAIL + 1))
+fi
+
+if ! echo "$R15_INH_OUT" | grep -q "unbound variable"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: --ssh without SSH_AUTH_SOCK warns instead of crashing"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: unset SSH_AUTH_SOCK must not abort the recreate"
+    FAIL=$((FAIL + 1))
+fi
+
 # --- Cleanup ---
 
-docker rm -f "$RESTART_TEST" "$RESTART_TEST2" > /dev/null 2>&1 || true
+docker rm -f "$RESTART_TEST" "$RESTART_TEST2" "$R15_KEEP" "$R15_CARRY" "$R15_FRESH" "$R15_INH" > /dev/null 2>&1 || true
 fi
 
 # =============================================================================
