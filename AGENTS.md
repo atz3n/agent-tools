@@ -375,7 +375,7 @@ The `pia` CLI lets you run multiple Pi agent containers in parallel, each with i
 | `pia rename [NAME] [NEW]` | Rename a container (running or stopped) |
 | `pia resume` / `pia rs` | Start the latest stopped container and continue its last pi session |
 | `pia ask [NAME] <prompt>` | One-shot non-interactive pi prompt (`pi --print`); omit NAME for an ephemeral container |
-| `pia restart [NAME] -m /path` | Stop/remove then run fresh |
+| `pia restart [NAME] [OPTIONS]` | Restart a named container, continuing its last pi session — unchanged/omitted flags resume in place; changed flags re-create but carry the pi conversation over (`pi --continue`); `--fresh` forces recreate + clean session |
 | `pia exec [NAME] [CMD]` | Execute a command in a running container |
 | `pia sh [NAME]` / `pia shell [NAME]` | Open an interactive bash shell in a running container (omit NAME if only one runs) |
 | `pia monitor [NAME]` | Live view of the container's request destinations (TLS SNI / cleartext HTTP URLs) plus CPU, memory and net I/O — drawn as charts on a terminal (sparklines, a memory gauge, a ranked destination pane), one line per sample when piped. Terminal only, the monitor itself logs nothing (`--raw` streams destinations only, `--no-chart` forces the line view, `--chart` forces the dashboard) |
