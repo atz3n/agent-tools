@@ -433,7 +433,10 @@ build_docker_args() {
 
     # SSH agent socket
     if [ -n "$SSH_FLAG" ]; then
-        if [ -n "${SSH_AUTH_SOCK}" ] && [ -S "${SSH_AUTH_SOCK}" ]; then
+        # ':-' guards matter: under 'set -u' an unset SSH_AUTH_SOCK would
+        # abort build_docker_args mid-recreate and leave the agent without a
+        # container — warn about the missing socket instead.
+        if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK:-}" ]; then
             echo "-v"
             echo "${SSH_AUTH_SOCK}:/tmp/ssh-agent.sock"
             printf '%s\n' "-e"
