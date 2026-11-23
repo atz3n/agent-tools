@@ -9,15 +9,19 @@ A lightweight REST API server for managing tasks stored as markdown files with Y
 | GET | `/tasks` | List all tasks (optional `?project=`, `?status=` filters) |
 | GET | `/tasks/{id}` | Get a single task by ID |
 | POST | `/tasks` | Create a new task |
-| PATCH | `/tasks/{id}` | Update a task (partial update) |
-| DELETE | `/tasks/{id}` | Delete a task |
+| PATCH | `/tasks/{id}` | Update a task (partial update; a `project` change moves the task file, the source project directory stays) |
+| DELETE | `/tasks/{id}` | Delete a task (the project directory is never removed — an emptied project stays listed) |
 | GET | `/projects` | List all projects |
 | POST | `/projects` | Create a new project |
 | GET | `/ui` | Serve the web UI |
 
 All other endpoints return **404 Not Found**. (The UI's assets are served from `/css/` and `/js/`.)
 
-> **Note:** Only the HTTP methods listed in the table above are supported. Other methods return 405 Method Not Allowed.
+> **Note:** Only the HTTP methods listed in the table above are supported; other methods return 405 Method Not Allowed. **HEAD** is additionally supported on every GET path (`/tasks`, `/tasks/{id}`, `/projects`, `/ui`, `/css/*`, `/js/*`) and mirrors the status GET would return, without a body. OPTIONS and TRACE are not implemented — they return 501 from the HTTP layer itself (no `[proxy]` log line).
+
+> **Project names** must be a single safe path segment — starting with a letter or digit, then letters, digits, spaces, `-`, `_`, `.`. Values containing `/`, `..`, or a leading dot are rejected with **400** everywhere they appear (`POST /projects`, `POST /tasks`, `PATCH /tasks/{id}`, and the `?project=` filter).
+
+> **Field types** are validated on `POST /tasks` and `PATCH /tasks/{id}`: the body must be a JSON **object** (a non-object body or a malformed `Content-Length` returns **400**), `title` must be a non-empty string, `priority` one of `low`/`medium`/`high` (400 otherwise), `description` a string, `due_date` a `YYYY-MM-DD` string or null, `tags` a list of strings — anything else returns **400**.
 
 ## Web UI
 
@@ -43,20 +47,23 @@ Client → :8088 (tasks-server) → /data/tasks/ (markdown files)
 
 ## Status
 
-Tasks have four status values with this lifecycle:
+Tasks have five status values with this lifecycle:
 
 ```
 open → in-progress → done | closed
+  ↖      ↕
+   on-hold
 ```
 
 | Status | Description |
 |--------|-------------|
 | `open` | Task is ready to be worked on. |
 | `in-progress` | Work has started on the task. |
+| `on-hold` | Work is paused (blocked, waiting on someone); return it to `in-progress` to continue. |
 | `done` | Work is complete. |
 | `closed` | Task is closed (e.g. rejected, no longer needed). |
 
-`done` and `closed` are sibling terminal states — both are reached from `in-progress`.
+`done` and `closed` are sibling terminal states — both are reached from `in-progress`. The server validates `status` on create and update and rejects unknown values with **400**. This vocabulary is the single source of truth shared by `storage.VALID_STATUSES`, `spec/openapi.yml`, and the web UI. The same write-time gate polices `priority` against `storage.VALID_PRIORITIES` (`low`, `medium`, `high`).
 
 ## Task File Format
 
@@ -104,7 +111,7 @@ The web UI is available at `http://localhost:8088/ui`.
 
 ## Task storage
 
-Tasks are stored under `/data/tasks/` (configurable via `TASKS_DIR` env var).
+Tasks are stored under `/data/tasks/` (configurable via `TASKS_DIR` env var). The server binds `0.0.0.0` inside Docker (the compose mapping publishes `127.0.0.1` only); set `BIND_HOST=127.0.0.1` when running directly on a host.
 File names follow the ``{id:03d}_{title}.md`` pattern (e.g. ``001_fix-login.md``)
 for easy manual discovery.  The directory structure is:
 
@@ -132,17 +139,21 @@ python3 -m unittest tests.test_server -v
 ```
 
 Tests cover:
-- **Endpoint whitelist** — `/tasks`, `/tasks/{id}`, `/projects` allowed, all others rejected
+- **Endpoint whitelist** — `/tasks`, `/tasks/{id}`, `/projects`, `/ui`, `/css/*`, `/js/*` allowed, all others rejected
 - **Blocked endpoints** — root, health checks, arbitrary paths, non-numeric task IDs
-- **Frontmatter parsing** — scalars, arrays, nulls, roundtrip
-- **Task CRUD** — create, read, update, delete, auto-increment IDs
-- **Project management** — listing, auto-creation
-- **Query filtering** — `?project=`, `?status=`, combined filters
+- **Frontmatter parsing** — scalars, arrays, nulls, roundtrip; writer-escaped newlines/quotes and hand-written legacy forms
+- **Task CRUD** — create, read, update (incl. project moves), delete, auto-increment IDs
+- **Project management** — listing, creation, name validation (traversal refusal at every entry point)
+- **Query filtering** — `?project=`, `?status=`, combined filters, 400 on an unsafe project filter
 - **Counter persistence** — survives across get/create calls
+- **Request validation** — non-object JSON bodies, wrong field types, `due_date` format, clamped long titles, non-numeric and negative `Content-Length`
+- **Odd task files** — missing frontmatter keys backfilled, unreadable files (non-UTF-8, directories, dangling symlinks) skipped without dropping the request
+- **Static serving** — path-traversal containment, directory 404s, query strings stripped, HEAD mirrors GET
+- **UI escaping** — attribute contexts use the quote-escaping encoder, inline-JS args are JSON-encoded, markdown links carry a scheme allowlist
 - **HTTP handler** — all endpoints, error responses (400, 404, 405)
 - **Logging** — format, timestamp, client IP
 - **Graceful shutdown** — signal handlers
-- **Handler methods** — GET, POST, PATCH, DELETE, PUT exist
+- **Handler methods** — GET, HEAD, POST, PATCH, DELETE, PUT exist
 
 ### Manual test
 
@@ -205,10 +216,10 @@ Full agent skill for managing tasks:
 
 ### Using the skills in harnesses
 
-To make the skills available to an agent, copy the skill directory into the agent's skills path, `~/.pi/agent/skills/`, preserving the feature subfolder:
+To make the skills available to an agent, copy the skill directory into the agent's skills path, `~/.pi/agent/skills/`, preserving the feature subfolder. Run these **from the repository root** (`cd "$(git rev-parse --show-toplevel)"` — not from `servers/tasks-server/`, where this README lives):
 
 ```bash
-# copy the tasks-server skill
+# copy the tasks-server skill (from the repo root)
 mkdir -p ~/.pi/agent/skills/tasks-server
 cp -r skills/tasks-server/tasks-server ~/.pi/agent/skills/tasks-server/
 ```
@@ -219,8 +230,8 @@ The skill will then be automatically discovered by the agent on every conversati
 ls ~/.pi/agent/skills/tasks-server/tasks-server/SKILL.md
 ```
 
-If you keep this repo's skills elsewhere, symlink the feature folder instead:
+If you keep this repo's skills elsewhere, symlink the feature folder instead (works from any directory — `git rev-parse` resolves the repo root):
 
 ```bash
-ln -s "$(pwd)/skills/tasks-server" ~/.pi/agent/skills/tasks-server
+ln -s "$(git rev-parse --show-toplevel)/skills/tasks-server" ~/.pi/agent/skills/tasks-server
 ```

@@ -42,7 +42,7 @@ done
 # DEFINES
 ###################################################################################################
 
-HERE="$(pwd)/$(dirname $0)"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 ###################################################################################################
 # MAIN
@@ -52,27 +52,27 @@ cd "${HERE}/.."
 
 echo "[INFO] Measuring coverage for ${PROJECT_NAME}..."
 
-if ! python -c "import coverage" 2>/dev/null; then
+if ! python3 -c "import coverage" 2>/dev/null; then
   echo "[ERROR] coverage is not installed. Run: pip install coverage"
   exit 1
 fi
 
 rm -rf .coverage htmlcov
 
-if ! python -m coverage run --source="${PACKAGE}" -m unittest discover -s tests; then
+if ! python3 -m coverage run --source="${PACKAGE}" -m unittest discover -s tests; then
   echo "[ERROR] Tests failed."
   exit 1
 fi
 
 echo "[INFO] Coverage report:"
-if ! python -m coverage report -m; then
+if ! python3 -m coverage report -m; then
   echo "[ERROR] Coverage below threshold."
   exit 1
 fi
 
 if $HTML_REPORT; then
   echo "[INFO] Writing HTML report to htmlcov/..."
-  python -m coverage html
+  python3 -m coverage html
 fi
 
 echo "[INFO] Coverage check passed."

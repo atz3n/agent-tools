@@ -10,12 +10,12 @@ A lightweight HTTP proxy that exposes a subset of endpoints from the GitHub REST
 | POST | `/repos/{owner}/{repo}/pulls` | Create PR |
 | GET | `/repos/{owner}/{repo}/pulls/{number}` | Get PR |
 | PATCH | `/repos/{owner}/{repo}/pulls/{number}` | Update PR |
-| DELETE | `/repos/{owner}/{repo}/pulls/{number}` | Delete PR |
+| DELETE | `/repos/{owner}/{repo}/pulls/{number}` | ⚠️ No such GitHub endpoint — close a PR via `PATCH state: closed` |
 | GET | `/repos/{owner}/{repo}/pulls/{number}/comments` | List review comments |
 | POST | `/repos/{owner}/{repo}/pulls/{number}/comments` | Create review comment |
-| GET | `/repos/{owner}/{repo}/pulls/{number}/comments/{id}` | Get review comment |
-| PATCH | `/repos/{owner}/{repo}/pulls/{number}/comments/{id}` | Update review comment |
-| GET | `/repos/{owner}/{repo}/pulls/{number}/comments/{id}/replies` | Get replies to a review comment |
+| GET | `/repos/{owner}/{repo}/pulls/comments/{id}` | Get review comment |
+| PATCH | `/repos/{owner}/{repo}/pulls/comments/{id}` | Update review comment |
+| POST | `/repos/{owner}/{repo}/pulls/{number}/comments/{id}/replies` | Reply to a review comment (POST only — there is no GET `/replies`) |
 | GET | `/repos/{owner}/{repo}/pulls/comments` | List repository-wide review comments |
 | GET | `/repos/{owner}/{repo}/pulls/comments/{id}/reactions` | List reactions for a review comment |
 | POST | `/repos/{owner}/{repo}/pulls/comments/{id}/reactions` | Create a review comment reaction |
@@ -36,8 +36,6 @@ A lightweight HTTP proxy that exposes a subset of endpoints from the GitHub REST
 | GET | `/repos/{owner}/{repo}/pulls/{number}/requested-reviewers` | List requested reviewers |
 | POST | `/repos/{owner}/{repo}/pulls/{number}/requested-reviewers` | Request reviewers |
 | DELETE | `/repos/{owner}/{repo}/pulls/{number}/requested-reviewers` | Remove requested reviewers |
-
-> Requested-reviewer paths are also accepted in GitHub's canonical underscore form (`requested_reviewers`); the proxy normalizes the hyphenated alias to it before forwarding.
 | GET | `/repos/{owner}/{repo}/issues` | List issues |
 | POST | `/repos/{owner}/{repo}/issues` | Create issue |
 | GET | `/repos/{owner}/{repo}/issues/{number}` | Get issue |
@@ -59,11 +57,13 @@ A lightweight HTTP proxy that exposes a subset of endpoints from the GitHub REST
 | GET | `/repos/{owner}/{repo}/labels` | List repository labels |
 | GET | `/user` | Get authenticated user |
 
-All other endpoints return **403 Forbidden**.
+All other endpoints return **404 Not Found**. If the proxy cannot reach GitHub (network down, timeout), it answers **502** with `{"error": "upstream request failed"}`.
 
-> **Note:** The method column documents the expected HTTP method for each GitHub API endpoint. The proxy accepts all HTTP methods and forwards them — it does not enforce method restrictions.
+> Requested-reviewer paths are also accepted in GitHub's canonical underscore form (`requested_reviewers`); the proxy normalizes the hyphenated alias to it before forwarding.
 
-> **Note:** GitHub has no `DELETE` endpoint for issues — "deleting" an issue means closing it via `PATCH` with `{"state": "closed"}`.
+> **Note:** The method column documents the expected HTTP method for each GitHub API endpoint. The proxy forwards every method it implements — GET, HEAD, POST, PATCH, PUT, DELETE — without enforcing method restrictions. OPTIONS and TRACE are not implemented and return 501 from the HTTP layer itself.
+
+> **Note:** GitHub has no `DELETE` endpoint for issues — "deleting" an issue means closing it via `PATCH` with `{"state": "closed"}`. The same holds for pull requests: close via `PATCH state: closed`.
 
 ## Architecture
 
@@ -98,6 +98,8 @@ The proxy is reachable at `http://localhost:8086`.
 
 The token is read from `./secrets/github-personal-access-token.txt` by the Docker scripts and exported as `GITHUB_PERSONAL_ACCESS_TOKEN` to the proxy container.
 
+The proxy binds `0.0.0.0` inside Docker (the compose mapping publishes `127.0.0.1` only). When running the server directly on a host, set `BIND_HOST=127.0.0.1` to keep it localhost-only.
+
 To rotate the token:
 
 1. Update `./secrets/github-personal-access-token.txt`
@@ -121,6 +123,9 @@ Tests cover:
 - **Query parameter stripping** — paths with `?state=open` etc. match correctly
 - **Configuration** — TARGET, PORT, TOKEN from env
 - **Logging** — format, timestamp, client IP
+- **HTTP methods** — GET, HEAD, POST, PATCH, PUT, DELETE are forwarded; every `do_*` delegates to the proxy
+- **Request validation** — non-numeric and negative `Content-Length` return 400 with one log line
+- **Upstream failure** — unreachable or failing backend returns 502 with a flat `{"error"}` body and a single log line
 
 ### Manual test
 
@@ -131,7 +136,7 @@ curl http://localhost:8086/repos/octocat/Hello-World/pulls
 # List issues (should work)
 curl http://localhost:8086/repos/octocat/Hello-World/issues
 
-# Non-PR/issue endpoint (should return 403)
+# Non-PR/issue endpoint (should return 404)
 curl http://localhost:8086/repos/octocat/Hello-World/branches
 ```
 
@@ -141,7 +146,7 @@ Three skill files are included so an agent can use the proxy directly. All teach
 
 ### Docker networking (auto-detection)
 
-When the agent runs inside a Docker container, `localhost` points to the container itself, not the host. Both skill files include an auto-detection snippet that checks for `.dockerenv` and cgroup markers, then sets `PROXY` to `http://host.docker.internal:8086` when appropriate.
+When the agent runs inside a Docker container, `localhost` points to the container itself, not the host. All three skill files include an auto-detection snippet that checks for `.dockerenv` and cgroup markers, then sets `PROXY` to `http://host.docker.internal:8086` when appropriate.
 
 If you use a custom setup (e.g., WSL2, VM-based containers), you may need to adjust the detection logic or set `PROXY` manually.
 
@@ -150,7 +155,7 @@ If you use a custom setup (e.g., WSL2, VM-based containers), you may need to adj
 For PR lifecycle operations:
 
 - **Getting the current user** — `GET /user` to resolve `{owner}`
-- **PR operations** — list, create, get, update, delete, merge
+- **PR operations** — list, create, get, update, close (via `PATCH state: closed`), merge
 - **Metadata** — list files, commits, update branch
 - **PR discussion comments** — list via the issues API (`/issues/{n}/comments`)
 
@@ -175,10 +180,10 @@ For issue lifecycle operations:
 
 ### Using the skills in harnesses
 
-To make the skills available to an agent, copy the skill directories into the agent's skills path, `~/.pi/agent/skills/`, preserving the feature subfolder:
+To make the skills available to an agent, copy the skill directories into the agent's skills path, `~/.pi/agent/skills/`, preserving the feature subfolder. Run these **from the repository root** (`cd "$(git rev-parse --show-toplevel)"` — not from `servers/github-proxy/`, where this README lives):
 
 ```bash
-# copy all three skills
+# copy all three skills (from the repo root)
 mkdir -p ~/.pi/agent/skills/github-proxy
 cp -r skills/github-proxy/github-create-pull-request ~/.pi/agent/skills/github-proxy/
 cp -r skills/github-proxy/github-review-pull-request ~/.pi/agent/skills/github-proxy/
@@ -193,8 +198,8 @@ ls ~/.pi/agent/skills/github-proxy/github-review-pull-request/SKILL.md
 ls ~/.pi/agent/skills/github-proxy/github-manage-issues/SKILL.md
 ```
 
-If you keep this repo's skills elsewhere, symlink the feature folder instead:
+If you keep this repo's skills elsewhere, symlink the feature folder instead (works from any directory — `git rev-parse` resolves the repo root):
 
 ```bash
-ln -s "$(pwd)/skills/github-proxy" ~/.pi/agent/skills/github-proxy
+ln -s "$(git rev-parse --show-toplevel)/skills/github-proxy" ~/.pi/agent/skills/github-proxy
 ```

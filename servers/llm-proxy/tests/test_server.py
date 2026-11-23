@@ -29,48 +29,55 @@ class _LogCapture(logging.Handler):
         self.records.append(record)
 
 
+def _resolve(path: str) -> tuple[str, whitelist.Route, str]:
+    """resolve_route() for paths that must resolve — asserts non-None so tests unpack typed values."""
+    resolved = whitelist.resolve_route(path)
+    assert resolved is not None, f"path {path!r} did not resolve"
+    return resolved
+
+
 class TestRouteResolution(unittest.TestCase):
     """Test prefix-based route resolution and prefix stripping."""
 
     def test_openrouter_prefix_resolves(self) -> None:
-        name, route, path = whitelist.resolve_route("/openrouter/api/v1/chat/completions")
+        name, route, path = _resolve("/openrouter/api/v1/chat/completions")
         self.assertEqual(name, "openrouter")
         self.assertIs(route, whitelist.OPENROUTER)
         self.assertEqual(path, "/api/v1/chat/completions")
 
     def test_openrouter_v1_alias_rewritten(self) -> None:
         """The public '/openrouter/v1/...' prefix is rewritten to upstream '/api/v1/...'."""
-        name, _, path = whitelist.resolve_route("/openrouter/v1/chat/completions")
+        name, _, path = _resolve("/openrouter/v1/chat/completions")
         self.assertEqual(name, "openrouter")
         self.assertEqual(path, "/api/v1/chat/completions")
 
     def test_openrouter_double_v1_collapsed(self) -> None:
         """pi's built-in anthropic-messages dialect sends /v1/v1/messages on a /v1 base."""
-        _, _, path = whitelist.resolve_route("/openrouter/v1/v1/messages")
+        _, _, path = _resolve("/openrouter/v1/v1/messages")
         self.assertEqual(path, "/api/v1/messages")
         self.assertTrue(whitelist.is_allowed(whitelist.OPENROUTER, "POST", path))
 
     def test_openrouter_v1_alias_preserves_query(self) -> None:
-        _, _, path = whitelist.resolve_route("/openrouter/v1/models?category=programming")
+        _, _, path = _resolve("/openrouter/v1/models?category=programming")
         self.assertEqual(path, "/api/v1/models?category=programming")
 
     def test_openrouter_alias_only_at_segment_start(self) -> None:
         """'/v1abc' must not be rewritten — the alias matches a whole segment."""
-        _, _, path = whitelist.resolve_route("/openrouter/v1abc/thing")
+        _, _, path = _resolve("/openrouter/v1abc/thing")
         self.assertEqual(path, "/v1abc/thing")
 
     def test_mlx_has_no_alias(self) -> None:
-        _, _, path = whitelist.resolve_route("/mlx-serve/v1/chat/completions")
+        _, _, path = _resolve("/mlx-serve/v1/chat/completions")
         self.assertEqual(path, "/v1/chat/completions")
 
     def test_mlx_prefix_resolves(self) -> None:
-        name, route, path = whitelist.resolve_route("/mlx-serve/v1/chat/completions")
+        name, route, path = _resolve("/mlx-serve/v1/chat/completions")
         self.assertEqual(name, "mlx-serve")
         self.assertIs(route, whitelist.MLX_SERVE)
         self.assertEqual(path, "/v1/chat/completions")
 
     def test_query_params_preserved_on_stripped_path(self) -> None:
-        _, _, path = whitelist.resolve_route("/mlx-serve/v1/models?limit=2")
+        _, _, path = _resolve("/mlx-serve/v1/models?limit=2")
         self.assertEqual(path, "/v1/models?limit=2")
 
     def test_unknown_prefix_returns_none(self) -> None:
@@ -82,7 +89,7 @@ class TestRouteResolution(unittest.TestCase):
         self.assertIsNone(whitelist.resolve_route("/openrouterx/api/v1/models"))
 
     def test_bare_prefix_resolves_to_slash(self) -> None:
-        name, _, path = whitelist.resolve_route("/openrouter")
+        name, _, path = _resolve("/openrouter")
         self.assertEqual(name, "openrouter")
         self.assertEqual(path, "/")
 
@@ -257,7 +264,9 @@ class TestConfiguration(unittest.TestCase):
     def test_log_format(self) -> None:
         """Log records are emitted through the 'llm-proxy' logger."""
         self.assertEqual(config.logger.name, "llm-proxy")
-        self.assertEqual(config.logger.handlers[0].formatter._fmt, "[proxy] %(asctime)s %(message)s")
+        formatter = config.logger.handlers[0].formatter
+        assert formatter is not None
+        self.assertEqual(formatter._fmt, "[proxy] %(asctime)s %(message)s")
 
 
 class TestUsageSuffix(unittest.TestCase):
@@ -267,6 +276,12 @@ class TestUsageSuffix(unittest.TestCase):
         body = json.dumps({"usage": {"prompt_tokens": 120, "completion_tokens": 34}}).encode()
         self.assertEqual(_usage_suffix(body), " tokens=120+34")
 
+    def test_anthropic_usage_extracted(self) -> None:
+        """The /messages dialect reports input_tokens/output_tokens — both
+        key pairs must log instead of tokens=?+?."""
+        body = json.dumps({"usage": {"input_tokens": 88, "output_tokens": 21}}).encode()
+        self.assertEqual(_usage_suffix(body), " tokens=88+21")
+
     def test_no_usage_returns_empty(self) -> None:
         self.assertEqual(_usage_suffix(b'{"choices": []}'), "")
         self.assertEqual(_usage_suffix(b"not json"), "")
@@ -275,8 +290,15 @@ class TestUsageSuffix(unittest.TestCase):
 
 class TestGracefulShutdown(unittest.TestCase):
     def test_shutdown_calls_server_shutdown(self) -> None:
+        """shutdown() is dispatched to a thread — on the handler's own thread
+        it would deadlock against serve_forever()."""
+        import time
         mock_server = MagicMock()
         _shutdown(mock_server, 15, None)
+        for _ in range(100):
+            if mock_server.shutdown.called:
+                break
+            time.sleep(0.02)
         mock_server.shutdown.assert_called_once()
 
 
@@ -382,6 +404,56 @@ class TestProxyForwarding(unittest.TestCase):
         self.assertIn(b"endpoint not allowed", body)
         self.conn.request.assert_not_called()
 
+    def test_head_on_whitelisted_path_returns_405(self) -> None:
+        """HEAD must enter _proxy (405 + flat body), never BaseHTTP's 501."""
+        self.assertTrue(hasattr(ProxyHandler, "do_HEAD"))
+        handler = self._make_handler("/openrouter/api/v1/chat/completions", method="HEAD")
+        handler._proxy("HEAD")
+        status, _, body = self._parse_response(self._output(handler))
+        self.assertEqual(status, 405)
+        self.assertIn(b"endpoint not allowed", body)
+        self.conn.request.assert_not_called()
+
+    def test_head_on_unknown_prefix_returns_404(self) -> None:
+        handler = self._make_handler("/nope/v1/models", method="HEAD")
+        handler._proxy("HEAD")
+        status, _, body = self._parse_response(self._output(handler))
+        self.assertEqual(status, 404)
+        self.assertIn(b"not found", body)
+
+    def test_invalid_content_length_returns_400(self) -> None:
+        """A non-numeric Content-Length must 400, not crash the handler."""
+        handler = self._make_handler("/mlx-serve/v1/models", method="GET")
+        handler.headers.replace_header("Content-Length", "not-a-number")
+        handler._proxy("GET")
+        status, _, body = self._parse_response(self._output(handler))
+        self.assertEqual(status, 400)
+        self.assertIn(b"invalid Content-Length header", body)
+        self.conn.request.assert_not_called()
+
+    def test_negative_content_length_returns_400(self) -> None:
+        """A negative Content-Length must 400, not crash rfile.read or block."""
+        handler = self._make_handler("/mlx-serve/v1/models", method="GET")
+        handler.headers.replace_header("Content-Length", "-5")
+        handler._proxy("GET")
+        status, _, body = self._parse_response(self._output(handler))
+        self.assertEqual(status, 400)
+        self.assertIn(b"invalid Content-Length header", body)
+        self.conn.request.assert_not_called()
+
+    def test_all_http_methods_delegate_to_proxy(self) -> None:
+        """do_GET/HEAD/POST/PUT/PATCH/DELETE should each call _proxy with their method."""
+        handler = self._make_handler("/mlx-serve/v1/models", method="GET")
+        calls: list[str] = []
+        handler._proxy = calls.append  # type: ignore[method-assign]
+        handler.do_GET()
+        handler.do_HEAD()
+        handler.do_POST()
+        handler.do_PUT()
+        handler.do_PATCH()
+        handler.do_DELETE()
+        self.assertEqual(calls, ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
+
     def test_disabled_route_returns_404(self) -> None:
         with patch.object(config, "OPENROUTER_API_KEY", ""):
             handler = self._make_handler("/openrouter/api/v1/chat/completions", body=b"{}")
@@ -432,6 +504,60 @@ class TestProxyForwarding(unittest.TestCase):
             handler._proxy("POST")
         self.assertEqual(self._parse_response(self._output(handler))[0], 200)
         self.conn.request.assert_called_once()
+
+    # --- review 2.5 / 15: strict + dialect-complete model gate ----------------
+
+    def test_missing_model_rejected_when_allowlist_set(self) -> None:
+        """With ALLOWED_MODELS configured a body without a parsable model
+        must not slip past the gate."""
+        with patch.object(config, "ALLOWED_MODELS", frozenset({"openai/gpt-4o"})):
+            handler = self._make_handler("/openrouter/api/v1/chat/completions", body=b"{}")
+            handler._proxy("POST")
+        status, _, out = self._parse_response(self._output(handler))
+        self.assertEqual(status, 400)
+        self.assertIn(b"model field required", out)
+        self.conn.request.assert_not_called()
+
+    def test_unparsable_body_rejected_when_allowlist_set(self) -> None:
+        with patch.object(config, "ALLOWED_MODELS", frozenset({"openai/gpt-4o"})):
+            handler = self._make_handler("/openrouter/api/v1/chat/completions", body=b"not json")
+            handler._proxy("POST")
+        self.assertEqual(self._parse_response(self._output(handler))[0], 400)
+        self.conn.request.assert_not_called()
+
+    def test_messages_dialect_policed_too(self) -> None:
+        """/v1/messages carries the same model field — the allowlist applies."""
+        body = json.dumps({"model": "evil/model"}).encode()
+        with patch.object(config, "ALLOWED_MODELS", frozenset({"openai/gpt-4o"})):
+            handler = self._make_handler("/mlx-serve/v1/messages", body=body)
+            handler._proxy("POST")
+        status, _, out = self._parse_response(self._output(handler))
+        self.assertEqual(status, 403)
+        self.assertIn(b"model not allowed", out)
+        self.conn.request.assert_not_called()
+
+    def test_messages_allowed_model_forwards(self) -> None:
+        body = json.dumps({"model": "openai/gpt-4o"}).encode()
+        with patch.object(config, "ALLOWED_MODELS", frozenset({"openai/gpt-4o"})):
+            handler = self._make_handler("/openrouter/api/v1/messages", body=body)
+            handler._proxy("POST")
+        self.assertEqual(self._parse_response(self._output(handler))[0], 200)
+        self.conn.request.assert_called_once()
+
+    def test_no_allowlist_means_model_optional(self) -> None:
+        """Without a policy there is nothing to enforce — upstream decides."""
+        with patch.object(config, "ALLOWED_MODELS", frozenset()):
+            handler = self._make_handler("/mlx-serve/v1/chat/completions", body=b"{}")
+            handler._proxy("POST")
+        self.assertEqual(self._parse_response(self._output(handler))[0], 200)
+
+    def test_error_body_shape_is_flat_error(self) -> None:
+        """Review 9 — uniform {"error": "..."} body across all four servers."""
+        handler = self._make_handler("/nope/v1/chat/completions", body=b"{}")
+        handler._proxy("POST")
+        _, _, out = self._parse_response(self._output(handler))
+        import json as _json
+        self.assertEqual(_json.loads(out), {"error": "not found"})
 
     # --- forwarding -----------------------------------------------------------
 
@@ -544,6 +670,37 @@ class TestProxyForwarding(unittest.TestCase):
         status, _, body = self._parse_response(self._output(handler))
         self.assertEqual(status, 502)
         self.assertIn(b"upstream request failed", body)
+
+    def test_upstream_failure_logs_exactly_once(self) -> None:
+        """7.2 — the 502 path must not double-log; the exception stays visible."""
+        self.conn.request.side_effect = ConnectionRefusedError("connection refused")
+        capture = _LogCapture()
+        config.logger.addHandler(capture)
+        try:
+            handler = self._make_handler("/openrouter/api/v1/chat/completions", body=b"{}")
+            handler._proxy("POST")
+        finally:
+            config.logger.removeHandler(capture)
+        lines = [r.getMessage() for r in capture.records]
+        self.assertEqual(len(lines), 1, f"expected one log line, got: {lines}")
+        self.assertIn("502", lines[0])
+        self.assertIn("connection refused", lines[0])
+
+    def test_midstream_upstream_failure_logs_exactly_once(self) -> None:
+        """7.2 — after the headers went out only the detail line remains."""
+        self.resp.getheader.return_value = "text/event-stream"
+        self.resp.read.side_effect = OSError("stream reset")
+        capture = _LogCapture()
+        config.logger.addHandler(capture)
+        try:
+            handler = self._make_handler("/openrouter/api/v1/chat/completions", body=b"{}")
+            handler._proxy("POST")
+        finally:
+            config.logger.removeHandler(capture)
+        lines = [r.getMessage() for r in capture.records]
+        self.assertEqual(len(lines), 1, f"expected one log line, got: {lines}")
+        self.assertIn("502", lines[0])
+        self.assertIn("stream reset", lines[0])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import http.client
 import io
+import json
 import logging
 import os
 import unittest
@@ -70,13 +71,19 @@ class TestEndpointWhitelist(unittest.TestCase):
         self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/comments'))
 
     def test_get_review_comment_allowed(self) -> None:
-        """GET /repos/{owner}/{repo}/pulls/{number}/comments/{id} should be allowed."""
-        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/comments/123'))
-        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/comments/999999'))
+        """GET /repos/{owner}/{repo}/pulls/comments/{id} should be allowed.
+
+        GitHub's single-review-comment route is comment-scoped — the
+        PR-scoped /pulls/{n}/comments/{id} form does not exist upstream.
+        """
+        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/comments/123'))
+        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/comments/999999'))
+        self.assertFalse(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/comments/123'))
 
     def test_update_review_comment_allowed(self) -> None:
-        """PATCH /repos/{owner}/{repo}/pulls/{number}/comments/{id} should be allowed."""
-        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/comments/123'))
+        """PATCH /repos/{owner}/{repo}/pulls/comments/{id} should be allowed."""
+        self.assertTrue(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/comments/123'))
+        self.assertFalse(whitelist.is_allowed_endpoint('/repos/owner/repo/pulls/42/comments/123'))
 
     def test_list_reviews_allowed(self) -> None:
         """GET /repos/{owner}/{repo}/pulls/{number}/reviews should be allowed."""
@@ -480,20 +487,20 @@ class TestTokenValidation(unittest.TestCase):
     """Test token validation."""
 
     def test_validate_token_with_token(self) -> None:
-        """validate_token should not exit when token is set."""
+        """validate_config should not exit when token is set."""
         with patch.dict(os.environ, {'GITHUB_PERSONAL_ACCESS_TOKEN': 'test_token'}):
             import importlib
             importlib.reload(config)
             # Should not raise
-            config.validate_token()
+            config.validate_config()
 
     def test_validate_token_without_token(self) -> None:
-        """validate_token should exit when token is not set."""
+        """validate_config should exit when token is not set."""
         with patch.dict(os.environ, {'GITHUB_PERSONAL_ACCESS_TOKEN': ''}, clear=True):
             import importlib
             importlib.reload(config)
             with self.assertRaises(SystemExit) as ctx:
-                config.validate_token()
+                config.validate_config()
             self.assertEqual(ctx.exception.code, 1)
 
 
@@ -507,7 +514,7 @@ class TestServerIntegration(unittest.TestCase):
 
     def test_http_methods_supported(self) -> None:
         """All HTTP methods should be supported."""
-        handler_methods = ['do_GET', 'do_POST', 'do_PATCH', 'do_PUT', 'do_DELETE']
+        handler_methods = ['do_GET', 'do_HEAD', 'do_POST', 'do_PATCH', 'do_PUT', 'do_DELETE']
         for method in handler_methods:
             self.assertTrue(hasattr(ProxyHandler, method))
 
@@ -528,9 +535,15 @@ class TestGracefulShutdown(unittest.TestCase):
         self.assertTrue(hasattr(_shutdown, '__call__'))
 
     def test_shutdown_handler_calls_server_shutdown(self) -> None:
-        """_shutdown handler should call server.shutdown()."""
+        """_shutdown dispatches server.shutdown() to a thread (calling it
+        on the signal handler's own thread would deadlock serve_forever)."""
+        import time
         mock_server = MagicMock()
         _shutdown(mock_server, 0, None)
+        for _ in range(100):
+            if mock_server.shutdown.called:
+                break
+            time.sleep(0.02)
         mock_server.shutdown.assert_called_once()
 
 
@@ -602,16 +615,17 @@ class TestProxyForwarding(unittest.TestCase):
         args, kwargs = self.conn.request.call_args
         return args[0], args[1], kwargs.get('body'), kwargs.get('headers')
 
-    # --- 403 rejection over HTTP -------------------------------------------
+    # --- 404 rejection over HTTP -------------------------------------------
 
-    def test_blocked_path_returns_403(self) -> None:
-        """A non-whitelisted path should return 403 with a JSON error body."""
+    def test_blocked_path_returns_404(self) -> None:
+        """A non-whitelisted path should return 404 with a JSON error body."""
         handler = self._make_handler('/repos/o/r/branches')
         handler._proxy('GET')
         status, headers, body = self._parse_response(self._output(handler))
-        self.assertEqual(status, 403)
+        self.assertEqual(status, 404)
         self.assertEqual(headers['content-type'], 'application/json')
         self.assertIn(b'endpoint not allowed', body)
+        self.assertIn(b'"error"', body)
 
     def test_blocked_path_never_connects_to_github(self) -> None:
         """A blocked path must not open a connection to the backend."""
@@ -645,6 +659,35 @@ class TestProxyForwarding(unittest.TestCase):
         handler = self._make_handler('/user')
         handler._proxy('GET')
         self.mock_conn_cls.assert_called_once_with('api.github.com', 443, timeout=30)
+
+    def test_head_method_is_forwarded(self) -> None:
+        """HEAD must be forwarded like every other method, not 501 at the handler."""
+        self.assertTrue(hasattr(ProxyHandler, 'do_HEAD'))
+        handler = self._make_handler('/user')
+        handler._proxy('HEAD')
+        method, _, _, _ = self._forwarded()
+        self.assertEqual(method, 'HEAD')
+
+    def test_invalid_content_length_returns_400(self) -> None:
+        """A non-numeric Content-Length must 400 with the flat error body."""
+        handler = self._make_handler('/user')
+        handler.headers.replace_header('Content-Length', 'not-a-number')
+        handler._proxy('GET')
+        status, _, body = self._parse_response(self._output(handler))
+        self.assertEqual(status, 400)
+        self.assertIn(b'invalid Content-Length header', body)
+        self.assertIn(b'"error"', body)
+        self.mock_conn_cls.assert_not_called()
+
+    def test_negative_content_length_returns_400(self) -> None:
+        """A negative Content-Length must 400, not crash rfile.read or block."""
+        handler = self._make_handler('/user')
+        handler.headers.replace_header('Content-Length', '-5')
+        handler._proxy('GET')
+        status, _, body = self._parse_response(self._output(handler))
+        self.assertEqual(status, 400)
+        self.assertIn(b'invalid Content-Length header', body)
+        self.mock_conn_cls.assert_not_called()
 
     # --- auth injection -------------------------------------------------------
 
@@ -754,29 +797,40 @@ class TestProxyForwarding(unittest.TestCase):
     # --- HTTP method delegation ---------------------------------------------------
 
     def test_all_http_methods_delegate_to_proxy(self) -> None:
-        """do_GET/POST/PATCH/PUT/DELETE should each call _proxy with their method."""
+        """do_GET/HEAD/POST/PATCH/PUT/DELETE should each call _proxy with their method."""
         handler = self._make_handler('/user')
         calls: list[str] = []
         handler._proxy = calls.append  # type: ignore[method-assign]
         handler.do_GET()
+        handler.do_HEAD()
         handler.do_POST()
         handler.do_PATCH()
         handler.do_PUT()
         handler.do_DELETE()
-        self.assertEqual(calls, ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'])
+        self.assertEqual(calls, ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'])
 
-    # --- backend failure (documents current behavior) ------------------------------
+    # --- backend failure --------------------------------------------------------
 
-    def test_backend_connection_failure_propagates(self) -> None:
-        """KNOWN GAP: backend errors currently escape the handler unhandled.
-
-        This test documents current behavior; if _proxy() later gains proper
-        502/504 error handling, this test should be updated to assert on it.
-        """
+    def test_backend_connection_failure_returns_502(self) -> None:
+        """Backend connect failures must yield a clean 502 with the flat error body."""
         self.conn.request.side_effect = http.client.RemoteDisconnected('closed')
         handler = self._make_handler('/user')
-        with self.assertRaises(http.client.RemoteDisconnected):
-            handler._proxy('GET')
+        handler._proxy('GET')
+        status, headers, body = self._parse_response(self._output(handler))
+        self.assertEqual(status, 502)
+        self.assertEqual(headers['content-type'], 'application/json')
+        self.assertEqual(json.loads(body), {"error": "upstream request failed"})
+        self.conn.close.assert_called_once()
+
+    def test_backend_oserror_returns_502(self) -> None:
+        """An unreachable backend (OSError) must not escape the handler."""
+        self.conn.getresponse.side_effect = ConnectionRefusedError('connection refused')
+        handler = self._make_handler('/user')
+        handler._proxy('GET')
+        status, _, body = self._parse_response(self._output(handler))
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body), {"error": "upstream request failed"})
+        self.conn.close.assert_called_once()
 
 
 if __name__ == '__main__':

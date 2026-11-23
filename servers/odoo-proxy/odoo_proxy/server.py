@@ -4,6 +4,7 @@
 Manages an Odoo session internally and exposes REST endpoints:
   GET /task/data?id=<task_id>   — task fields via project.task.web_read
   GET /task/messages?id=<id>    — thread messages via mail.thread.messages
+  POST /task/message?id=<id>    — post a note via /mail/message/post
 
 Credentials are read from environment variables.
 """
@@ -13,9 +14,10 @@ from __future__ import annotations
 import http.server
 import json
 import signal
+import threading
 from urllib.parse import parse_qs, urlparse
 
-from .config import PORT, load_config, logger
+from .config import BIND_HOST, PORT, load_config, logger
 from .session import get_session
 from .whitelist import is_allowed_endpoint
 
@@ -33,8 +35,13 @@ def _log(method: str, path: str, status: int, client_ip: str = "") -> None:
 
 
 def _shutdown(server: http.server.HTTPServer, signum: int, frame: object) -> None:
-    """Gracefully shut down the HTTP server on SIGTERM/SIGINT."""
-    server.shutdown()
+    """Gracefully shut down the HTTP server on SIGTERM/SIGINT.
+
+    ``server.shutdown()`` waits for the ``serve_forever()`` loop to exit, so
+    it must not run on the signal handler's own (main) thread — that
+    deadlocks. Hand it to a short-lived thread instead.
+    """
+    threading.Thread(target=server.shutdown, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -58,21 +65,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """Handle GET /task/data?id=<task_id>."""
         id_values = params.get("id", [])
         if not id_values or not id_values[0]:
+            _log("GET", self.path, 400, self.client_address[0])
             self._send_json(400, {"error": "missing required parameter: id"})
             return
 
         try:
             task_id = int(id_values[0])
         except ValueError:
+            _log("GET", self.path, 400, self.client_address[0])
             self._send_json(400, {"error": f"invalid id parameter: {id_values[0]!r}"})
             return
 
-        session = get_session({
-            "db": _session_config["db"],
-            "url": _session_config["url"],
-            "user": _session_config["user"],
-            "password": _session_config["password"],
-        })
+        session = get_session(_session_config)
         try:
             result = session.call_rpc(
                 model="project.task",
@@ -111,8 +115,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     },
                 },
             )
+            _log("GET", self.path, 200, self.client_address[0])
             self._send_json(200, {"task": result[0] if result else None})
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             _log("GET", self.path, 502, self.client_address[0])
             self._send_json(502, {"error": str(exc)})
 
@@ -120,26 +125,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """Handle GET /task/messages?id=<thread_id>."""
         id_values = params.get("id", [])
         if not id_values or not id_values[0]:
+            _log("GET", self.path, 400, self.client_address[0])
             self._send_json(400, {"error": "missing required parameter: id"})
             return
 
         try:
             thread_id = int(id_values[0])
         except ValueError:
+            _log("GET", self.path, 400, self.client_address[0])
             self._send_json(400, {"error": f"invalid id parameter: {id_values[0]!r}"})
             return
 
-        session = get_session({
-            "db": _session_config["db"],
-            "url": _session_config["url"],
-            "user": _session_config["user"],
-            "password": _session_config["password"],
-        })
+        session = get_session(_session_config)
         try:
             result = session.get_messages(thread_id=thread_id)
             messages = result.get("messages", [])
+            _log("GET", self.path, 200, self.client_address[0])
             self._send_json(200, {"messages": messages})
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             _log("GET", self.path, 502, self.client_address[0])
             self._send_json(502, {"error": str(exc)})
 
@@ -147,37 +150,57 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """Handle POST /task/message?id=<thread_id>."""
         id_values = params.get("id", [])
         if not id_values or not id_values[0]:
+            _log("POST", self.path, 400, self.client_address[0])
             self._send_json(400, {"error": "missing required parameter: id"})
             return
 
         try:
             thread_id = int(id_values[0])
         except ValueError:
+            _log("POST", self.path, 400, self.client_address[0])
             self._send_json(400, {"error": f"invalid id parameter: {id_values[0]!r}"})
             return
 
-        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            _log("POST", self.path, 400, self.client_address[0])
+            self._send_json(400, {"error": "invalid Content-Length header"})
+            return
+        if content_length < 0:
+            # A negative length would make rfile.read() read until EOF.
+            _log("POST", self.path, 400, self.client_address[0])
+            self._send_json(400, {"error": "invalid Content-Length header"})
+            return
         raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
         try:
             body_data = json.loads(raw_body)
         except json.JSONDecodeError:
+            _log("POST", self.path, 400, self.client_address[0])
             self._send_json(400, {"error": "invalid JSON body"})
             return
+        if not isinstance(body_data, dict):
+            _log("POST", self.path, 400, self.client_address[0])
+            self._send_json(400, {"error": "body must be a JSON object"})
+            return
+
+        for field in ("body", "message_type", "subtype_xmlid"):
+            value = body_data.get(field)
+            if value is not None and not isinstance(value, str):
+                _log("POST", self.path, 400, self.client_address[0])
+                self._send_json(400, {"error": f"{field} must be a string"})
+                return
 
         body = body_data.get("body", "")
         if not body:
+            _log("POST", self.path, 400, self.client_address[0])
             self._send_json(400, {"error": "missing required field: body"})
             return
 
         message_type = body_data.get("message_type", "comment")
         subtype_xmlid = body_data.get("subtype_xmlid", "mail.mt_note")
 
-        proxy_session = get_session({
-            "db": _session_config["db"],
-            "url": _session_config["url"],
-            "user": _session_config["user"],
-            "password": _session_config["password"],
-        })
+        proxy_session = get_session(_session_config)
         try:
             result = proxy_session.post_message(
                 thread_id=thread_id,
@@ -185,8 +208,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 message_type=message_type,
                 subtype_xmlid=subtype_xmlid,
             )
+            _log("POST", self.path, 200, self.client_address[0])
             self._send_json(200, {"message": result})
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             _log("POST", self.path, 502, self.client_address[0])
             self._send_json(502, {"error": str(exc)})
 
@@ -203,21 +227,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         match method:
             case "GET":
+                # Handlers log the real status once the response is known.
                 match path:
                     case "/task/data":
-                        _log("GET", raw_path, 200, self.client_address[0])
                         self._handle_task_data(params)
                     case "/task/messages":
-                        _log("GET", raw_path, 200, self.client_address[0])
                         self._handle_task_messages(params)
                     case _:
+                        _log("GET", raw_path, 404, self.client_address[0])
                         self._send_json(404, {"error": "not found"})
             case "POST":
                 match path:
                     case "/task/message":
-                        _log("POST", raw_path, 200, self.client_address[0])
                         self._handle_task_message_post(params)
                     case _:
+                        _log("POST", raw_path, 404, self.client_address[0])
                         self._send_json(404, {"error": "not found"})
             case _:
                 _log(method, raw_path, 405, self.client_address[0])
@@ -225,6 +249,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._proxy("GET")
+
+    def do_HEAD(self) -> None:
+        # Enters _proxy so HEAD gets the same 405 + flat error + log line
+        # as any other unsupported method instead of BaseHTTP's 501.
+        self._proxy("HEAD")
 
     def do_POST(self) -> None:
         self._proxy("POST")
@@ -253,11 +282,12 @@ _session_config: dict = {}
 # Main
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     _session_config = load_config()
 
-    server = http.server.HTTPServer(("0.0.0.0", PORT), ProxyHandler)
-    logger.info("Odoo proxy listening on 127.0.0.1:%d — waiting for requests", PORT)
+    server = http.server.ThreadingHTTPServer((BIND_HOST, PORT), ProxyHandler)
+    server.daemon_threads = True  # in-flight requests must not block shutdown
+    logger.info("Odoo proxy listening on %s:%d", BIND_HOST, PORT)
     logger.info("  GET /task/data?id=<task_id>    — task fields")
     logger.info("  GET /task/messages?id=<id>     — thread messages")
     logger.info("  POST /task/message?id=<id>     — post note to thread")

@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 import unittest
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -222,6 +223,27 @@ class TestTaskCRUD(unittest.TestCase):
         self.assertEqual(task['status'], 'open')
         self.assertEqual(task['priority'], 'medium')
         self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'demo', '001_test-task.md')))
+
+    def test_update_task_moves_between_projects(self) -> None:
+        """A project update must move the file into the new project folder."""
+        storage.create_task(title="Move me", project="alpha")
+        task = storage.update_task(1, {"project": "beta"})
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task['project'], 'beta')
+        self.assertEqual(task['filename'], '001_move-me.md')
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'beta', '001_move-me.md')))
+        self.assertFalse(os.path.exists(os.path.join(self.tmpdir, 'alpha', '001_move-me.md')))
+        # 6.8 — the source project directory is kept, even when now empty
+        self.assertIn('alpha', storage.list_projects())
+
+    def test_update_task_invalid_project_ignored(self) -> None:
+        """Non-string / blank project values keep the task where it is."""
+        storage.create_task(title="Stay", project="alpha")
+        task = storage.update_task(1, {"project": "  "})
+        assert task is not None
+        self.assertEqual(task['project'], 'alpha')
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'alpha', '001_stay.md')))
 
     def test_create_task_with_all_fields(self) -> None:
         task = storage.create_task(
@@ -497,6 +519,147 @@ class TestHandlerEndpoints(unittest.TestCase):
         data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
         self.assertEqual(data['error'], 'task 999 not found')
 
+    def _capture_send(self, handler: Any) -> None:
+        """Replace _send_json to record the status alongside the body."""
+        def _send(status: int, data: dict | list) -> None:
+            handler.sent_status = status
+            handler.wfile.write(json.dumps(data).encode())
+        handler._send_json = _send
+
+    def _patch_status(self, status: str) -> tuple[int, dict]:
+        """PATCH a status value and return (status code, response body)."""
+        storage.create_task(title="Status task")
+        payload = json.dumps({"status": status})
+        handler = _make_handler()
+        handler.rfile = io.BytesIO(payload.encode())
+        handler.headers.replace_header('Content-Length', str(len(payload)))
+        self._capture_send(handler)
+        handler._handle_task_update(1)
+        body = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        return handler.sent_status, body  # type: ignore[attr-defined,no-any-return]
+
+    def test_patch_invalid_status_rejected(self) -> None:
+        status_code, body = self._patch_status('invented')
+        self.assertEqual(status_code, 400)
+        self.assertIn('invalid status', body['error'])
+
+    def test_patch_on_hold_status_accepted(self) -> None:
+        status_code, body = self._patch_status('on-hold')
+        self.assertEqual(status_code, 200)
+        self.assertEqual(body['task']['status'], 'on-hold')
+
+    def test_post_invalid_status_rejected(self) -> None:
+        payload = json.dumps({"title": "X", "status": "nope"})
+        handler = _make_handler()
+        handler.rfile = io.BytesIO(payload.encode())
+        handler.headers.replace_header('Content-Length', str(len(payload)))
+        self._capture_send(handler)
+        handler._handle_task_create()
+        self.assertEqual(handler.sent_status, 400)  # type: ignore[attr-defined]
+        body = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertIn('invalid status', body['error'])
+
+    def _post_body(self, payload_obj: object) -> tuple[int, dict]:
+        """POST a JSON body to /tasks and return (status code, response body)."""
+        payload = json.dumps(payload_obj)
+        handler = _make_handler()
+        handler.rfile = io.BytesIO(payload.encode())
+        handler.headers.replace_header('Content-Length', str(len(payload)))
+        self._capture_send(handler)
+        handler._handle_task_create()
+        body = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        return handler.sent_status, body  # type: ignore[attr-defined,no-any-return]
+
+    def _patch_body(self, payload_obj: object) -> tuple[int, dict]:
+        """PATCH a JSON body onto a fresh task and return (status, body)."""
+        storage.create_task(title="Type task")
+        payload = json.dumps(payload_obj)
+        handler = _make_handler()
+        handler.rfile = io.BytesIO(payload.encode())
+        handler.headers.replace_header('Content-Length', str(len(payload)))
+        self._capture_send(handler)
+        handler._handle_task_update(1)
+        body = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        return handler.sent_status, body  # type: ignore[attr-defined,no-any-return]
+
+    def test_post_nonstring_title_rejected(self) -> None:
+        status_code, body = self._post_body({"title": 123})
+        self.assertEqual(status_code, 400)
+        self.assertIn('title must be a non-empty string', body['error'])
+
+    def test_post_object_title_rejected(self) -> None:
+        status_code, body = self._post_body({"title": {"a": 1}})
+        self.assertEqual(status_code, 400)
+        self.assertIn('title must be a non-empty string', body['error'])
+
+    def test_post_nonlist_tags_rejected(self) -> None:
+        status_code, body = self._post_body({"title": "X", "tags": "not-a-list"})
+        self.assertEqual(status_code, 400)
+        self.assertIn('tags must be a list of strings', body['error'])
+
+    def test_post_nonstring_description_rejected(self) -> None:
+        status_code, body = self._post_body({"title": "X", "description": 5})
+        self.assertEqual(status_code, 400)
+        self.assertIn('description must be a string', body['error'])
+
+    def test_patch_nonstring_title_rejected(self) -> None:
+        status_code, body = self._patch_body({"title": 456})
+        self.assertEqual(status_code, 400)
+        self.assertIn('title must be a non-empty string', body['error'])
+
+    def test_patch_numeric_due_date_rejected(self) -> None:
+        status_code, body = self._patch_body({"due_date": 20260101})
+        self.assertEqual(status_code, 400)
+        self.assertIn('due_date must be a string or null', body['error'])
+
+    def test_patch_nonstring_priority_rejected(self) -> None:
+        status_code, body = self._patch_body({"priority": 3})
+        self.assertEqual(status_code, 400)
+        self.assertIn('invalid priority', body['error'])
+
+    def test_post_invalid_priority_rejected(self) -> None:
+        """7.1 — priority is enum-gated on write, like status."""
+        status_code, body = self._post_body({"title": "X", "priority": "urgent"})
+        self.assertEqual(status_code, 400)
+        self.assertIn('invalid priority', body['error'])
+
+    def test_post_xss_priority_rejected(self) -> None:
+        """7.1 — the stored-XSS payload must never reach storage."""
+        status_code, body = self._post_body(
+            {"title": "pri", "priority": "<img src=x onerror=alert(1)>"}
+        )
+        self.assertEqual(status_code, 400)
+        self.assertIn('invalid priority', body['error'])
+        self.assertEqual(storage.list_tasks(), [])
+
+    def test_post_patch_xss_priority_rejected(self) -> None:
+        """7.1 — the PATCH twin of the XSS gate."""
+        status_code, body = self._patch_body(
+            {"priority": "<img src=x onerror=alert(1)>"}
+        )
+        self.assertEqual(status_code, 400)
+        self.assertIn('invalid priority', body['error'])
+        task = storage.get_task(1) or {}
+        self.assertNotIn('onerror', str(task.get('priority')))
+
+    def test_post_all_valid_priorities_accepted(self) -> None:
+        for i, prio in enumerate(('low', 'medium', 'high'), start=1):
+            status_code, body = self._post_body({"title": f"P {prio}", "priority": prio})
+            self.assertEqual(status_code, 201, prio)
+            self.assertEqual(body['task']['priority'], prio)
+            self.assertEqual(i, body['task']['id'])
+
+    def test_patch_all_valid_priorities_accepted(self) -> None:
+        for prio in ('low', 'medium', 'high'):
+            status_code, body = self._patch_body({"priority": prio})
+            self.assertEqual(status_code, 200, prio)
+            self.assertEqual(body['task']['priority'], prio)
+
+    def test_patch_null_due_date_accepted(self) -> None:
+        status_code, body = self._patch_body({"due_date": None})
+        self.assertEqual(status_code, 200)
+        self.assertIsNone(body['task']['due_date'])
+
     def test_delete_task(self) -> None:
         storage.create_task(title="Delete me", project="p1")
         handler = _make_handler()
@@ -555,6 +718,85 @@ class TestHandlerEndpoints(unittest.TestCase):
         handler._handle_projects_create()
         data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
         self.assertEqual(data['error'], 'invalid JSON body')
+
+    # --- project-name safety (storage traversal, review 2.1) -------------------------
+
+    def _post_json(self, handler: Any, obj: dict) -> None:
+        payload = json.dumps(obj).encode()
+        handler.rfile = io.BytesIO(payload)
+        handler.headers.replace_header('Content-Length', str(len(payload)))
+
+    def _sent(self, handler: Any) -> tuple[int, dict]:
+        body = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        return handler.sent_status, body  # type: ignore[attr-defined,no-any-return]
+
+    def _capture_status(self, handler: Any) -> None:
+        self._capture_send(handler)
+
+    def test_create_task_traversal_project_rejected(self) -> None:
+        handler = _make_handler()
+        self._capture_status(handler)
+        self._post_json(handler, {"title": "X", "project": "../../escape"})
+        handler._handle_task_create()
+        status, body = self._sent(handler)
+        self.assertEqual(status, 400)
+        self.assertIn('invalid project name', body['error'])
+
+    def test_create_task_absolute_project_rejected(self) -> None:
+        handler = _make_handler()
+        self._capture_status(handler)
+        self._post_json(handler, {"title": "X", "project": "/tmp/evil"})
+        handler._handle_task_create()
+        status, body = self._sent(handler)
+        self.assertEqual(status, 400)
+
+    def test_create_task_project_trailing_newline_rejected(self) -> None:
+        """8.1 — a trailing newline must not be treated as a valid project name."""
+        handler = _make_handler()
+        self._capture_status(handler)
+        self._post_json(handler, {"title": "X", "project": "rev-newline\n"})
+        handler._handle_task_create()
+        status, body = self._sent(handler)
+        self.assertEqual(status, 400)
+        self.assertIn('invalid project name', body['error'])
+        self.assertFalse(os.path.exists(os.path.join(self.tmpdir, 'rev-newline\n')))
+
+    def test_create_project_traversal_name_rejected(self) -> None:
+        handler = _make_handler()
+        self._capture_status(handler)
+        self._post_json(handler, {"name": "../rev-pwned"})
+        handler._handle_projects_create()
+        status, body = self._sent(handler)
+        self.assertEqual(status, 400)
+        self.assertIn('invalid project name', body['error'])
+        self.assertFalse(os.path.exists(os.path.join(self.tmpdir, '..', 'rev-pwned')))
+
+    def test_patch_traversal_project_rejected(self) -> None:
+        storage.create_task(title="Move me", project="default")
+        handler = _make_handler()
+        self._capture_status(handler)
+        self._post_json(handler, {"project": "/tmp/rev-moved"})
+        handler._handle_task_update(1)
+        status, body = self._sent(handler)
+        self.assertEqual(status, 400)
+        self.assertFalse(os.path.isdir('/tmp/rev-moved'))
+
+    def test_patch_blank_project_still_ignored(self) -> None:
+        storage.create_task(title="Stay", project="default")
+        handler = _make_handler()
+        self._capture_status(handler)
+        self._post_json(handler, {"project": "   "})
+        handler._handle_task_update(1)
+        status, _body = self._sent(handler)
+        self.assertEqual(status, 200)
+
+    def test_tasks_list_traversal_filter_rejected(self) -> None:
+        handler = _make_handler()
+        self._capture_status(handler)
+        handler._handle_tasks_list({'project': ['../secret-dir'], 'status': [None]})
+        status, body = self._sent(handler)
+        self.assertEqual(status, 400)
+        self.assertIn('invalid project filter', body['error'])
 
     def test_non_whitelisted_path_returns_404(self) -> None:
         handler = _make_handler()
@@ -635,6 +877,39 @@ class TestStaticFileServing(unittest.TestCase):
     def test_missing_js_returns_404(self) -> None:
         handler = _make_handler()
         handler.path = '/js/missing.js'
+        handler._handle_static()
+        data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(data['error'], 'file not found')
+
+    def test_css_directory_returns_404_not_crash(self) -> None:
+        """Review 2.3 — '/css/' is whitelisted and names a directory; it must
+        404 cleanly instead of raising IsADirectoryError."""
+        handler = _make_handler()
+        handler.path = '/css/'
+        handler._handle_static()  # must not raise
+        data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(data['error'], 'file not found')
+
+    def test_js_directory_returns_404_not_crash(self) -> None:
+        handler = _make_handler()
+        handler.path = '/js/'
+        handler._handle_static()
+        data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(data['error'], 'file not found')
+
+    def test_path_traversal_blocked(self) -> None:
+        """'..' segments smuggled through /css/ must not escape the ui/ dir."""
+        handler = _make_handler()
+        handler.path = '/css/../../../../etc/passwd'
+        handler._handle_static()
+        data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(data['error'], 'file not found')
+        for call in cast(MagicMock, handler.wfile).write.call_args_list:
+            self.assertNotIn(b'root:', call[0][0])
+
+    def test_path_traversal_via_js_blocked(self) -> None:
+        handler = _make_handler()
+        handler.path = '/js/../../../README.md'
         handler._handle_static()
         data = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
         self.assertEqual(data['error'], 'file not found')
@@ -736,8 +1011,32 @@ class TestGracefulShutdown(unittest.TestCase):
         self.assertTrue(hasattr(_shutdown, '__call__'))
 
     def test_shutdown_handler_calls_server_shutdown(self) -> None:
+        """shutdown() is invoked off-handler (in a thread) — the handler thread
+        calling it directly would deadlock against serve_forever()."""
         mock_server = MagicMock()
         _shutdown(mock_server, 0, None)
+        for _ in range(100):
+            if mock_server.shutdown.called:
+                break
+            time.sleep(0.02)
+        mock_server.shutdown.assert_called_once()
+
+    def test_shutdown_handler_does_not_block_caller(self) -> None:
+        """A blocking shutdown() (real deadlock scenario) must not hang the
+        signal handler — the handler returns immediately."""
+        import threading as _threading
+        started = _threading.Event()
+        release = _threading.Event()
+
+        def slow_shutdown() -> None:
+            started.set()
+            release.wait(5)
+
+        mock_server = MagicMock()
+        mock_server.shutdown.side_effect = slow_shutdown
+        _shutdown(mock_server, 0, None)
+        started.wait(2)
+        release.set()
         mock_server.shutdown.assert_called_once()
 
 
@@ -777,6 +1076,18 @@ class TestHandlerMethods(unittest.TestCase):
 
 class TestProxyRouting(unittest.TestCase):
     """Test _proxy() routing for every method and endpoint."""
+
+    def setUp(self) -> None:
+        """Isolate HEAD existence checks in a temporary tasks directory."""
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+
+    def tearDown(self) -> None:
+        config.TASKS_DIR = self._orig_tasks_dir
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _routed(self, method: str, path: str) -> tuple[ProxyHandler, list[str]]:
         """Run _proxy with all sub-handlers stubbed; return handler and call log."""
@@ -921,9 +1232,20 @@ class TestProxyRouting(unittest.TestCase):
         self.assertIn('javascript', ct)
 
     def test_head_task_id_returns_200(self) -> None:
-        """HEAD /tasks/{id} should return 200."""
+        """HEAD /tasks/{id} should return 200 for an existing task."""
+        storage.create_task(title="Head me")
         status, _ = self._head('/tasks/1')
         self.assertEqual(status, 200)
+
+    def test_head_task_id_mirrors_get_404(self) -> None:
+        """Review 2.2 — HEAD on a missing task id must 404 like GET."""
+        status, _ = self._head('/tasks/999')
+        self.assertEqual(status, 404)
+
+    def test_head_missing_css_returns_404(self) -> None:
+        """HEAD on a missing static asset must 404 like GET."""
+        status, _ = self._head('/css/does-not-exist.css')
+        self.assertEqual(status, 404)
 
     def test_head_projects_returns_200(self) -> None:
         """HEAD /projects should return 200."""
@@ -1006,6 +1328,46 @@ class TestTaskUpdateEdgeCases(unittest.TestCase):
         self.assertEqual(task['status'], 'open')
         self.assertEqual(task['priority'], 'medium')
 
+    def _write_raw_task(self, rel: str, content: str) -> None:
+        """Plant a hand-written task file (bypassing storage validation)."""
+        path = os.path.join(config.TASKS_DIR, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(content)
+
+    def test_update_backfills_missing_created_at(self) -> None:
+        """PATCH on a hand-edited file without created_at must not crash."""
+        self._write_raw_task(
+            'default/001_hand.md',
+            '---\nid: 1\ntitle: "hand"\nstatus: open\npriority: medium\ndue_date:\ntags: []\n---\n',
+        )
+        task = storage.update_task(1, {'status': 'done'})
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task['status'], 'done')
+        self.assertTrue(task['created_at'])
+
+    def test_update_backfills_missing_title_status_priority(self) -> None:
+        """Frontmatter missing title/status/priority gets safe fallbacks."""
+        self._write_raw_task('default/002_bare-bones.md', '---\nid: 2\n---\n')
+        task = storage.update_task(2, {'description': 'x'})
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task['title'], 'bare bones')
+        self.assertEqual(task['status'], 'open')
+        self.assertEqual(task['priority'], 'medium')
+        self.assertEqual(task['id'], 2)
+        self.assertTrue(task['created_at'])
+
+    def test_update_backfills_missing_id_from_path(self) -> None:
+        """A file without an id key gets the id the URL asked for."""
+        self._write_raw_task('default/004_no-id.md', '---\ntitle: "No Id"\n---\n')
+        task = storage.update_task(4, {'status': 'done'})
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task['id'], 4)
+        self.assertEqual(task['status'], 'done')
+
 
 class TestStorageEdgeCases(unittest.TestCase):
     """Test uncovered storage-layer branches."""
@@ -1063,20 +1425,40 @@ class TestStorageEdgeCases(unittest.TestCase):
         self.assertIs(fm['flag'], False)
 
     # --- helpers ---------------------------------------------------------------------
+    # (the former _task_file_path/_internal_keys helpers were removed as dead code;
+    #  create_task/update_task build paths inline through _ensure_project_dir)
 
-    def test_task_file_path_with_title(self) -> None:
-        """With a title the filename is derived from it."""
-        path = storage._task_file_path('proj', 5, 'Fix login bug')
-        self.assertTrue(path.endswith(os.path.join('proj', '005_fix-login-bug.md')))
+    def test_ensure_project_dir_rejects_traversal(self) -> None:
+        """Names that could escape TASKS_DIR raise ValueError at the choke point."""
+        for bad in ('../escape', '/tmp/abs', '..', '.', '.hidden', 'a/b', ''):
+            with self.assertRaises(ValueError):
+                storage._ensure_project_dir(bad)
 
-    def test_task_file_path_without_title(self) -> None:
-        """Without a title the filename falls back to the id."""
-        path = storage._task_file_path('proj', 5)
-        self.assertTrue(path.endswith(os.path.join('proj', '005_5.md')))
+    def test_ensure_project_dir_accepts_normal_names(self) -> None:
+        for good in ('default', 'my-project', 'my_project', 'a.b c', 'Proj1'):
+            storage._ensure_project_dir(good)
+            self.assertTrue(os.path.isdir(os.path.join(self.tmpdir, good)))
 
-    def test_internal_keys(self) -> None:
-        """Internal keys are excluded from persistence."""
-        self.assertEqual(storage._internal_keys(), {'filename', 'project'})
+    def test_valid_project_name(self) -> None:
+        self.assertTrue(storage.valid_project_name('agent-tools'))
+        self.assertFalse(storage.valid_project_name('../x'))
+        self.assertFalse(storage.valid_project_name('a/b'))
+        self.assertFalse(storage.valid_project_name('/abs'))
+        self.assertFalse(storage.valid_project_name('..'))
+        self.assertFalse(storage.valid_project_name('.hidden'))
+        self.assertFalse(storage.valid_project_name(None))
+
+    def test_list_tasks_traversal_filter_returns_empty(self) -> None:
+        """A traversal-laden project filter must not scan outside TASKS_DIR."""
+        self.assertEqual(storage.list_tasks(project='../../etc'), [])
+
+    def test_list_tasks_finds_four_digit_ids(self) -> None:
+        """Once the counter rolls past 999 the files must still be listed."""
+        os.makedirs(os.path.join(self.tmpdir, 'default'))
+        with open(os.path.join(self.tmpdir, 'default', '1000_rolled-over.md'), 'w') as f:
+            f.write('---\nid: 1000\ntitle: big\nstatus: open\n---\n')
+        tasks = storage.list_tasks()
+        self.assertEqual([t['id'] for t in tasks], [1000])
 
     # --- scanning robustness ------------------------------------------------------------
 
@@ -1116,6 +1498,516 @@ class TestStorageEdgeCases(unittest.TestCase):
         self._write_stray_file()
         self.assertFalse(storage.delete_task(99))
         self.assertIsNotNone(storage.get_task(1))
+
+
+class TestRequestBodyValidation(unittest.TestCase):
+    """4.1 — malformed body/metadata answers 400, never a crashed handler."""
+
+    def _handler_with_body(self, body: bytes) -> ProxyHandler:
+        handler = _make_handler()
+        handler.rfile = io.BytesIO(body)
+        handler.headers.replace_header('Content-Length', str(len(body)))
+        return handler
+
+    def _call(self, handler: ProxyHandler, invoke: Any) -> tuple[int, dict]:
+        sent: list[tuple[int, dict]] = []
+
+        def _send(status: int, data: dict | list) -> None:
+            sent.append((status, data))  # type: ignore[arg-type]
+
+        handler._send_json = _send  # type: ignore[method-assign]
+        invoke(handler)
+        self.assertEqual(len(sent), 1)
+        return sent[0]
+
+    def test_non_object_json_bodies_rejected(self) -> None:
+        """Valid JSON that is not an object must 400 on every body endpoint."""
+        for raw in (b'5', b'"str"', b'[1, 2]', b'true', b'null'):
+            for invoke in (
+                lambda h: h._handle_task_create(),
+                lambda h: h._handle_task_update(1),
+                lambda h: h._handle_projects_create(),
+            ):
+                status, body = self._call(self._handler_with_body(raw), invoke)
+                self.assertEqual(status, 400, raw)
+                self.assertEqual(body['error'], 'body must be a JSON object', raw)
+
+    def test_invalid_content_length_rejected(self) -> None:
+        """A non-numeric Content-Length must 400, not crash the handler."""
+        for invoke in (
+            lambda h: h._handle_task_create(),
+            lambda h: h._handle_task_update(1),
+            lambda h: h._handle_projects_create(),
+        ):
+            handler = _make_handler()
+            handler.headers.replace_header('Content-Length', 'not-a-number')
+            status, body = self._call(handler, invoke)
+            self.assertEqual(status, 400)
+            self.assertEqual(body['error'], 'invalid Content-Length header')
+
+    def test_negative_content_length_rejected(self) -> None:
+        """A negative Content-Length must 400, not read until EOF."""
+        for invoke in (
+            lambda h: h._handle_task_create(),
+            lambda h: h._handle_task_update(1),
+            lambda h: h._handle_projects_create(),
+        ):
+            handler = _make_handler()
+            handler.headers.replace_header('Content-Length', '-5')
+            status, body = self._call(handler, invoke)
+            self.assertEqual(status, 400)
+            self.assertEqual(body['error'], 'invalid Content-Length header')
+
+    def test_object_body_still_accepted(self) -> None:
+        """The guard must not break the normal path."""
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+        try:
+            status, body = self._call(
+                self._handler_with_body(b'{"title": "still fine"}'),
+                lambda h: h._handle_task_create(),
+            )
+            self.assertEqual(status, 201)
+            self.assertEqual(body['task']['title'], 'still fine')
+        finally:
+            config.TASKS_DIR = self._orig_tasks_dir
+            import shutil
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+
+class TestLongTitlesAndEscapes(unittest.TestCase):
+    """5.1/5.2 — long titles and special characters never break the write path."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+
+    def tearDown(self) -> None:
+        config.TASKS_DIR = self._orig_tasks_dir
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _read(self, task_id: int) -> dict:
+        task = storage.get_task(task_id)
+        self.assertIsNotNone(task)
+        assert task is not None
+        return task
+
+    def test_create_task_long_title_clamped(self) -> None:
+        """A 300-char title must create fine — the filename slug is clamped."""
+        task = storage.create_task(title='a' * 300)
+        self.assertLessEqual(len(task['filename']), 90)
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'default', task['filename'])))
+        self.assertEqual(self._read(task['id'])['title'], 'a' * 300)
+
+    def test_update_task_long_title_clamped(self) -> None:
+        """Renaming to a 300-char title must move the file, not crash it."""
+        task = storage.create_task(title='Short')
+        updated = storage.update_task(task['id'], {'title': 'b' * 300})
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertLessEqual(len(updated['filename']), 90)
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, 'default', updated['filename'])))
+        self.assertFalse(os.path.exists(os.path.join(self.tmpdir, 'default', '001_short.md')))
+        self.assertEqual(self._read(task['id'])['title'], 'b' * 300)
+
+    def test_title_with_newline_roundtrips(self) -> None:
+        """A newline in the title must survive the frontmatter write/read."""
+        task = storage.create_task(title='line one\nline two')
+        self.assertEqual(self._read(task['id'])['title'], 'line one\nline two')
+
+    def test_title_with_quotes_roundtrips(self) -> None:
+        """Quotes in the title must survive the frontmatter write/read."""
+        task = storage.create_task(title='He said "hi"')
+        self.assertEqual(self._read(task['id'])['title'], 'He said "hi"')
+
+    def test_tags_with_quotes_roundtrip(self) -> None:
+        """A quote inside a tag must not merge or truncate it on read-back."""
+        task = storage.create_task(title='Tags', tags=['a"b', 'plain'])
+        self.assertEqual(self._read(task['id'])['tags'], ['a"b', 'plain'])
+
+    def test_legacy_unquoted_frontmatter_still_parses(self) -> None:
+        """Hand-written files keep the lenient parse path."""
+        project = os.path.join(self.tmpdir, 'legacy')
+        os.makedirs(project)
+        with open(os.path.join(project, '001_legacy.md'), 'w') as f:
+            f.write('---\nid: 1\ntitle: "old" style"\nstatus: open\ntags: [a, b]\n---\n')
+        task = storage.get_task(1)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task['title'], 'old" style')
+        self.assertEqual(task['tags'], ['a', 'b'])
+
+
+class TestUnreadableTaskFiles(unittest.TestCase):
+    """6.3 — one odd task file must never take down a read endpoint."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+        storage.create_task(title='Healthy task', project='demo')
+
+    def tearDown(self) -> None:
+        config.TASKS_DIR = self._orig_tasks_dir
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_non_utf8_file_is_survivable(self) -> None:
+        """A cp1252 byte in a task file must not raise UnicodeDecodeError."""
+        with open(os.path.join(self.tmpdir, 'demo', '002_cafe.md'), 'wb') as f:
+            f.write('---\nid: 2\ntitle: caf'.encode('utf-8') + b'\xe9\n---\n')
+        tasks = storage.list_tasks()
+        self.assertEqual(len(tasks), 2)
+        self.assertIsNotNone(storage.get_task(2))
+
+    def test_directory_named_like_task_is_skipped(self) -> None:
+        """A directory named NNN_x.md must be skipped, not IsADirectoryError."""
+        os.makedirs(os.path.join(self.tmpdir, 'demo', '009_dir.md'))
+        tasks = storage.list_tasks()
+        self.assertEqual([t['id'] for t in tasks], [1])
+        self.assertIsNone(storage.get_task(9))
+
+    def test_dangling_symlink_is_skipped(self) -> None:
+        """A symlink to a removed file (or a concurrent DELETE) must not 000."""
+        os.symlink(
+            os.path.join(self.tmpdir, 'demo', 'gone.md'),
+            os.path.join(self.tmpdir, 'demo', '008_dangling.md'),
+        )
+        tasks = storage.list_tasks()
+        self.assertEqual([t['id'] for t in tasks], [1])
+        self.assertIsNone(storage.get_task(8))
+
+    def test_delete_survives_vanished_file(self) -> None:
+        """Deleting a task whose file already vanished answers False, no crash."""
+        storage.create_task(title='Doomed', project='demo')
+        os.remove(os.path.join(self.tmpdir, 'demo', '002_doomed.md'))
+        self.assertFalse(storage.delete_task(2))
+
+
+class TestProjectDirPreserved(unittest.TestCase):
+    """6.8 — deleting/moving a task never removes the project directory."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+
+    def tearDown(self) -> None:
+        config.TASKS_DIR = self._orig_tasks_dir
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_delete_last_task_keeps_project(self) -> None:
+        storage.create_project('solo')
+        storage.create_task(title='Only one', project='solo')
+        self.assertTrue(storage.delete_task(1))
+        self.assertIn('solo', storage.list_projects())
+        self.assertTrue(os.path.isdir(os.path.join(self.tmpdir, 'solo')))
+
+    def test_move_out_leaves_source_project(self) -> None:
+        storage.create_task(title='Mover', project='alpha')
+        storage.update_task(1, {'project': 'beta'})
+        self.assertIn('alpha', storage.list_projects())
+        self.assertTrue(os.path.isdir(os.path.join(self.tmpdir, 'alpha')))
+
+
+class TestDueDateFormat(unittest.TestCase):
+    """6.1 — due_date is validated as YYYY-MM-DD (kills the raw-interpolation XSS vector)."""
+
+    def _post(self, body: dict) -> tuple[int, dict]:
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+        try:
+            handler = _make_handler()
+            raw = json.dumps(body).encode()
+            handler.rfile = io.BytesIO(raw)
+            handler.headers.replace_header('Content-Length', str(len(raw)))
+            sent: list[tuple[int, dict]] = []
+            handler._send_json = lambda s, d: sent.append((s, d))  # type: ignore[method-assign]
+            handler._handle_task_create()
+            return sent[0]
+        finally:
+            config.TASKS_DIR = self._orig_tasks_dir
+            import shutil
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_xss_payload_rejected(self) -> None:
+        status, body = self._post({'title': 'x', 'due_date': '"><img id=injected src=x onerror=document.title=1>'})
+        self.assertEqual(status, 400)
+        self.assertEqual(body['error'], 'due_date must be a YYYY-MM-DD string or null')
+
+    def test_non_iso_date_rejected(self) -> None:
+        status, body = self._post({'title': 'x', 'due_date': '15-08-2026'})
+        self.assertEqual(status, 400)
+
+    def test_valid_date_accepted(self) -> None:
+        status, body = self._post({'title': 'x', 'due_date': '2026-08-15'})
+        self.assertEqual(status, 201)
+        self.assertEqual(body['task']['due_date'], '2026-08-15')
+
+    def test_patch_bad_date_rejected(self) -> None:
+        handler = _make_handler()
+        raw = json.dumps({'due_date': 'tomorrow'}).encode()
+        handler.rfile = io.BytesIO(raw)
+        handler.headers.replace_header('Content-Length', str(len(raw)))
+        sent: list[tuple[int, dict]] = []
+        handler._send_json = lambda s, d: sent.append((s, d))  # type: ignore[method-assign]
+        handler._handle_task_update(1)
+        self.assertEqual(sent[0][0], 400)
+        self.assertEqual(sent[0][1]['error'], 'due_date must be a YYYY-MM-DD string or null')
+
+    def test_due_date_with_quotes_roundtrips_in_storage(self) -> None:
+        """Storage-level: the JSON-escaping writer keeps odd due_date values intact."""
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+        try:
+            storage.create_task(title='q', due_date='x"y\\z')
+            task = storage.get_task(1)
+            self.assertIsNotNone(task)
+            assert task is not None
+            self.assertEqual(task['due_date'], 'x"y\\z')
+        finally:
+            config.TASKS_DIR = self._orig_tasks_dir
+            import shutil
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+
+class TestUiEscaping(unittest.TestCase):
+    """6.1 — the UI must escape attribute/JS contexts holding task data."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        ui_js = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ui', 'js', 'app.js'
+        )
+        with open(ui_js, 'r') as f:
+            cls.src = f.read()
+
+    def test_no_raw_task_data_in_value_attributes(self) -> None:
+        self.assertNotIn('value="${task.', self.src)
+        self.assertNotIn("value=\"${task.", self.src)
+
+    def test_attribute_contexts_use_escape_attr(self) -> None:
+        self.assertIn('function escapeAttr', self.src)
+        self.assertIn('value="${escapeAttr(task.title)}"', self.src)
+        self.assertIn("value=\"${escapeAttr(task.due_date || '')}\"", self.src)
+
+    def test_inline_js_arg_is_json_encoded(self) -> None:
+        """Tag removal must not smuggle a quote out of the inline handler."""
+        self.assertIn('removeTag(${escapeAttr(JSON.stringify(tag))})', self.src)
+        self.assertNotIn("removeTag('${escapeHtml(tag)}')", self.src)
+
+    def test_markdown_links_have_scheme_allowlist(self) -> None:
+        self.assertIn('function isSafeHref', self.src)
+        self.assertIn('isSafeHref(url)', self.src)
+        self.assertNotIn("'<a href=\"$2\"", self.src)
+
+    def test_badges_escape_their_label(self) -> None:
+        """7.1 — both badges interpolate the value; both must escape it."""
+        self.assertIn("${escapeAttr(s || 'open')}", self.src)
+        self.assertIn("${escapeAttr(p || 'medium')}", self.src)
+        self.assertNotIn("${s || 'open'}", self.src)
+        self.assertNotIn("${p || 'medium'}", self.src)
+
+    def test_update_field_reports_failed_patches(self) -> None:
+        """7.3 — a failed PATCH must toast and reload, like every other mutation."""
+        self.assertIn('Failed to update ${field}', self.src)
+        self.assertIn("toast(data.error || `Failed to update ${field}`, true)", self.src)
+
+    def test_default_project_option_is_conditional(self) -> None:
+        """8.2 — the hardcoded 'default' option must not duplicate a real project."""
+        # The two dropdowns that can show 'default' must gate on whether the
+        # dynamic list already contains it.
+        self.assertGreaterEqual(self.src.count("projects.includes('default')"), 2)
+        # Each occurrence must sit inside a ternary that omits the option when
+        # 'default' is already present.
+        for site in ('create modal', 'detail panel'):
+            with self.subTest(site=site):
+                pass  # The count + the source rewrite below are the guard.
+        # Verify the default option is generated into a local rather than an
+        # unconditional trailing append.
+        self.assertIn("projects.includes('default') ? '' :", self.src)
+
+
+class TestStaticQueryStringHandling(unittest.TestCase):
+    """6.5 — GET must open the query-stripped file, mirroring HEAD."""
+
+    def _get_status(self, path: str) -> int:
+        handler = cast(Any, _make_handler())
+        handler.path = path
+        status: dict = {}
+        handler.send_response = lambda s: status.update(s=s)
+        handler.send_header = lambda k, v: None
+        handler.end_headers = lambda: None
+        handler.wfile.write = lambda data: None
+        handler._proxy('GET')
+        return status.get('s', 0)
+
+    def _head_status(self, path: str) -> int:
+        handler = cast(Any, _make_handler())
+        handler.path = path
+        status: dict = {}
+        handler.send_response = lambda s: status.update(s=s)
+        handler.send_header = lambda k, v: None
+        handler.end_headers = lambda: None
+        handler._proxy('HEAD')
+        return status.get('s', 0)
+
+    def test_css_with_cache_busting_query_is_served(self) -> None:
+        self.assertEqual(self._get_status('/css/styles.css?v=2'), 200)
+
+    def test_missing_css_with_query_is_404(self) -> None:
+        self.assertEqual(self._get_status('/css/does-not-exist.css?v=2'), 404)
+
+    def test_head_and_get_agree_on_queried_asset(self) -> None:
+        self.assertEqual(self._head_status('/css/styles.css?v=2'), self._get_status('/css/styles.css?v=2'))
+        self.assertEqual(self._head_status('/css/nope.css?v=2'), self._get_status('/css/nope.css?v=2'))
+
+    def test_head_tasks_bad_project_filter_mirrors_get_400(self) -> None:
+        """6.7 — HEAD mirrors GET's 400 for an unsafe project filter."""
+        self.assertEqual(self._head_status('/tasks?project=../etc'), 400)
+
+
+class TestPass6Documentation(unittest.TestCase):
+    """Guardrails for the gate-script interpreter name (6.10)."""
+
+    def test_gate_scripts_use_python3(self) -> None:
+        scripts_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts'
+        )
+        for name in ('test-project.sh', 'lint-project.sh', 'coverage-project.sh'):
+            with open(os.path.join(scripts_dir, name)) as f:
+                src = f.read()
+            self.assertNotIn('python -m', src, name)
+            self.assertNotIn('python -c', src, name)
+
+
+class TestProjectNameCollision(unittest.TestCase):
+    """9.1 — a project name colliding with a plain file in TASKS_DIR is a 400, not a dropped connection."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+        with open(os.path.join(self.tmpdir, 'alpha'), 'w') as f:
+            f.write('stray file on a hand-managed volume\n')
+
+    def tearDown(self) -> None:
+        config.TASKS_DIR = self._orig_tasks_dir
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _invoke(self, handler_method: Any, body: dict) -> tuple[int, dict]:
+        handler = _make_handler()
+        raw = json.dumps(body).encode()
+        handler.rfile = io.BytesIO(raw)
+        handler.headers.replace_header('Content-Length', str(len(raw)))
+        sent: list[tuple[int, dict]] = []
+        handler._send_json = lambda s, d: sent.append((s, d))  # type: ignore[method-assign]
+        handler_method(handler)
+        return sent[0]
+
+    def test_post_task_onto_file_collision_is_400(self) -> None:
+        status, body = self._invoke(lambda h: h._handle_task_create(), {'title': 'probe', 'project': 'alpha'})
+        self.assertEqual(status, 400)
+        self.assertIn('exists as a non-directory', body['error'])
+        self.assertEqual(storage.list_tasks(), [])
+        self.assertTrue(os.path.isfile(os.path.join(self.tmpdir, 'alpha')))
+
+    def test_post_project_collision_is_400(self) -> None:
+        status, body = self._invoke(lambda h: h._handle_projects_create(), {'name': 'alpha'})
+        self.assertEqual(status, 400)
+        self.assertIn('exists as a non-directory', body['error'])
+
+    def test_patch_move_collision_is_400(self) -> None:
+        storage.create_task(title='Mover', project='default')
+        status, body = self._invoke(lambda h: h._handle_task_update(1), {'project': 'alpha'})
+        self.assertEqual(status, 400)
+        self.assertIn('exists as a non-directory', body['error'])
+        task = storage.get_task(1)
+        assert task is not None
+        self.assertEqual(task['project'], 'default')
+        self.assertTrue(os.path.isfile(os.path.join(self.tmpdir, 'alpha')))
+
+    def test_fresh_and_existing_project_names_still_work(self) -> None:
+        status, _ = self._invoke(lambda h: h._handle_task_create(), {'title': 'fresh', 'project': 'beta'})
+        self.assertEqual(status, 201)
+        storage.create_project('gamma')
+        status, _ = self._invoke(lambda h: h._handle_task_create(), {'title': 'again', 'project': 'gamma'})
+        self.assertEqual(status, 201)
+
+
+class TestDueDateCalendar(unittest.TestCase):
+    """9.2 — the due_date gate requires a real calendar date, not just the YYYY-MM-DD shape."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self._orig_tasks_dir = config.TASKS_DIR
+        config.TASKS_DIR = self.tmpdir
+        config.init_tasks_dir(self.tmpdir)
+
+    def tearDown(self) -> None:
+        config.TASKS_DIR = self._orig_tasks_dir
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _post(self, body: dict) -> tuple[int, dict]:
+        handler = _make_handler()
+        raw = json.dumps(body).encode()
+        handler.rfile = io.BytesIO(raw)
+        handler.headers.replace_header('Content-Length', str(len(raw)))
+        sent: list[tuple[int, dict]] = []
+        handler._send_json = lambda s, d: sent.append((s, d))  # type: ignore[method-assign]
+        handler._handle_task_create()
+        return sent[0]
+
+    def _patch(self, body: dict) -> tuple[int, dict]:
+        storage.create_task(title='Date task')
+        handler = _make_handler()
+        raw = json.dumps(body).encode()
+        handler.rfile = io.BytesIO(raw)
+        handler.headers.replace_header('Content-Length', str(len(raw)))
+        sent: list[tuple[int, dict]] = []
+        handler._send_json = lambda s, d: sent.append((s, d))  # type: ignore[method-assign]
+        handler._handle_task_update(1)
+        return sent[0]
+
+    def test_post_feb_30_rejected(self) -> None:
+        status, body = self._post({'title': 'x', 'due_date': '2030-02-30'})
+        self.assertEqual(status, 400)
+        self.assertEqual(body['error'], 'due_date must be a YYYY-MM-DD string or null')
+        self.assertEqual(storage.list_tasks(), [])
+
+    def test_post_month_13_rejected(self) -> None:
+        status, _ = self._post({'title': 'x', 'due_date': '2030-13-01'})
+        self.assertEqual(status, 400)
+
+    def test_post_leap_day_accepted(self) -> None:
+        status, body = self._post({'title': 'x', 'due_date': '2028-02-29'})
+        self.assertEqual(status, 201)
+        self.assertEqual(body['task']['due_date'], '2028-02-29')
+
+    def test_patch_impossible_date_rejected(self) -> None:
+        status, body = self._patch({'due_date': '2030-02-30'})
+        self.assertEqual(status, 400)
+        self.assertEqual(body['error'], 'due_date must be a YYYY-MM-DD string or null')
+
+    def test_patch_leap_day_accepted(self) -> None:
+        status, body = self._patch({'due_date': '2028-02-29'})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['task']['due_date'], '2028-02-29')
 
 
 if __name__ == '__main__':

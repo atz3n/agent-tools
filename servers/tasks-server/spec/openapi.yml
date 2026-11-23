@@ -26,7 +26,7 @@ paths:
           required: false
           schema:
             type: string
-            enum: ["open", "in-progress", "closed"]
+            enum: ["open", "in-progress", "on-hold", "done", "closed"]
       responses:
         "200":
           description: List of tasks
@@ -42,8 +42,25 @@ paths:
                   count:
                     type: integer
                     description: Number of tasks returned
+        "400":
+          description: Invalid project filter (project names must be a single safe path segment)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "405":
           description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    head:
+      summary: Mirror GET /tasks without a body
+      responses:
+        "200":
+          description: Task list available (no body)
+        "400":
+          description: Invalid project filter (mirrors GET)
           content:
             application/json:
               schema:
@@ -69,15 +86,16 @@ paths:
                 status:
                   type: string
                   description: "Task status (default: \"open\")"
-                  enum: ["open", "in-progress", "closed"]
+                  enum: ["open", "in-progress", "on-hold", "done", "closed"]
                 priority:
                   type: string
-                  description: "Priority level (default: \"medium\")"
+                  description: "Priority level (default: \"medium\"; 400 otherwise)"
                   enum: ["low", "medium", "high"]
                 due_date:
                   type: string
                   nullable: true
-                  description: Due date in ISO format
+                  description: Due date as YYYY-MM-DD (400 otherwise)
+                  pattern: "^\\d{4}-\\d{2}-\\d{2}$"
                 tags:
                   type: array
                   items:
@@ -97,7 +115,7 @@ paths:
                   task:
                     $ref: "#/components/schemas/Task"
         "400":
-          description: Invalid request (missing title, bad JSON)
+          description: Invalid request (missing title, bad JSON, non-object JSON body, invalid Content-Length, unknown status or priority value, or a field with the wrong type)
           content:
             application/json:
               schema:
@@ -143,7 +161,10 @@ paths:
                 $ref: "#/components/schemas/Error"
     patch:
       summary: Update a task
-      description: Partial update of any task field.
+      description: |
+        Partial update of any task field. A `project` update moves the task file
+        into the new project folder; the (possibly now-empty) source project
+        directory is left in place.
       parameters:
         - name: id
           in: path
@@ -160,15 +181,20 @@ paths:
               properties:
                 title:
                   type: string
+                project:
+                  type: string
+                  description: "Move the task to a different project folder"
                 status:
                   type: string
-                  enum: ["open", "in-progress", "closed"]
+                  enum: ["open", "in-progress", "on-hold", "done", "closed"]
                 priority:
                   type: string
                   enum: ["low", "medium", "high"]
                 due_date:
                   type: string
                   nullable: true
+                  description: Due date as YYYY-MM-DD (400 otherwise)
+                  pattern: "^\\d{4}-\\d{2}-\\d{2}$"
                 tags:
                   type: array
                   items:
@@ -186,7 +212,7 @@ paths:
                   task:
                     $ref: "#/components/schemas/Task"
         "400":
-          description: Invalid request (bad JSON body)
+          description: Invalid request (bad JSON, non-object JSON body, invalid Content-Length, unknown status or priority value, or a field with the wrong type)
           content:
             application/json:
               schema:
@@ -205,6 +231,10 @@ paths:
                 $ref: "#/components/schemas/Error"
     delete:
       summary: Delete a task
+      description: |
+        Deletes the task file only. The project directory is never removed —
+        deleting a project's last task leaves the (now empty) project listed
+        by `GET /projects`.
       parameters:
         - name: id
           in: path
@@ -236,11 +266,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+    head:
+      summary: Mirror GET /tasks/{id} without a body
+      description: 200 when the task exists, 404 when it does not.
+      responses:
+        "200":
+          description: Task exists (no body)
+        "404":
+          description: Task not found (no body)
 
   /projects:
     get:
       summary: List all projects
-      description: Returns all project directories (folders containing task files).
+      description: Returns all project directories under TASKS_DIR. A directory is a project whether or not it currently holds task files — deleting or moving a task leaves its project directory in place.
       responses:
         "200":
           description: List of projects
@@ -261,6 +299,50 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+    post:
+      summary: Create a new project
+      description: >
+        Creates a project directory. The name must be a single safe path
+        segment (letter/digit first, then letters, digits, spaces, '-', '_',
+        '.'); anything else is rejected with 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Project folder name
+      responses:
+        "201":
+          description: Project created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project:
+                    type: string
+        "400":
+          description: Missing, empty, or unsafe project name (or non-object JSON body / invalid Content-Length)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "405":
+          description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    head:
+      summary: Mirror GET /projects without a body
+      responses:
+        "200":
+          description: Projects exist (no body)
 
   /ui:
     get:
@@ -279,6 +361,11 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+    head:
+      summary: Mirror GET /ui without a body
+      responses:
+        "200":
+          description: UI available (no body)
 
 components:
   schemas:
@@ -294,7 +381,7 @@ components:
         status:
           type: string
           description: Current status
-          enum: ["open", "in-progress", "closed"]
+          enum: ["open", "in-progress", "on-hold", "done", "closed"]
         priority:
           type: string
           description: Priority level
@@ -302,7 +389,8 @@ components:
         due_date:
           type: string
           nullable: true
-          description: Due date in ISO format
+          description: Due date as YYYY-MM-DD (400 otherwise)
+          pattern: "^\\d{4}-\\d{2}-\\d{2}$"
         tags:
           type: array
           items:

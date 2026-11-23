@@ -8,11 +8,11 @@ A lightweight application server that exposes task (project task) information fr
 |--------|------|-------------|
 | GET | `/task/data?id=<task_id>` | Task fields via `project.task.web_read` |
 | GET | `/task/messages?id=<id>` | Thread messages via `mail.thread.messages` |
-| POST | `/task/message?id=<id>` | Post a note to a thread via `project.task.message_post` |
+| POST | `/task/message?id=<id>` | Post a note to a thread via Odoo's `/mail/message/post` route |
 
 All other endpoints return **404 Not Found**.
 
-> **Note:** Only the HTTP methods listed in the table above are supported (GET, POST). Other methods return 405 Method Not Allowed.
+> **Note:** Only the HTTP methods listed in the table above are supported (GET, POST). Other methods — including HEAD — return 405 Method Not Allowed. OPTIONS and TRACE are not implemented and return 501 from the HTTP layer itself.
 
 ## Architecture
 
@@ -53,6 +53,8 @@ The proxy is reachable at `http://localhost:8087`.
 
 The credentials are stored as individual files in `./secrets/` (`odoo-db.txt`, `odoo-url.txt`, `odoo-user.txt`, `odoo-password.txt`). The `run-docker.sh` script reads these files and passes them as environment variables to the container.
 
+The proxy binds `0.0.0.0` inside Docker (the compose mapping publishes `127.0.0.1` only). When running the server directly on a host, set `BIND_HOST=127.0.0.1` to keep it localhost-only.
+
 The proxy manages its Odoo login session internally and refreshes it when it expires. The session lifetime defaults to 45 minutes and can be changed via the `ODOO_SESSION_TIMEOUT` environment variable (seconds).
 
 To rotate credentials:
@@ -73,15 +75,16 @@ python3 -m unittest tests.test_server -v
 
 Tests cover:
 - **Endpoint whitelist** — `/task/data`, `/task/messages`, `/task/message` allowed, all others rejected
-- **Blocked endpoints** — `/web/login`, `/web/dataset/*`, `/mail/thread/*`, `/mail/message_post`, root, health checks, etc.
+- **Blocked endpoints** — `/web/login`, `/web/dataset/*`, `/mail/thread/*`, `/mail/message/post`, root, health checks, etc.
 - **Query parameter handling** — `?id=3807` parsing, empty query strings
 - **Configuration** — port (hardcoded in docker-compose.yml), env var overrides
 - **Credential loading** — env var reading, missing var handling
 - **Logging** — format, timestamp, client IP
-- **Session management** — expiry detection, timeout
-- **HTTP method handling** — GET, POST, PATCH, PUT, DELETE exist
+- **Session management** — expiry detection, timeout, `Set-Cookie` scan across repeated headers
+- **HTTP method handling** — GET, POST, PATCH, PUT, DELETE, HEAD exist (HEAD gets the normal 405 + log line)
+- **Upstream errors** — backend failures surface as 502 + flat error + one log line, including non-JSON and non-UTF-8 upstream bodies
 - **Graceful shutdown** — signal handlers
-- **POST /task/message handler** — success, missing id, invalid id, missing body, invalid JSON, 502 errors
+- **POST /task/message handler** — success, missing id, invalid id, missing body, invalid JSON, non-object JSON body, non-string fields, invalid Content-Length, 502 errors
 
 ### Manual test
 
@@ -132,16 +135,16 @@ For reading thread messages:
 
 For posting messages to a task thread:
 
-- **Post a note** — `POST /task/message?id=<id>` via `project.task.message_post`
+- **Post a note** — `POST /task/message?id=<id>` via Odoo's `/mail/message/post` route
 - **Simple format** — `{ "body": "..." }` with optional `message_type` and `subtype_xmlid`
 - **Message types** — internal notes, public messages, email notifications
 
 ### Using the skills in harnesses
 
-To make the skills available to an agent, copy the skill directories into the agent's skills path, `~/.pi/agent/skills/`, preserving the feature subfolder:
+To make the skills available to an agent, copy the skill directories into the agent's skills path, `~/.pi/agent/skills/`, preserving the feature subfolder. Run these **from the repository root** (`cd "$(git rev-parse --show-toplevel)"` — not from `servers/odoo-proxy/`, where this README lives):
 
 ```bash
-# copy odoo skills
+# copy odoo skills (from the repo root)
 mkdir -p ~/.pi/agent/skills/odoo-proxy
 cp -r skills/odoo-proxy/odoo-get-task-data ~/.pi/agent/skills/odoo-proxy/
 cp -r skills/odoo-proxy/odoo-get-task-messages ~/.pi/agent/skills/odoo-proxy/
@@ -156,8 +159,8 @@ ls ~/.pi/agent/skills/odoo-proxy/odoo-get-task-messages/SKILL.md
 ls ~/.pi/agent/skills/odoo-proxy/odoo-post-task-message/SKILL.md
 ```
 
-If you keep this repo's skills elsewhere, symlink the feature folder instead:
+If you keep this repo's skills elsewhere, symlink the feature folder instead (works from any directory — `git rev-parse` resolves the repo root):
 
 ```bash
-ln -s "$(pwd)/skills/odoo-proxy" ~/.pi/agent/skills/odoo-proxy
+ln -s "$(git rev-parse --show-toplevel)/skills/odoo-proxy" ~/.pi/agent/skills/odoo-proxy
 ```

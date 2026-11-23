@@ -14,7 +14,11 @@ import time
 
 TARGET = "https://api.github.com"
 TOKEN = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "")
-PORT = int(os.environ.get("PROXY_PORT", "8086"))
+PORT = int(os.environ.get("PROXY_PORT") or "8086")
+# Inside Docker the image must bind all interfaces; compose's 127.0.0.1 port
+# mapping provides the localhost-only publish. Set BIND_HOST=127.0.0.1 when
+# running the server directly on a host.
+BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +38,7 @@ logger.addHandler(_handler)
 # ---------------------------------------------------------------------------
 
 
-def validate_token() -> None:
+def validate_config() -> None:
     """Exit with error if the GitHub token is not set."""
     if not TOKEN:
         print("ERROR: GITHUB_PERSONAL_ACCESS_TOKEN is not set", file=sys.stderr)

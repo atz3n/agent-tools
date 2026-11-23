@@ -12,3 +12,4 @@ services:
       - 127.0.0.1:8086:8086
     environment:
       - GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PERSONAL_ACCESS_TOKEN}
+      - PROXY_PORT=8086

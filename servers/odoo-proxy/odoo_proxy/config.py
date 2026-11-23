@@ -10,10 +10,15 @@ import time
 # Configuration
 # ---------------------------------------------------------------------------
 
-PORT = int(os.environ.get("PROXY_PORT", "8087"))
+PORT = int(os.environ.get("PROXY_PORT") or "8087")
+# Inside Docker the image must bind all interfaces; compose's 127.0.0.1 port
+# mapping provides the localhost-only publish. Set BIND_HOST=127.0.0.1 when
+# running the server directly on a host.
+BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")
 
 # Session timeout in seconds (default 45 min). Refreshed on 403/redirect.
-SESSION_TIMEOUT = int(os.environ.get("ODOO_SESSION_TIMEOUT", "2700"))
+# ``or`` guards the set-but-empty case (ODOO_SESSION_TIMEOUT= must not kill startup).
+SESSION_TIMEOUT = int(os.environ.get("ODOO_SESSION_TIMEOUT") or "2700")
 
 # ---------------------------------------------------------------------------
 # Logging
