@@ -4,6 +4,14 @@ A repository of lightweight proxy servers, agent skills, and templates for AI ag
 
 ---
 
+## Conventions
+
+- KISS, DRY, YAGNI — prefer the smallest elegant solution; no speculative abstractions, no unused knobs.
+- Stdlib-only for servers; no external dependencies unless truly necessary.
+- No unnecessary comments. Code should be self-documenting; comment only non-obvious intent.
+
+---
+
 ## Project Overview
 
 This repo provides **agent-facing tools** — small, focused services that expose a subset of external APIs through a local proxy. Each proxy runs in Docker, enforces an endpoint whitelist, and injects credentials internally so agents never handle secrets directly.
@@ -101,6 +109,7 @@ agent-tools/
 │   │   └── tasks-server/
 │   └── misc/                  # Miscellaneous utilities
 │       ├── codebase-review/   # Multi-pass review.md auditor
+│       ├── codebase-review-autopilot/  # review→fix→review loop in fresh pi sessions until review.md CLOSED (SKILL.md + scripts/)
 │       ├── loop-prompt/       # Interviews to define task + criteria, then writes a loop prompt
 │       └── incident-report/   # SKILL.md + template.md — evidence-first post-mortems with TLDR/ELI5
 ├── templates/
@@ -229,7 +238,7 @@ A REST API for managing tasks stored as markdown files with YAML frontmatter. Ta
 | POST | `/projects` | Create a new project |
 | GET | `/ui` | Serve the web UI |
 
-All other endpoints return **404 Not Found**. (The UI's static assets are served from `/css/` and `/js/`.)
+All other endpoints return **404 Not Found**. (The UI's static assets are served from `/css/` and `/js/`.) `HEAD` is supported on every GET path and mirrors the GET status without a body.
 
 ### Task File Format
 
@@ -254,7 +263,7 @@ The login form does not submit when the password field is empty.
 
 ### Storage
 
-Tasks are stored under `/data/tasks/` (configurable via `TASKS_DIR` env var). File names follow the `{id:03d}_{title}.md` pattern (e.g. `001_fix-login.md`). A `.counter.json` file persists the next auto-incrementing ID across restarts.
+Tasks are stored under `/data/tasks/` (configurable via `TASKS_DIR` env var). File names follow the `{id:03d}_{title}.md` pattern (e.g. `001_fix-login.md`). A `.counter.json` file persists the next auto-incrementing ID across restarts (counter read/write is lock-guarded). Project names are validated as single safe path segments — anything containing `/`, `..`, or a leading dot is rejected with 400 so no request can write, move, or read task files outside `TASKS_DIR`.
 
 ### Web UI
 
@@ -295,7 +304,7 @@ To install: copy skill directories into `~/.pi/agent/skills/`, preserving the fe
 | **odoo-proxy** | `odoo-get-task-data`, `odoo-get-task-messages`, `odoo-post-task-message` |
 | **project** | `project-new-project`, `project-write-spec`, `project-architecture`, `project-implement`, `project-refine`, `project-qa`, `project-help`, `project-doctor`, `project-autopilot` (unattended orchestration in fresh `pi -p` sessions on an `autopilot/*` branch) |
 | **tasks-server** | `tasks-server` |
-| **misc** | `codebase-review`, `loop-prompt`, `incident-report` |
+| **misc** | `codebase-review`, `codebase-review-autopilot`, `loop-prompt`, `incident-report` |
 
 ---
 
@@ -317,9 +326,9 @@ To use: copy the template into a project and run the initialization prompt from 
 
 - **Package-based structure**: Each proxy is a Python package (`github_proxy/`, `odoo_proxy/`, `tasks_server/`) with separate modules: `config.py` (configuration and logging), `whitelist.py` (endpoint patterns), and `server.py` (HTTP handler). The odoo-proxy also has `session.py` for Odoo session management. The tasks-server has `storage.py` for markdown file CRUD operations.
 - **No external dependencies**: All code uses only Python stdlib (`http.server`, `json`, `re`, `os`, `signal`, `http.client`, `urllib.parse`, etc.).
-- **Endpoint whitelisting**: All services use compiled regex patterns to whitelist allowed paths. Non-matching paths return 403 (github-proxy), 404 (odoo-proxy, tasks-server), or 405 (tasks-server for unsupported methods).
-- **Configuration via env vars**: `PROXY_PORT`, `GITHUB_PERSONAL_ACCESS_TOKEN` (github-proxy), `ODOO_DB`, `ODOO_URL`, `ODOO_USER`, `ODOO_PASSWORD`, `ODOO_SESSION_TIMEOUT` (odoo-proxy), `TASKS_DIR` (tasks-server), `OPENROUTER_API_KEY`, `MLX_SERVE_URL`, `LLM_PROXY_TOKEN`, `ALLOWED_MODELS`, `LLM_UPSTREAM_TIMEOUT` (llm-proxy). Credentials are loaded from `secrets/` files by the Docker scripts and passed as env vars.
-- **Graceful shutdown**: All servers register SIGTERM/SIGINT handlers that call `server.shutdown()`.
+- **Endpoint whitelisting**: All services use compiled regex patterns to whitelist allowed paths. Non-matching paths return 404 with a uniform `{"error": "..."}` body in all four services; 405 for a whitelisted path with an unsupported method (odoo-proxy, tasks-server, llm-proxy; github-proxy forwards every method it implements, including HEAD). OPTIONS and TRACE are unimplemented everywhere and return 501 from the HTTP layer (no proxy log line).
+- **Configuration via env vars**: `PROXY_PORT`, `BIND_HOST` (all four), `GITHUB_PERSONAL_ACCESS_TOKEN` (github-proxy), `ODOO_DB`, `ODOO_URL`, `ODOO_USER`, `ODOO_PASSWORD`, `ODOO_SESSION_TIMEOUT` (odoo-proxy), `TASKS_DIR` (tasks-server), `OPENROUTER_API_KEY`, `MLX_SERVE_URL`, `LLM_PROXY_TOKEN`, `ALLOWED_MODELS`, `LLM_UPSTREAM_TIMEOUT` (llm-proxy). Credentials are loaded from `secrets/` files by the Docker scripts and passed as env vars.
+- **Graceful shutdown**: All servers register SIGTERM/SIGINT handlers; the handler dispatches `server.shutdown()` to a short-lived background thread (calling it on the signal handler's own thread deadlocks against `serve_forever()`), and all four run `ThreadingHTTPServer` with `daemon_threads` so concurrent clients never head-of-line-block and in-flight requests can't block shutdown.
 - **Logging**: All requests log to `stderr` in format `[proxy] <ISO-8601> <METHOD> <PATH> <STATUS> from <IP>`.
 
 ### Docker
@@ -327,13 +336,13 @@ To use: copy the template into a project and run the initialization prompt from 
 - All four services use `python:3.14-alpine` base images.
 - Docker Compose files bind to `127.0.0.1` to avoid exposing ports to the host network.
 - Build scripts use `docker compose -p <project-name>` for project-scoped container naming.
-- Each server has scripts for: `build-docker.sh`, `run-docker.sh`, `pause-docker.sh`, `stop-docker.sh`, `lint-project.sh`, `test-project.sh`, `clean-project.sh`.
+- Each server has scripts for: `build-docker.sh`, `run-docker.sh`, `pause-docker.sh` (compose `stop` — stops without removing), `stop-docker.sh`, `lint-project.sh`, `test-project.sh`, `coverage-project.sh`, `clean-project.sh`.
 
 ### Tests
 
 - Tests use `unittest` with `unittest.mock` for patching.
 - Tests cover: endpoint whitelist (allowed + blocked paths), query parameter handling, configuration loading, credential loading (env vars validated at startup), logging format, HTTP method support, session management (odoo-proxy), graceful shutdown, frontmatter parsing, task CRUD, project management (list, create), counter persistence, handler methods (tasks-server), route resolution, prefix stripping, credential injection/stripping, model allowlist, token gate, SSE passthrough, and 502 handling (llm-proxy).
-- Tests import the server module directly by manipulating `sys.path` — no actual server is started.
+- Tests import the server module directly (tasks-server prepends `sys.path`; the others import through the package directory/cwd) — no actual server is started.
 
 ### Code Quality
 
@@ -390,7 +399,7 @@ Containers are grouped under the `pia` project by plain `docker --label` stampin
 
 ### github-proxy
 
-- **Whitelist**: 29 regex patterns covering PR CRUD, reviews, review comments (including replies and reactions), review reactions, merge, commits, files, requested reviewers (list/add/remove via `/pulls/{n}/requested_reviewers`, with the hyphenated `requested-reviewers` alias auto-normalized), issue CRUD, issue comments (incl. comment-scoped get/update/delete at `/issues/comments/{id}`), issue labels/assignees, repository labels, and `/user`.
+- **Whitelist**: 29 regex patterns covering PR CRUD, reviews, review comments (incl. comment-scoped get/update/delete at `/pulls/comments/{id}`, plus replies and reactions), review reactions, merge, commits, files, requested reviewers (list/add/remove via `/pulls/{n}/requested_reviewers`, with the hyphenated `requested-reviewers` alias auto-normalized), issue CRUD, issue comments (incl. comment-scoped get/update/delete at `/issues/comments/{id}`), issue labels/assignees, repository labels, and `/user`.
 - **Auth**: Bearer token injected from `GITHUB_PERSONAL_ACCESS_TOKEN` env var.
 - **Headers**: Combines duplicate `Accept` headers, strips hop-by-hop headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`), sets `User-Agent: pr-proxy/1.0`.
 - **Network skill**: Auto-detects Docker environment and sets `PROXY` to `host.docker.internal:8086` when running inside a container.
@@ -398,7 +407,7 @@ Containers are grouped under the `pia` project by plain `docker --label` stampin
 ### odoo-proxy
 
 - **Session management**: Two-step Odoo login (GET `/web/login` for CSRF token → POST with credentials). Session cookies are persisted and refreshed on expiry (45 min default, configurable via `ODOO_SESSION_TIMEOUT`).
-- **RPC**: Uses Odoo's `/web/dataset/call_kw` JSON-RPC endpoint for `project.task.web_read` and `/mail/thread/messages` for fetching messages.
+- **RPC**: Uses Odoo's `/web/dataset/call_kw` JSON-RPC endpoint for `project.task.web_read` and `/mail/thread/messages` for fetching messages; notes are posted through Odoo's dedicated `/mail/message/post` route (call_kw cannot record-target `message_post` — `body` is its first positional parameter).
 - **Configuration**: Reads 4 environment variables (`ODOO_DB`, `ODOO_URL`, `ODOO_USER`, `ODOO_PASSWORD`), which are loaded from `secrets/` files by the Docker scripts. Validates all exist at startup.
 - **Endpoints**: Only `/task/data?id=<task_id>`, `/task/messages?id=<id>`, and `/task/message?id=<id>` (POST) are allowed. All others return 404.
 
@@ -416,8 +425,8 @@ Containers are grouped under the `pia` project by plain `docker --label` stampin
 - **Route table**: `whitelist.py` defines `Route` entries (prefix → target + `(method, path)` whitelist + optional path aliases). The prefix is stripped and aliases applied before forwarding — the public `/openrouter/v1/chat/completions` is rewritten to openrouter.ai's `/api/v1/chat/completions`, while `/mlx-serve` passes through unchanged; unknown prefixes 404, whitelisted paths with the wrong method 405.
 - **No translation**: requests/responses pass through byte-for-byte in the provider's native dialect; SSE (`text/event-stream`) responses are copied chunk-by-chunk with a flush per chunk. The proxy never rewrites model ids or picks models — that stays in the agent.
 - **Credential handling**: the OpenRouter key is injected as a Bearer token (client `Authorization` overridden); for credential-free routes (mlx-serve) client auth is stripped. A route with missing credentials is disabled (404) rather than failing at startup.
-- **Policy**: optional `ALLOWED_MODELS` list polices the `model` field of `/chat/completions` bodies (403 if not listed); optional `LLM_PROXY_TOKEN` gates all requests with `Authorization: Bearer <token>` (401 otherwise) so other host processes can't ride the proxy.
-- **HTTP/1.0 responses**: `Transfer-Encoding` is stripped, so connection close is what signals end-of-body for streamed responses; `ThreadingHTTPServer` with daemon threads keeps concurrent sessions independent of shutdown.
+- **Policy**: optional `ALLOWED_MODELS` list polices the `model` field of completion bodies — both `/chat/completions` and `/messages` dialects, on every route (403 if not listed; 400 if the list is set but the body carries no parsable model); optional `LLM_PROXY_TOKEN` gates all requests with `Authorization: Bearer <token>` (401 otherwise, constant-time compare) so other host processes can't ride the proxy.
+- **HTTP/1.0 responses**: `Transfer-Encoding` is stripped, so connection close is what signals end-of-body for streamed responses; `ThreadingHTTPServer` with daemon threads (all four services) keeps concurrent sessions independent of shutdown.
 
 ---
 
