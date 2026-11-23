@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: github-manage-issues
 description: Call the GitHub PR proxy server via REST API to list, create, get, update, comment on, label, and assign issues through the local proxy on port 8086.
 ---
@@ -202,7 +203,7 @@ curl -s -w "\nHTTP_CODE: %{http_code}" $PROXY/repos/{owner}/{repo}/issues/999999
 
 Common error responses:
 - `404` — issue not found or endpoint blocked
-- `403` — endpoint not allowed (non-PR/issue path)
+- `502` — proxy could not reach GitHub (`upstream request failed`); retry
 - `422` — validation error (e.g. unknown label name; check response body for details)
 
 ## Automatic Issue Posting

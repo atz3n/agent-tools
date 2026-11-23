@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: tasks-server
 description: Call the tasks server REST API to manage tasks stored as markdown files through the local proxy on port 8088.
 ---
@@ -118,10 +119,10 @@ Only set these fields to different values when the user explicitly requests it.
 
 ### Optional fields
 
-- `project` (string) — project folder name (default: "default")
-- `status` (string) — task status (default: "open")
-- `priority` (string) — priority level (default: "medium")
-- `due_date` (string) — ISO date or null
+- `project` (string) — project folder name (default: "default"); must be a single safe path segment (no `/`, `..`, or leading dots) — otherwise 400
+- `status` (string) — one of `open`, `in-progress`, `on-hold`, `done`, `closed` (default: "open"); any other value returns 400
+- `priority` (string) — one of `low`, `medium`, `high` (default: "medium"); any other value returns 400
+- `due_date` (string) — `YYYY-MM-DD` date or null; anything else returns 400
 - `tags` (array) — list of tag strings
 - `description` (string) — task description
 
@@ -135,7 +136,7 @@ curl -s -X PATCH "$PROXY/tasks/1" \
   -d '{"status": "closed"}' | jq '.task'
 ```
 
-Partial update — only include the fields you want to change. Returns the updated task or 404.
+Partial update — only include the fields you want to change. Returns the updated task or 404. An unknown `status` or `priority` value returns 400. Setting `project` moves the task file into the target project folder (create the project first with `POST /projects` if it does not exist yet); an unsafe project name (path separators, `..`) returns 400. The (possibly now-empty) source project directory is left in place.
 
 ## Delete Task
 
@@ -143,7 +144,7 @@ Partial update — only include the fields you want to change. Returns the updat
 curl -s -X DELETE "$PROXY/tasks/1" | jq '.'
 ```
 
-Returns `{"deleted": true, "id": 1}` on success, or 404 if not found.
+Returns `{"deleted": true, "id": 1}` on success, or 404 if not found. Only the task file is removed — deleting a project's last task leaves the (now empty) project listed by `GET /projects`.
 
 ## List Projects
 
@@ -151,7 +152,7 @@ Returns `{"deleted": true, "id": 1}` on success, or 404 if not found.
 curl -s "$PROXY/projects" | jq '.'
 ```
 
-Returns all project directories (folders containing task files):
+Returns all project directories (a directory is a project whether or not it currently holds tasks):
 
 ```json
 {

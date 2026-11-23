@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: project-autopilot
 description: Autonomously run the project pipeline (write-spec → architecture → implement → qa) for features in fresh pi sessions on a dedicated git branch — build ONE feature (e.g. "1.4"), a whole PHASE (e.g. "phase 1"), or the "next" pending feature(s). Pre-flight checks feature dependencies (PLAN.md + spec Status lines) and external dependencies (docker, network, credentials) before calling any project skill, then loops implement↔qa until each feature is Approved and hands off the branch for review/PR. Supports `--dry-run` (pre-flight + plan only). Use when asked to build/implement a feature or phase autonomously/unattended.
 ---

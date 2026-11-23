@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: odoo-get-task-data
 description: Call the Odoo proxy server via REST API to read task fields through the local proxy on port 8087.
 ---

@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: odoo-get-task-messages
 description: Call the Odoo proxy server via REST API to read thread messages through the local proxy on port 8087.
 ---

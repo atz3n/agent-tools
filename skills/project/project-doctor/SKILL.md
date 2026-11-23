@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: project-doctor
 description: Read-only consistency audit of the project workflow data — cross-checks spec statuses against section content, roadmap registration and feature IDs, dependency order, and data hygiene, then routes every finding to the skill or manual edit that fixes it. Use when the project state looks inconsistent, after hand-editing PLAN.md or specs, or before a release.
 ---

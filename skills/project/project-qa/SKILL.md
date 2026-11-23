@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: project-qa
 description: Test a feature against its acceptance criteria, find bugs, and perform a security audit. Use after implementation is done. Pass a feature name or ID as argument.
 ---

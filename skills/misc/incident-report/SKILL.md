@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: incident-report
 description: Write a thorough, evidence-first incident report (post-mortem) for an outage, silent failure, degraded service, or misconfiguration — with a TLDR and an ELI5 section up top, then timeline, log/table-backed evidence, root cause with contributing factors and ruled-out hypotheses, quantified impact, and concrete remediation. Use when asked to write an incident report, post-mortem, post-incident review, or to document an outage/bug that already happened. Pass a short description of the incident and/or paths to logs as argument.
 ---

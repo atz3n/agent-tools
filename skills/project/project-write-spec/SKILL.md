@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: project-write-spec
 description: Write a full feature specification for a feature. Works for features already on the PLAN.md roadmap and for features added later. Use when a roadmap feature is ready to be specced or a new feature must be added mid-project. Pass a feature name or ID as argument.
 ---
