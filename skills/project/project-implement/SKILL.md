@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: project-implement
 description: Implement a feature from its spec and tech design — data layer, logic, and UI in one workflow, using the project's own stack and conventions. Use after architecture is designed. Pass a feature name or ID as argument.
 ---

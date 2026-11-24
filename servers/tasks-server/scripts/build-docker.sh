@@ -13,7 +13,7 @@ IMAGE_NAME="tasks-server"
 # DEFINES
 ###################################################################################################
 
-HERE="$(pwd)/$(dirname $0)"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 DOCKER_FILE="${HERE}/../docker/Dockerfile"
 CONTEXT_PATH="${HERE}/.."
 

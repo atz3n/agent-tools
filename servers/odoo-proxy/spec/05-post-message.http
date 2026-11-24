@@ -1,5 +1,5 @@
 # Odoo Proxy — Post Message
-# Posts a note to a ticket thread via /mail/message_post RPC endpoint.
+# Posts a note to a ticket thread via /mail/message/post — the route Odoo's own web client uses (not /web/dataset/call_kw).
 # Replace thread_id and body with your values.
 
 POST my.odoo.url/mail/message/post HTTP/1.1

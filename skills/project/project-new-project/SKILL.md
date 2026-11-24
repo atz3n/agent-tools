@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: project-new-project
 description: Plan a new project from an idea. Interviews the user, then writes PLAN.md — a structured roadmap with phases, features, dependencies, and acceptance criteria that agents can follow later. Use when starting a project from scratch or when the repo has no PLAN.md yet.
 ---

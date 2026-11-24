@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: project-refine
 description: Always use when the user wants to discuss an existing feature or specification. Open an existing feature spec to improve, extend, or fundamentally challenge it. Pass a feature name or ID as argument (e.g. /skill:project-refine 2.3).
 ---

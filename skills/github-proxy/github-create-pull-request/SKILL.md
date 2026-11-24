@@ -1,6 +1,7 @@
 ---
+disable-model-invocation: true
 name: github-create-pull-request
-description: Call the GitHub PR proxy server via REST API to create, update, delete, merge, or list pull requests through the local proxy on port 8086.
+description: Call the GitHub PR proxy server via REST API to create, update, close, merge, or list pull requests through the local proxy on port 8086.
 ---
 
 This skill provides instructions for calling the GitHub PR proxy server directly via REST API. The proxy runs on `localhost:8086` and injects your PAT automatically — no authentication header needed.
@@ -119,13 +120,17 @@ curl -s -X PATCH $PROXY/repos/{owner}/{repo}/pulls/42 \
 
 Fields: `title`, `body`, `state` (`open`/`closed`), `base` (target branch).
 
-## Delete a Pull Request
+## Close a Pull Request
+
+GitHub has no PR-delete endpoint — close it instead (the proxy forwards this unchanged):
 
 ```bash
-curl -s -X DELETE $PROXY/repos/{owner}/{repo}/pulls/42
+curl -s -X PATCH $PROXY/repos/{owner}/{repo}/pulls/42 \
+  -H "Content-Type: application/json" \
+  -d '{"state":"closed"}' | jq '.'
 ```
 
-Returns `204 No Content` on success.
+Returns the updated PR object with `"state": "closed"`.
 
 ## List Pull Request Files
 
@@ -191,7 +196,8 @@ curl -s -w "\nHTTP_CODE: %{http_code}" $PROXY/repos/{owner}/{repo}/pulls/999999
 
 Common error responses:
 - `404` — PR not found or endpoint blocked
-- `403` — endpoint not allowed (non-PR path)
+- `404` — endpoint not allowed (non-PR path)
+- `502` — proxy could not reach GitHub (`upstream request failed`); retry
 - `422` — validation error (check response body for details)
 
 ## Automatic PR Posting

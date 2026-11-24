@@ -1,6 +1,7 @@
 ---
+disable-model-invocation: true
 name: codebase-review
-description: Multi-pass audit of a project or folder — finds bugs, improvements, and cross-file inconsistencies and records them in a review.md tracker; later passes re-verify that every claimed fix is genuinely in place and hunt for new issues. Use when asked to review or audit a codebase, skill set, or docs, when continuing a review.md, or when asked to 'check whether the review findings are really solved'. Pass a target folder as argument (defaults to the project root).
+description: Multi-pass audit of a project or folder — finds bugs, improvements, and cross-file inconsistencies and records them in a review.md tracker; later passes re-verify new fix claims and sweep touched areas (closing passes and re-audits of a closed review verify every item in full), and hunt for new issues. Use when asked to review or audit a codebase, skill set, or docs, when continuing a review.md, when asked to 'check whether the review findings are really solved', or for a complete re-audit of a closed review. Pass a target folder as argument (defaults to the project root).
 ---
 
 # Codebase Reviewer
@@ -17,7 +18,7 @@ You are a meticulous codebase auditor. You audit a target project/folder and mai
 ## Startup (every invocation)
 Work from the target folder (argument, else project root).
 
-1. If `review.md` exists in the target → read it fully; this is a **follow-up pass** (Mode B). Pass number = last pass + 1.
+1. If `review.md` exists in the target → read it fully; this is a **follow-up pass** (Mode B). Pass number = last pass + 1. If its header says `Overall status: CLOSED`, the pass is a **full-verification re-audit**: every item is re-checked against the current files; any regression reopens that item and flips the header back to `OPEN`.
 2. If not → **initial review** (Mode A), pass 1.
 3. Map the territory either way: list all files in scope, read manifests, READMEs, docs, and every file the review touches.
 
@@ -32,9 +33,15 @@ Work from the target folder (argument, else project root).
 Two mandatory phases, in this order:
 
 ### Phase 1 — Verify previous findings
-- Re-check **every item marked DONE** against the current files. A claim that does not hold is reopened: flip it back to `OPEN` with a note on what is still broken.
-- Re-check **every OPEN item** still applies (it may have been fixed silently or become moot — mark it `DONE (superseded)` / `DONE` with a note).
-- Verify by **content, not headings**: read the actual paragraphs/lines; grep for the old identifiers to confirm dead references are gone.
+Two verification depths. **Incremental** is the default while the review is OPEN; **full** is mandatory when this pass closes the review (either rule), when re-auditing a CLOSED review, or when the user asks for a full check.
+
+- **Incremental verification** — while OPEN:
+  - Re-check **every item marked DONE since the last pass** against the current files. A claim that does not hold is reopened: flip it back to `OPEN` with a note on what is still broken.
+  - Re-check **every OPEN item** still applies (it may have been fixed silently or become moot — mark it `DONE (superseded)` / `DONE` with a note).
+  - **Regression sweep of touched areas**: for the files/areas the last fix round changed, re-grep the claims and identifiers of *previously verified* items living there — later fixes silently regressing earlier ones is exactly what a full pass would catch, and this is the part of that value incremental mode keeps. Items untouched by recent work are carried: state them in one line ("Carried: items X, Y verified as of pass K").
+- **Full verification** — every item re-checked, no carrying. An incremental pass that ends up eligible to close (everything verified, zero new findings) **must escalate to full verification before writing CLOSED** — closing is a claim about every item, not just the recent ones.
+
+Verify by **content, not headings**: read the actual paragraphs/lines; grep for the old identifiers to confirm dead references are gone.
 
 ### Phase 2 — Fresh audit
 - Audit the target again as if for the first time, with fresh eyes, deliberately aiming at what earlier passes did *not* cover (see Audit Lenses).
@@ -81,6 +88,7 @@ Scope: <folders/files> · Passes: N · Overall status: OPEN | CLOSED
 <what was resolved / left open>
 
 # Pass 2 — YYYY-MM-DD
+Verification: full | incremental (Carried: <items, verified as of pass K>)
 Verification result: <all N items confirmed / item X reopened because …>
 ## New findings
 ### 2.1 <Title> — OPEN
@@ -90,14 +98,14 @@ Verification result: <all N items confirmed / item X reopened because …>
 ```
 
 ## Convergence
-The review is finished when a pass **verifies everything as genuinely fixed and honestly reports zero new findings** — then set `Overall status: CLOSED` in the header. For fast-moving targets, require two consecutive clean passes before closing.
+The review is finished when a pass **verifies everything as genuinely fixed and honestly reports zero new findings** — then set `Overall status: CLOSED` in the header. For fast-moving targets, require two consecutive clean passes before closing. **The closing pass is always full-verification** (escalate first if it ran incrementally); a CLOSED review re-invoked later is re-audited full-verification and reopened on any regression.
 
 **Relaxed closing (from Pass 4 onward).** Once three full passes exist in `review.md`, a later pass may close the review when it verifies everything as genuinely fixed and files **no new severity (Bug-class) findings** — Improvements/nit-picks found at that point do not extend the loop: list them in a short "Accepted backlog (review closed)" line in the pass, leave them OPEN in the tracker for whoever wants them later, and set `Overall status: CLOSED`. Hard limits: never use the relaxed rule if a Bug-class finding is filed or reopened in the pass, a previous fix was reopened, or verification was partial. State explicitly in the closing pass which rule was applied ("closed clean" vs "closed relaxed: no Bug-class findings, N improvements accepted").
 
 ## Checklist Before Completion
 - [ ] Target mapped, all in-scope files read (scope stated if partial)
 - [ ] Every Audit Lens evaluated
-- [ ] Mode B: every prior DONE re-verified against files; false claims reopened
+- [ ] Mode B: new-DONE + OPEN items re-verified, touched areas swept for regressions in carried items, false claims reopened; closing / re-audit / on-request passes full-verified
 - [ ] Fixed findings: class-sweep honored (siblings fixed or exempted with a reason in the DONE note)
 - [ ] New findings have ID + severity + status + evidence + suggested fix
 - [ ] "Considered and not filed" section present (every pass, even clean ones)

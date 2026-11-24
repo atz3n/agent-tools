@@ -38,7 +38,7 @@ The rest of the `pia` surface is routine lifecycle management: `create`, `start/
 
 Handing an agent a GitHub token or an Odoo login is risky and noisy: the credential ends up in context windows, logs, and shell history, and the agent can call far more than it needs. These proxies flip that around:
 
-- **Least API surface** — every path outside a small regex whitelist is refused (403/404/405). The github-proxy, for example, only speaks PR and review endpoints.
+- **Least API surface** — every path outside a small regex whitelist is refused (404/405, uniform `{"error": …}` body). The github-proxy, for example, only speaks PR and review endpoints.
 - **Credentials never leave the container** — PATs and logins live in gitignored `secrets/` files, are injected server-side, and agents authenticate by talking to `localhost`.
 - **Zero dependencies** — stdlib-only Python, so images are tiny, audits are trivial, and nothing rots.
 - **Agent-ready** — each service ships matching `SKILL.md` files so any agent can learn the API by reading one markdown file and calling it with `curl`.

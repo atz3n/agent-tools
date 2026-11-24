@@ -12,14 +12,18 @@ import time
 # Configuration
 # ---------------------------------------------------------------------------
 
-PORT = int(os.environ.get("PROXY_PORT", "8088"))
+PORT = int(os.environ.get("PROXY_PORT") or "8088")
 TASKS_DIR = os.environ.get("TASKS_DIR", "/data/tasks/")
+# Inside Docker the image must bind all interfaces; compose's 127.0.0.1 port
+# mapping provides the localhost-only publish. Set BIND_HOST=127.0.0.1 when
+# running the server directly on a host.
+BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
-logger = logging.getLogger("tasks-proxy")
+logger = logging.getLogger("tasks-server")
 logger.setLevel(logging.INFO)
 _handler = logging.StreamHandler(sys.stderr)
 _handler.setFormatter(logging.Formatter("[proxy] %(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ"))

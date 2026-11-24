@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: project-help
 description: Context-aware guide that tells you where you are in the project workflow and what to do next. Use anytime you're unsure.
 ---

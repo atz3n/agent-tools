@@ -17,16 +17,16 @@ All routes expose a uniform `/<provider>/v1/...` prefix. Where the upstream's ow
 | `/openrouter` | `/v1/model/{author}/{slug}` | GET | `/api/v1/model/{author}/{slug}` | | Model details (singular `model`, per spec) |
 | `/openrouter` | `/v1/models/{author}/{slug}/endpoints` | GET | `/api/v1/models/{author}/{slug}/endpoints` | | Model endpoint metadata |
 | `/openrouter` | `/v1/providers` | GET | `/api/v1/providers` | | Provider metadata |
-
-> `/key` and `/generation` are **not** whitelisted: reached through the proxy's injected credential they expose key identity, spending limits and request history to any caller. pi never needs them — query openrouter.ai directly with the real key for account info.
 | `/mlx-serve` | `/v1/chat/completions` | POST | *(same)* | `http://host.docker.internal:11234` (env `MLX_SERVE_URL`) | OpenAI-compatible completions on the local model server. Client auth is stripped. |
 | `/mlx-serve` | `/v1/messages` | POST | *(same)* | | Anthropic dialect — streaming, tool calling, extended thinking. |
 | `/mlx-serve` | `/v1/models` | GET | *(same)* | | Model catalog (loaded models + capabilities) |
 | `/mlx-serve` | `/health` | GET | *(same)* | | Health check |
 
+> `/key` and `/generation` are **not** whitelisted: reached through the proxy's injected credential they expose key identity, spending limits and request history to any caller. pi never needs them — query openrouter.ai directly with the real key for account info.
+
 The mlx-serve route deliberately omits the server's admin surface — `POST /v1/load-model`, `POST /v1/unload-model` and `POST /v1/models/rescan` would let an agent unload the very model pi is running on.
 
-The route prefix is stripped before forwarding, so `/openrouter/v1/chat/completions` → `https://openrouter.ai/api/v1/chat/completions` (alias) and `/mlx-serve/v1/models` → `http://host.docker.internal:11234/v1/models` (pass-through). The upstream-native form (`/openrouter/api/v1/...`) is accepted too. Unknown prefixes and non-whitelisted paths return **404**; a whitelisted path with the wrong method returns **405**. The `/openrouter` route is disabled (404) while `OPENROUTER_API_KEY` is unset.
+The route prefix is stripped before forwarding, so `/openrouter/v1/chat/completions` → `https://openrouter.ai/api/v1/chat/completions` (alias) and `/mlx-serve/v1/models` → `http://host.docker.internal:11234/v1/models` (pass-through). The upstream-native form (`/openrouter/api/v1/...`) is accepted too. Unknown prefixes and non-whitelisted paths return **404**; a whitelisted path with the wrong method (including HEAD) returns **405**; OPTIONS and TRACE are not implemented and return 501 from the HTTP layer itself. The `/openrouter` route is disabled (404) while `OPENROUTER_API_KEY` is unset.
 
 ## Setup
 
@@ -55,8 +55,9 @@ echo "some-random-token" > secrets/llm-proxy-token.txt
 | `OPENROUTER_API_KEY` | — | Injected into `/openrouter` requests; empty disables the route |
 | `MLX_SERVE_URL` | `http://host.docker.internal:11234` | mlx-serve route target |
 | `LLM_PROXY_TOKEN` | — | Optional client gate (see above) |
-| `ALLOWED_MODELS` | _(any)_ | Comma-separated model allowlist for `/chat/completions` (applies to all routes) |
+| `ALLOWED_MODELS` | _(any)_ | Comma-separated model allowlist for completion bodies — both `/chat/completions` and `/messages` dialects, all routes. Strict: with a non-empty list, a body without a parsable `model` is rejected **400** |
 | `LLM_UPSTREAM_TIMEOUT` | `600` | Upstream read timeout (seconds) — long, for reasoning models |
+| `BIND_HOST` | `0.0.0.0` | Bind address. Inside Docker `0.0.0.0` is required and compose publishes `127.0.0.1` only; set `127.0.0.1` when running directly on a host |
 
 ## Security posture — open by default (deliberate)
 

@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: odoo-post-task-message
 description: Call the Odoo proxy server via REST API to post a note message to a ticket thread through the local proxy on port 8087.
 ---

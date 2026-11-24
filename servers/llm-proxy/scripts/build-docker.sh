@@ -13,9 +13,9 @@ IMAGE_NAME="llm-proxy"
 # DEFINES
 ###################################################################################################
 
-HERE="$(pwd)/$(dirname $0)"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 DOCKER_FILE="${HERE}/../docker/Dockerfile"
-CONEXT_PATH="${HERE}/.."
+CONTEXT_PATH="${HERE}/.."
 
 
 ###################################################################################################
@@ -23,5 +23,5 @@ CONEXT_PATH="${HERE}/.."
 ###################################################################################################
 
 echo "[INFO] Building image ${IMAGE_NAME}..."
-docker build -f ${DOCKER_FILE} ${CONEXT_PATH} -t ${IMAGE_NAME}
+docker build -f ${DOCKER_FILE} ${CONTEXT_PATH} -t ${IMAGE_NAME}
 echo "[INFO] Done."

@@ -1,0 +1,10 @@
+# Build context hygiene — the Dockerfile only COPYs the package (and ui/).
+secrets/
+data/
+__pycache__/
+*.py[cod]
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/

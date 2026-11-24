@@ -31,8 +31,8 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --ruff       Run ruff lint check (default: enabled)"
       echo "  --no-ruff    Skip ruff lint check"
-      echo "  --pyright    Run pyright type checking"
-      echo "  --no-pyright Skip pyright type checking (default)"
+      echo "  --pyright    Run pyright type checking (default: enabled)"
+      echo "  --no-pyright Skip pyright type checking"
       echo "  --fix        Auto-fix ruff errors where possible"
       echo "  --no-fix     Do not auto-fix (default)"
       echo "  --help       Display this help message"
@@ -51,7 +51,7 @@ done
 # DEFINES
 ###################################################################################################
 
-HERE="$(pwd)/$(dirname $0)"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 
 ###################################################################################################
@@ -66,13 +66,13 @@ echo "[INFO] Linting ${PROJECT_NAME}..."
 
 if $RUN_RUFF; then
   echo "[INFO] Running ruff check..."
-  if ! python -m ruff check . ; then
+  if ! python3 -m ruff check . ; then
     FAILED=true
   fi
 
   if $AUTO_FIX; then
     echo "[INFO] Running ruff check --fix..."
-    if ! python -m ruff check --fix . ; then
+    if ! python3 -m ruff check --fix . ; then
       FAILED=true
     fi
   fi
@@ -80,7 +80,7 @@ fi
 
 if $RUN_PYRIGHT; then
   echo "[INFO] Running pyright..."
-  if ! python -m pyright . ; then
+  if ! python3 -m pyright . ; then
     FAILED=true
   fi
 fi

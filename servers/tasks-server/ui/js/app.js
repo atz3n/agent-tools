@@ -19,12 +19,12 @@ function api(path, opts = {}) {
 
 function statusBadge(s) {
   const map = { open: 'badge-open', 'on-hold': 'badge-on-hold', 'in-progress': 'badge-in-progress', done: 'badge-done', closed: 'badge-closed' };
-  return `<span class="badge ${map[s] || 'badge-open'}">${s || 'open'}</span>`;
+  return `<span class="badge ${map[s] || 'badge-open'}">${escapeAttr(s || 'open')}</span>`;
 }
 
 function priorityBadge(p) {
   const map = { high: 'badge-high', medium: 'badge-medium', low: 'badge-low' };
-  return `<span class="badge ${map[p] || 'badge-medium'}">${p || 'medium'}</span>`;
+  return `<span class="badge ${map[p] || 'badge-medium'}">${escapeAttr(p || 'medium')}</span>`;
 }
 
 function formatDate(d) {
@@ -278,12 +278,26 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+// Text-node serialization leaves " and ' untouched, so it is NOT safe inside
+// HTML attributes or inline JS — every attribute context uses this instead.
+function escapeAttr(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Link targets are only emitted as href for these schemes; anything else
+// (javascript:, data:, …) stays rendered as plain text.
+function isSafeHref(url) {
+  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(url);
+  return !scheme || ['http:', 'https:', 'mailto:'].includes(scheme[1].toLowerCase());
+}
+
 // ── Create modal ───────────────────────────────────────
 function openCreateModal() {
   const sel = document.getElementById('create-project');
   const selected = currentProject && projects.includes(currentProject) ? currentProject : 'default';
-  sel.innerHTML = projects.map(p => `<option value="${p}" ${p === selected ? 'selected' : ''}>${p}</option>`).join('') +
+  const defaultOption = projects.includes('default') ? '' :
     `<option value="default" ${selected === 'default' ? 'selected' : ''}>default</option>`;
+  sel.innerHTML = projects.map(p => `<option value="${p}" ${p === selected ? 'selected' : ''}>${p}</option>`).join('') + defaultOption;
   document.getElementById('create-title').value = '';
   document.getElementById('create-status').value = 'open';
   document.getElementById('create-priority').value = 'medium';
@@ -419,8 +433,14 @@ function renderMarkdown(text) {
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
 
-  // Links
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // Links — decode the already-escaped target, allowlist the scheme, then
+  // re-escape with the attribute escaper (escapeHtml alone cannot stop an
+  // quote breakout out of href="…").
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
+    const url = href.replace(/&(amp|lt|gt);/g, (m, e) => ({ amp: '&', lt: '<', gt: '>' }[e]));
+    if (!isSafeHref(url)) return `[${text}](${escapeAttr(url)})`;
+    return `<a href="${escapeAttr(url)}" target="_blank" rel="noopener">${text}</a>`;
+  });
 
   // Blockquotes
   html = html.replace(/^\> (.+)$/gm, '<blockquote>$1</blockquote>');
@@ -483,7 +503,7 @@ function openDetail(id) {
   body.innerHTML = `
     <div class="detail-field">
       <label>Title</label>
-      <input type="text" id="detail-title-input" value="${escapeHtml(task.title)}" onchange="updateField('title', this.value)">
+      <input type="text" id="detail-title-input" value="${escapeAttr(task.title)}" onchange="updateField('title', this.value)">
     </div>
     <div style="display:flex;gap:12px">
       <div class="detail-field" style="flex:1">
@@ -509,19 +529,19 @@ function openDetail(id) {
       <div class="detail-field" style="flex:1">
         <label>Project</label>
         <select id="detail-project" onchange="updateField('project', this.value)">
-          ${projects.map(p => `<option value="${p}" ${task.project === p ? 'selected' : ''}>${p}</option>`).join('')}
-          <option value="default" ${!task.project || task.project === 'default' ? 'selected' : ''}>default</option>
+          ${projects.map(p => `<option value="${p}" ${task.project === p ? 'selected' : ''}>${p}</option>`).join('')}${projects.includes('default') ? '' : `
+          <option value="default" ${!task.project || task.project === 'default' ? 'selected' : ''}>default</option>`}
         </select>
       </div>
       <div class="detail-field" style="flex:1">
         <label>Due Date</label>
-        <input type="date" id="detail-due" value="${task.due_date || ''}" onchange="updateField('due_date', this.value || null)">
+        <input type="date" id="detail-due" value="${escapeAttr(task.due_date || '')}" onchange="updateField('due_date', this.value || null)">
       </div>
     </div>
     <div class="detail-field">
       <label>Tags</label>
       <div class="detail-tags" id="detail-tags">
-        ${(task.tags || []).map(tag => `<span class="tag">${escapeHtml(tag)} <span class="remove-tag" onclick="removeTag('${escapeHtml(tag)}')">&times;</span></span>`).join('')}
+        ${(task.tags || []).map(tag => `<span class="tag">${escapeHtml(tag)} <span class="remove-tag" onclick="removeTag(${escapeAttr(JSON.stringify(tag))})">&times;</span></span>`).join('')}
       </div>
       <input type="text" id="detail-tags-input" placeholder="Add a tag…" style="margin-top:6px"
         onkeydown="if(event.key==='Enter'){event.preventDefault();addTag()}">
@@ -560,10 +580,13 @@ async function updateField(field, value) {
       method: 'PATCH',
       body: JSON.stringify({ [field]: value }),
     });
-    if (status === 200) {
-      await loadData();
-      openDetail(currentTaskId);
+    if (status !== 200) {
+      toast(data.error || `Failed to update ${field}`, true);
     }
+    // Reload either way: on failure it restores the true state, and the
+    // re-rendered detail panel drops the rejected edit.
+    await loadData();
+    openDetail(currentTaskId);
   } catch (e) {
     toast(`Failed to update ${field}: ${e.message}`, true);
   }

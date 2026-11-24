@@ -86,8 +86,8 @@ class TestBlockedEndpoints(unittest.TestCase):
         self.assertFalse(whitelist.is_allowed_endpoint('/mail/thread/messages'))
 
     def test_mail_message_post_blocked(self) -> None:
-        """POST /mail/message_post should be rejected."""
-        self.assertFalse(whitelist.is_allowed_endpoint('/mail/message_post'))
+        """The real Odoo note-posting route must not be reachable through the proxy."""
+        self.assertFalse(whitelist.is_allowed_endpoint('/mail/message/post'))
 
     def test_arbitrary_path_blocked(self) -> None:
         """GET /foo should be rejected."""
@@ -126,6 +126,14 @@ class TestConfiguration(unittest.TestCase):
             self.assertEqual(config.PORT, 9999)
             # Restore original
             patch.dict(os.environ, {'PROXY_PORT': '8087'}).start()
+            self.addCleanup(lambda: importlib.reload(config))
+
+    def test_empty_session_timeout_falls_back_to_default(self) -> None:
+        """6.9 — ODOO_SESSION_TIMEOUT set-but-empty must default to 2700, not kill import."""
+        with patch.dict(os.environ, {'ODOO_SESSION_TIMEOUT': ''}):
+            import importlib
+            importlib.reload(config)
+            self.assertEqual(config.SESSION_TIMEOUT, 2700)
             self.addCleanup(lambda: importlib.reload(config))
 
 
@@ -294,9 +302,15 @@ class TestGracefulShutdown(unittest.TestCase):
         self.assertTrue(hasattr(_shutdown, '__call__'))
 
     def test_shutdown_handler_calls_server_shutdown(self) -> None:
-        """_shutdown handler should call server.shutdown()."""
+        """_shutdown dispatches server.shutdown() to a thread — calling it
+        on the signal handler's own thread would deadlock serve_forever."""
+        import time
         mock_server = MagicMock()
         _shutdown(mock_server, 0, None)
+        for _ in range(100):
+            if mock_server.shutdown.called:
+                break
+            time.sleep(0.02)
         mock_server.shutdown.assert_called_once()
 
 
@@ -414,6 +428,41 @@ class TestTaskMessagePostHandler(unittest.TestCase):
         response = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
         self.assertEqual(response['error'], 'invalid JSON body')
 
+    def test_post_task_message_non_object_json(self) -> None:
+        """Valid JSON that is not an object must 400, not crash on .get()."""
+        handler = self._make_request('/task/message?id=1', b'5')
+        handler._handle_task_message_post(parse_qs('id=1'))
+        response = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(response['error'], 'body must be a JSON object')
+
+    def test_post_task_message_non_string_fields(self) -> None:
+        """Non-string body/message_type/subtype_xmlid must 400."""
+        for payload, field in (
+            (b'{"body": 5}', 'body'),
+            (b'{"body": "ok", "message_type": 7}', 'message_type'),
+            (b'{"body": "ok", "subtype_xmlid": ["x"]}', 'subtype_xmlid'),
+        ):
+            handler = self._make_request('/task/message?id=1', payload)
+            handler._handle_task_message_post(parse_qs('id=1'))
+            response = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+            self.assertEqual(response['error'], f'{field} must be a string')
+
+    def test_post_task_message_invalid_content_length(self) -> None:
+        """A non-numeric Content-Length must 400, not crash the handler."""
+        handler = self._make_request('/task/message?id=1', b'{"body": "ok"}')
+        handler.headers.replace_header('Content-Length', 'not-a-number')
+        handler._handle_task_message_post(parse_qs('id=1'))
+        response = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(response['error'], 'invalid Content-Length header')
+
+    def test_post_task_message_negative_content_length(self) -> None:
+        """A negative Content-Length must 400, not read until EOF."""
+        handler = self._make_request('/task/message?id=1', b'{"body": "ok"}')
+        handler.headers.replace_header('Content-Length', '-5')
+        handler._handle_task_message_post(parse_qs('id=1'))
+        response = json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0])
+        self.assertEqual(response['error'], 'invalid Content-Length header')
+
     def test_post_task_message_502_on_error(self) -> None:
         """POST /task/message should return 502 when Odoo RPC fails."""
         _server._session_config = {
@@ -474,6 +523,7 @@ class TestSessionLogin(unittest.TestCase):
         resp.status = status
         resp.read.return_value = body
         resp.getheader.return_value = cookie
+        resp.msg.get_all.return_value = [cookie] if cookie else None
         return resp
 
     def _conn(self, resp: MagicMock) -> MagicMock:
@@ -501,8 +551,22 @@ class TestSessionLogin(unittest.TestCase):
         args, kwargs = c2.request.call_args
         self.assertEqual(args[1], '/web/login')
         self.assertIn('csrf_token=TOK123', kwargs['body'])
-        self.assertIn('login=test@example.com', kwargs['body'])
+        self.assertIn('login=test%40example.com', kwargs['body'])
         self.assertIn('password=secret123', kwargs['body'])
+
+    def test_login_body_is_url_encoded(self) -> None:
+        """Special characters in credentials must not corrupt the form body."""
+        self.sess.config['password'] = 'p&ss=w+x=1'
+        step1 = self._resp(
+            200, b'<input name="csrf_token" value="TOK123">', 'session_id=init; Path=/'
+        )
+        step2 = self._resp(303, b'', 'session_id=final; Path=/; HttpOnly')
+        _, c2 = self._two_step(step1, step2)
+        self.sess._login()
+        body = c2.request.call_args[1]['body']
+        # Exactly three form fields — the encoded password stays one field.
+        self.assertEqual(body.count('&'), 2)
+        self.assertIn('password=p%26ss%3Dw%2Bx%3D1', body)
 
     def test_login_step1_sends_initial_cookie(self) -> None:
         """Step 2 should replay the session cookie received in step 1."""
@@ -573,6 +637,16 @@ class TestSessionLogin(unittest.TestCase):
         """Only session_id parts of Set-Cookie should be kept."""
         resp = self._resp(200, b'', 'session_id=abc; other=1; Path=/')
         self.assertEqual(session._extract_session_cookie(resp), 'session_id=abc')
+
+    def test_extract_session_cookie_scans_all_headers(self) -> None:
+        """session_id arriving in a later repeated Set-Cookie header must be found."""
+        resp = MagicMock()
+        resp.status = 200
+        resp.msg.get_all.return_value = [
+            'other_cookie=1; Path=/',
+            'session_id=late; Path=/; HttpOnly',
+        ]
+        self.assertEqual(session._extract_session_cookie(resp), 'session_id=late')
 
 
 class TestSessionLifecycle(unittest.TestCase):
@@ -754,17 +828,19 @@ class TestRpcWrappers(unittest.TestCase):
         self._reauth.assert_called_once()
 
     def test_post_message_payload(self) -> None:
-        """post_message should call message_post with the note kwargs."""
+        """post_message posts via /mail/message/post (review 2.2 — the old
+        call_kw + message_post shape passed the thread id into body's
+        positional slot and could not work on a real instance)."""
         self._call.return_value = {'id': 9}
         self.sess.post_message(3807, '<p>hi</p>')
         path, body, _ = self._call.call_args[0]
-        self.assertEqual(path, '/web/dataset/call_kw')
+        self.assertEqual(path, '/mail/message/post')
         payload = json.loads(body)
-        self.assertEqual(payload['params']['method'], 'message_post')
-        self.assertEqual(payload['params']['args'], [3807])
-        self.assertEqual(payload['params']['kwargs']['body'], '<p>hi</p>')
-        self.assertEqual(payload['params']['kwargs']['message_type'], 'comment')
-        self.assertEqual(payload['params']['kwargs']['subtype_xmlid'], 'mail.mt_note')
+        self.assertEqual(payload['params']['thread_id'], 3807)
+        self.assertEqual(payload['params']['thread_model'], 'project.task')
+        self.assertEqual(payload['params']['post_data']['body'], '<p>hi</p>')
+        self.assertEqual(payload['params']['post_data']['message_type'], 'comment')
+        self.assertEqual(payload['params']['post_data']['subtype_xmlid'], 'mail.mt_note')
 
     def test_post_message_retries_after_reauth(self) -> None:
         """post_message should also survive a session refresh."""
@@ -804,6 +880,23 @@ class TestGetSessionSingleton(unittest.TestCase):
         }
         s1 = session.get_session(cfg1)
         self.assertIsNot(session.get_session(cfg2), s1)
+
+    def test_equal_dict_config_reuses_session(self) -> None:
+        """An equal-but-distinct dict (rebuilt per request) must NOT re-login.
+
+        Regression: the singleton compared by identity, so server.py's
+        per-request dict literal recreated the session — and re-ran the
+        two-step login — on every call.
+        """
+        cfg1: session.Config = {
+            'db': 'd', 'url': 'https://x.odoo.com', 'user': 'u', 'password': 'p',
+        }
+        cfg2: session.Config = {
+            'db': 'd', 'url': 'https://x.odoo.com', 'user': 'u', 'password': 'p',
+        }
+        self.assertIsNot(cfg1, cfg2)
+        s1 = session.get_session(cfg1)
+        self.assertIs(session.get_session(cfg2), s1)
 
 
 class TestTaskDataHandler(unittest.TestCase):
@@ -1023,6 +1116,13 @@ class TestProxyRouting(unittest.TestCase):
             handler._proxy(method)
             self.assertEqual(self._response(handler)['error'], 'method not allowed', method)
 
+    def test_head_returns_405_not_501(self) -> None:
+        """HEAD must enter _proxy (405 + flat body), never BaseHTTP's 501."""
+        self.assertTrue(hasattr(ProxyHandler, 'do_HEAD'))
+        handler = self._make_handler('HEAD', '/task/data')
+        handler._proxy('HEAD')
+        self.assertEqual(self._response(handler)['error'], 'method not allowed')
+
     def test_query_params_parsed_for_handlers(self) -> None:
         """The query string should be parsed and passed to the sub-handler."""
         handler = self._make_handler('GET', '/task/data?id=42&x=1')
@@ -1032,16 +1132,127 @@ class TestProxyRouting(unittest.TestCase):
         self.assertEqual(seen.get('id'), ['42'])
 
     def test_http_methods_delegate_to_proxy(self) -> None:
-        """do_GET/POST/PATCH/PUT/DELETE should each call _proxy with their method."""
+        """do_GET/HEAD/POST/PATCH/PUT/DELETE should each call _proxy with their method."""
         handler = self._make_handler('GET', '/task/data')
         calls: list[str] = []
         handler._proxy = calls.append  # type: ignore[method-assign]
         handler.do_GET()
+        handler.do_HEAD()
         handler.do_POST()
         handler.do_PATCH()
         handler.do_PUT()
         handler.do_DELETE()
-        self.assertEqual(calls, ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'])
+        self.assertEqual(calls, ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'])
+
+
+class TestUpstreamDecodeRobustness(unittest.TestCase):
+    """6.4 — a non-UTF-8 upstream body must surface as 502, never a crash."""
+
+    def setUp(self) -> None:
+        self.config: session.Config = {
+            'db': 'test-db',
+            'url': 'https://test.odoo.com',
+            'user': 'u',
+            'password': 'p',
+        }
+        self.sess = session.OdooSession(self.config)
+        self.sess._cookie = 'session_id=abc'
+        self.sess._last_login = time.monotonic()  # keep _ensure_session a no-op
+        self._patcher = patch('odoo_proxy.session.http.client.HTTPSConnection')
+        self.mock_conn_cls = self._patcher.start()
+
+    def tearDown(self) -> None:
+        self._patcher.stop()
+
+    @staticmethod
+    def _resp(status: int, body: bytes) -> MagicMock:
+        resp = MagicMock()
+        resp.status = status
+        resp.read.return_value = body
+        return resp
+
+    def _conn(self, resp: MagicMock) -> MagicMock:
+        conn = MagicMock()
+        conn.getresponse.return_value = resp
+        return conn
+
+    def test_non_utf8_body_raises_runtime_error_not_unicode_error(self) -> None:
+        """The latin-1 body must decode with replacement and fail the JSON
+        parse as RuntimeError — a UnicodeDecodeError would escape the 502 handler."""
+        self.mock_conn_cls.return_value = self._conn(self._resp(200, b'caf\xe9 gateway error'))
+        try:
+            self.sess._call_odoo('/web/dataset/call_kw', b'{}', {})
+            self.fail('expected RuntimeError')
+        except RuntimeError as exc:
+            self.assertNotIsInstance(exc, UnicodeDecodeError)
+            self.assertIn('Non-JSON response', str(exc))
+
+    def test_call_odoo_closes_connection_in_finally(self) -> None:
+        """A transport error must still close the connection."""
+        conn = MagicMock()
+        conn.request.side_effect = ConnectionResetError('boom')
+        self.mock_conn_cls.return_value = conn
+        with self.assertRaises(ConnectionResetError):
+            self.sess._call_odoo('/web/dataset/call_kw', b'{}', {})
+        conn.close.assert_called_once()
+
+    def test_login_closes_connection_in_finally(self) -> None:
+        """A failing login step 1 must still close the connection."""
+        conn = MagicMock()
+        conn.getresponse.side_effect = ConnectionResetError('boom')
+        self.mock_conn_cls.return_value = conn
+        with self.assertRaises(ConnectionResetError):
+            self.sess._login()
+        conn.close.assert_called_once()
+
+    @staticmethod
+    def _make_handler(path: str) -> ProxyHandler:
+        handler: ProxyHandler = object.__new__(ProxyHandler)
+        handler.path = path
+        handler.requestline = f'GET {path} HTTP/1.1'
+        handler.request_version = 'HTTP/1.1'
+        handler.client_address = ('192.168.1.1', 54321)
+        headers: http.client.HTTPMessage = http.client.HTTPMessage()
+        handler.headers = headers
+        handler.rfile = io.BytesIO(b'')
+        handler.wfile = MagicMock()
+        return handler
+
+    def _get_status_error_and_logs(self, handler: ProxyHandler, invoke: object) -> tuple[int, dict, list[str]]:
+        status: dict = {}
+        handler.send_response = lambda s: status.update(s=s)  # type: ignore[method-assign]
+        capture = _LogCapture()
+        _server.logger.addHandler(capture)
+        try:
+            assert callable(invoke)
+            invoke(handler)  # type: ignore[operator]
+        finally:
+            _server.logger.removeHandler(capture)
+        response = cast(dict, json.loads(cast(MagicMock, handler.wfile).write.call_args[0][0]))
+        logs = [r.getMessage() for r in capture.records]
+        return status.get('s', 0), response, logs
+
+    def test_task_data_non_utf8_body_returns_502_with_one_log_line(self) -> None:
+        """Full handler path: garbage upstream body → 502 + flat error + one log line."""
+        self.mock_conn_cls.return_value = self._conn(self._resp(200, b'caf\xe9 gateway error'))
+        handler = self._make_handler('/task/data?id=1')
+        with patch('odoo_proxy.server.get_session', return_value=self.sess):
+            status, response, logs = self._get_status_error_and_logs(
+                handler, lambda h: h._handle_task_data(parse_qs('id=1')))
+        self.assertEqual(status, 502)
+        self.assertIn('Non-JSON response', response['error'])
+        self.assertEqual(len([line for line in logs if '/task/data' in line]), 1)
+
+    def test_task_messages_non_utf8_body_returns_502_with_one_log_line(self) -> None:
+        """Same class on the messages route."""
+        self.mock_conn_cls.return_value = self._conn(self._resp(200, b'caf\xe9 gateway error'))
+        handler = self._make_handler('/task/messages?id=1')
+        with patch('odoo_proxy.server.get_session', return_value=self.sess):
+            status, response, logs = self._get_status_error_and_logs(
+                handler, lambda h: h._handle_task_messages(parse_qs('id=1')))
+        self.assertEqual(status, 502)
+        self.assertIn('Non-JSON response', response['error'])
+        self.assertEqual(len([line for line in logs if '/task/messages' in line]), 1)
 
 
 if __name__ == '__main__':

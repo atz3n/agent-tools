@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: loop-prompt
 description: Interview the user to pin down a task and its success criteria, then produce an iterative loop prompt (plan → do → verify → decide, stop only when every hard criterion scores 8+/10). Use when asked for a "loop prompt", when a task is too vague to hand to an autonomous agent, or when asked to build something in iterations / hand work to another agent session. Pass the task idea as argument.
 ---

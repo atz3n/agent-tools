@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Pauses the odoo-proxy container (stops but keeps state)
+# Pauses the odoo-proxy container (stops without removing)
 
 ###################################################################################################
 # CONFIGURATION
@@ -13,14 +13,12 @@ PROJECT_NAME="odoo-proxy"
 # DEFINES
 ###################################################################################################
 
-HERE="$(pwd)/$(dirname $0)"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 
 ###################################################################################################
 # MAIN
 ###################################################################################################
 
-cd ${HERE}
-
-cd ../docker
-docker compose -p ${PROJECT_NAME} pause
+cd ${HERE}/../docker
+docker compose -p ${PROJECT_NAME} stop

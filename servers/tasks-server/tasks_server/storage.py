@@ -15,9 +15,74 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 
 from . import config
+
+# ---------------------------------------------------------------------------
+# Status/priority vocabularies (single source of truth — kept in sync with
+# README, spec/openapi.yml and the web UI). The HTTP layer rejects unknown
+# values; reads stay lenient (hand-edited files fall back via update_task).
+# ---------------------------------------------------------------------------
+
+VALID_STATUSES: frozenset[str] = frozenset({"open", "in-progress", "on-hold", "done", "closed"})
+
+VALID_PRIORITIES: frozenset[str] = frozenset({"low", "medium", "high"})
+
+# ---------------------------------------------------------------------------
+# Project-name safety
+# ---------------------------------------------------------------------------
+
+# A project name is a single path segment: no separators, no traversal,
+# no leading dot (hidden files like .counter.json stay out of reach).
+# Everything else — letters, digits, spaces, hyphens, underscores, dots —
+# is fine, which covers every project dir created so far.
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*\Z")
+
+
+def valid_project_name(name: object) -> bool:
+    """True when ``name`` is a safe single-segment project directory name."""
+    return isinstance(name, str) and bool(_PROJECT_NAME_RE.match(name))
+
+
+def _safe_scan_entry(entry: str) -> bool:
+    """True when a directory entry found while scanning stays under TASKS_DIR.
+
+    Guards reads against hand-planted symlink/dot segment directories that
+    predate name validation; anything resolving outside TASKS_DIR is skipped.
+    """
+    if entry in (".", "..") or entry.startswith("."):
+        return False
+    root = os.path.realpath(config.TASKS_DIR)
+    target = os.path.realpath(os.path.join(config.TASKS_DIR, entry))
+    return target.startswith(root + os.sep)
+
+
+def _list_dir(path: str) -> list[str]:
+    """Sorted directory listing; an empty list when the dir vanished or is
+    unreadable — one odd entry must never take down a whole listing."""
+    try:
+        return sorted(os.listdir(path))
+    except OSError as exc:
+        config.logger.warning("skipping unreadable directory %s (%s)", path, exc)
+        return []
+
+
+def _read_task_file(path: str) -> str | None:
+    """Read a task file's text; None when it is unreadable.
+
+    Hand-edited or concurrently removed files (non-UTF-8 bytes, a directory
+    named ``NNN_x.md``, a dangling symlink, a task deleted between listing
+    and read) are skipped with a warning instead of crashing the handler.
+    """
+    try:
+        with open(path, "r", errors="replace") as f:
+            return f.read()
+    except OSError as exc:
+        config.logger.warning("skipping unreadable task file %s (%s)", path, exc)
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Frontmatter parsing (no PyYAML)
@@ -52,6 +117,13 @@ def _parse_value(raw: str) -> str | int | float | bool | list[str] | None:
         pass
     # Inline list ["tag1", "tag2"] — check BEFORE quotes
     if raw.startswith("[") and raw.endswith("]"):
+        # Writer-produced lists are JSON — parse them exactly, escaping and all.
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, list):
+            return [x if isinstance(x, str) else str(x) for x in parsed]
         inner = raw[1:-1].strip()
         if not inner:
             return []
@@ -60,6 +132,16 @@ def _parse_value(raw: str) -> str | int | float | bool | list[str] | None:
             item = item.strip().strip('"').strip("'")
             items.append(item)
         return items
+    # Double-quoted strings — writer output is JSON-escaped, so decode with
+    # json first (round-trips \n, \" …); fall back to plain quote-stripping
+    # for hand-written files (e.g. "a"b" which is not valid JSON).
+    if raw.startswith('"') and raw.endswith('"'):
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, str):
+            return parsed
     # Strip surrounding quotes (must come before comma check)
     if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
         return raw[1:-1]
@@ -145,12 +227,12 @@ def format_frontmatter(fm: dict) -> str:
         elif isinstance(value, bool):
             lines.append(f"{key}: {'true' if value else 'false'}")
         elif isinstance(value, list):
-            items = ", ".join(f'"{v}"' for v in value)
+            items = ", ".join(json.dumps(v, ensure_ascii=False) for v in value)
             lines.append(f"{key}: [{items}]")
         elif isinstance(value, (int, float)):
             lines.append(f"{key}: {value}")
         else:
-            lines.append(f'{key}: "{value}"')
+            lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
     return "\n".join(lines)
 
 
@@ -158,18 +240,20 @@ def format_frontmatter(fm: dict) -> str:
 # Filename helpers
 # ---------------------------------------------------------------------------
 
-# Matches files like 001_fix-login.md, 042_something.md
-_TASK_FILE_RE = re.compile(r"^(\d{3})_(.+)\.md$")
+# Matches files like 001_fix-login.md, 042_something.md, 1000_rolled-over.md
+_TASK_FILE_RE = re.compile(r"^(\d{3,})_(.+)\.md$")
 
 
 def _filename_from_title(task_id: int, title: str) -> str:
-    """Generate a filename from a task ID and title."""
+    """Generate a filename from a task ID and title (slug clamped to 80 chars)."""
     slug = title.lower().strip()
     # Replace spaces with hyphens
     slug = re.sub(r"\s+", "-", slug)
     # Keep alphanumeric, hyphens, underscores; strip everything else
     slug = re.sub(r"[^a-z0-9_-]", "", slug)
-    slug = slug.strip("-_")
+    # Clamp: a filesystem path segment caps at 255 bytes — an unclamped
+    # long title would crash the write with ENAMETOOLONG.
+    slug = slug[:80].strip("-_")
     if not slug:
         slug = "untitled"
     return f"{task_id:03d}_{slug}.md"
@@ -178,6 +262,9 @@ def _filename_from_title(task_id: int, title: str) -> str:
 # ---------------------------------------------------------------------------
 # Counter management
 # ---------------------------------------------------------------------------
+
+
+_counter_lock = threading.Lock()  # read-modify-write must be atomic under ThreadingHTTPServer
 
 
 def _read_counter() -> int:
@@ -200,24 +287,26 @@ def _write_counter(next_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _task_file_path(project: str, task_id: int, title: str = "") -> str:
-    """Return the filesystem path for a task file."""
-    project_dir = os.path.join(config.TASKS_DIR, project)
-    if title:
-        fname = _filename_from_title(task_id, title)
-    else:
-        fname = f"{task_id:03d}_{task_id}.md"
-    return os.path.join(project_dir, fname)
-
-
 def _ensure_project_dir(project: str) -> None:
-    """Create the project directory if it doesn't exist."""
-    os.makedirs(os.path.join(config.TASKS_DIR, project), exist_ok=True)
+    """Create the project directory if it doesn't exist.
 
-
-def _internal_keys() -> set[str]:
-    """Keys that are internal to the storage layer and should not be persisted."""
-    return {"filename", "project"}
+    Raises ValueError for names that could escape TASKS_DIR (separators,
+    ``..``, leading dots) and for names that a hand-managed volume already
+    occupies with a non-directory entry — the single choke point every
+    write path goes through, so it must never let an OSError escape.
+    """
+    if not valid_project_name(project):
+        raise ValueError(f"invalid project name: {project!r}")
+    try:
+        os.makedirs(os.path.join(config.TASKS_DIR, project), exist_ok=True)
+    except FileExistsError as exc:
+        # ``exist_ok`` only covers the directory-already-exists case; a plain
+        # file with the project's name would drop the connection unlogged.
+        raise ValueError(
+            f"project name exists as a non-directory: {project!r}"
+        ) from exc
+    except OSError as exc:
+        raise ValueError(f"cannot create project directory: {project!r} ({exc})") from exc
 
 
 def create_task(
@@ -229,31 +318,37 @@ def create_task(
     tags: list[str] | None = None,
     description: str = "",
 ) -> dict:
-    """Create a new task. Returns the task dict."""
-    task_id = _read_counter()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Create a new task. Returns the task dict.
 
-    fm = {
-        "id": task_id,
-        "title": title,
-        "status": status,
-        "priority": priority,
-        "due_date": due_date,
-        "tags": tags or [],
-        "created_at": now,
-        "updated_at": now,
-    }
+    The counter read and increment bracket the file write under
+    ``_counter_lock`` so concurrent creates (ThreadingHTTPServer) can never
+    hand out the same id twice.
+    """
+    with _counter_lock:
+        task_id = _read_counter()
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    _ensure_project_dir(project)
-    body = f"## Description\n\n{description}\n" if description else ""
-    content = f"---\n{format_frontmatter(fm)}\n---\n\n{body}"
+        fm = {
+            "id": task_id,
+            "title": title,
+            "status": status,
+            "priority": priority,
+            "due_date": due_date,
+            "tags": tags or [],
+            "created_at": now,
+            "updated_at": now,
+        }
 
-    fname = _filename_from_title(task_id, title)
-    path = os.path.join(config.TASKS_DIR, project, fname)
-    with open(path, "w") as f:
-        f.write(content)
+        _ensure_project_dir(project)
+        body = f"## Description\n\n{description}\n" if description else ""
+        content = f"---\n{format_frontmatter(fm)}\n---\n\n{body}"
 
-    _write_counter(task_id + 1)
+        fname = _filename_from_title(task_id, title)
+        path = os.path.join(config.TASKS_DIR, project, fname)
+        with open(path, "w") as f:
+            f.write(content)
+
+        _write_counter(task_id + 1)
 
     result = dict(fm)
     result["description"] = description
@@ -265,16 +360,17 @@ def create_task(
 def get_task(task_id: int) -> dict | None:
     """Get a task by ID. Returns None if not found."""
     pattern = re.compile(rf"^{task_id:03d}_.*\.md$")
-    for entry in sorted(os.listdir(config.TASKS_DIR)):
+    for entry in _list_dir(config.TASKS_DIR):
         project_dir = os.path.join(config.TASKS_DIR, entry)
-        if not os.path.isdir(project_dir):
+        if not os.path.isdir(project_dir) or not _safe_scan_entry(entry):
             continue
-        for fname in os.listdir(project_dir):
+        for fname in _list_dir(project_dir):
             if not pattern.match(fname):
                 continue
             path = os.path.join(project_dir, fname)
-            with open(path, "r") as f:
-                content = f.read()
+            content = _read_task_file(path)
+            if content is None:
+                continue
             fm, body = parse_frontmatter(content)
             result = dict(fm)
             # Clean body for description
@@ -288,20 +384,49 @@ def get_task(task_id: int) -> dict | None:
 
 
 def update_task(task_id: int, updates: dict) -> dict | None:
-    """Update a task by ID. Returns the updated task or None."""
+    """Update a task by ID. Returns the updated task or None.
+
+    A ``project`` update moves the task file into the new project folder.
+    """
     task = get_task(task_id)
     if task is None:
         return None
 
+    old_project = task.get("project", "default")
+    old_fname = task.get("filename", f"{task_id:03d}_{task_id}.md")
+
     # Merge updates (only known fields)
-    known_fields = {"title", "status", "priority", "due_date", "tags", "description"}
+    known_fields = {"title", "status", "priority", "due_date", "tags", "description", "project"}
     for key, value in updates.items():
+        if key == "project":
+            # Partial-update semantics: ignore absent/empty/non-string values;
+            # syntactically invalid names are rejected by _ensure_project_dir
+            # (ValueError → 400 at the HTTP layer).
+            if isinstance(value, str) and value.strip():
+                task["project"] = value.strip()
+            continue
         if key in known_fields:
             task[key] = value
 
     task["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # A hand-edited file may be missing frontmatter keys — backfill instead
+    # of crashing the handler with a KeyError (nothing here is guaranteed
+    # beyond what parse_frontmatter found).
+    if not isinstance(task.get("id"), int):
+        task["id"] = task_id
+    if not isinstance(task.get("title"), str) or not task["title"].strip():
+        slug = old_fname.split("_", 1)[-1].removesuffix(".md").replace("-", " ").strip()
+        task["title"] = slug or f"task {task_id}"
+    if not isinstance(task.get("status"), str) or not task["status"]:
+        task["status"] = "open"
+    if not isinstance(task.get("priority"), str) or not task["priority"]:
+        task["priority"] = "medium"
+    if not isinstance(task.get("created_at"), str) or not task["created_at"]:
+        task["created_at"] = task["updated_at"]
+
     project = task.get("project", "default")
+    task["project"] = project
     body = f"## Description\n\n{task.get('description', '')}\n" if task.get("description") else ""
     fm = {
         "id": task["id"],
@@ -309,23 +434,29 @@ def update_task(task_id: int, updates: dict) -> dict | None:
         "status": task["status"],
         "priority": task["priority"],
         "due_date": task.get("due_date"),
-        "tags": task.get("tags", []),
+        "tags": task.get("tags") if isinstance(task.get("tags"), list) else [],
         "created_at": task["created_at"],
         "updated_at": task["updated_at"],
     }
     content = f"---\n{format_frontmatter(fm)}\n---\n\n{body}"
 
-    # Rename file if title changed
-    old_fname = task.get("filename", f"{task_id:03d}_{task_id}.md")
+    # Write under the (possibly new) project and title, then remove the old
+    # file if the task moved or was renamed.
     new_fname = _filename_from_title(task_id, task["title"])
-    old_path = os.path.join(config.TASKS_DIR, project, old_fname)
+    _ensure_project_dir(project)
     new_path = os.path.join(config.TASKS_DIR, project, new_fname)
-    if old_fname != new_fname and os.path.exists(old_path):
-        os.rename(old_path, new_path)
-    task["filename"] = new_fname
-
     with open(new_path, "w") as f:
         f.write(content)
+
+    old_path = os.path.join(config.TASKS_DIR, old_project, old_fname)
+    if old_path != new_path and os.path.exists(old_path):
+        try:
+            os.remove(old_path)
+        except OSError as exc:
+            # Rename already succeeded; a vanished old file (concurrent
+            # delete) must not fail the update.
+            config.logger.warning("could not remove stale task file %s (%s)", old_path, exc)
+    task["filename"] = new_fname
 
     return dict(task)
 
@@ -333,18 +464,20 @@ def update_task(task_id: int, updates: dict) -> dict | None:
 def delete_task(task_id: int) -> bool:
     """Delete a task by ID. Returns True if deleted, False if not found."""
     pattern = re.compile(rf"^{task_id:03d}_.*\.md$")
-    for entry in sorted(os.listdir(config.TASKS_DIR)):
+    for entry in _list_dir(config.TASKS_DIR):
         project_dir = os.path.join(config.TASKS_DIR, entry)
-        if not os.path.isdir(project_dir):
+        if not os.path.isdir(project_dir) or not _safe_scan_entry(entry):
             continue
-        for fname in os.listdir(project_dir):
+        for fname in _list_dir(project_dir):
             if not pattern.match(fname):
                 continue
             path = os.path.join(project_dir, fname)
-            os.remove(path)
-            # Clean up empty project dirs
-            if not os.listdir(project_dir):
-                os.rmdir(project_dir)
+            try:
+                os.remove(path)
+            except OSError as exc:
+                # Vanished or unremovable (concurrent delete) — keep scanning.
+                config.logger.warning("could not remove task file %s (%s)", path, exc)
+                continue
             return True
     return False
 
@@ -355,24 +488,27 @@ def list_tasks(project: str | None = None, status: str | None = None) -> list[di
     scan_dirs: list[str] = []
 
     if project:
+        if not valid_project_name(project):
+            return []
         scan_dirs = [project]
     else:
-        for entry in sorted(os.listdir(config.TASKS_DIR)):
+        for entry in _list_dir(config.TASKS_DIR):
             project_dir = os.path.join(config.TASKS_DIR, entry)
-            if os.path.isdir(project_dir):
+            if os.path.isdir(project_dir) and _safe_scan_entry(entry):
                 scan_dirs.append(entry)
 
     for proj in scan_dirs:
         project_dir = os.path.join(config.TASKS_DIR, proj)
         if not os.path.isdir(project_dir):
             continue
-        for fname in sorted(os.listdir(project_dir)):
+        for fname in _list_dir(project_dir):
             m = _TASK_FILE_RE.match(fname)
             if not m:
                 continue
             fpath = os.path.join(project_dir, fname)
-            with open(fpath, "r") as f:
-                content = f.read()
+            content = _read_task_file(fpath)
+            if content is None:
+                continue
             fm, body = parse_frontmatter(content)
             task = dict(fm)
             desc_match = re.search(r"## Description\s*\n(.*)", body, re.DOTALL)
@@ -397,8 +533,8 @@ def create_project(name: str) -> str:
 def list_projects() -> list[str]:
     """List all project directories (excluding hidden files like .counter.json)."""
     projects: list[str] = []
-    for entry in sorted(os.listdir(config.TASKS_DIR)):
+    for entry in _list_dir(config.TASKS_DIR):
         project_dir = os.path.join(config.TASKS_DIR, entry)
-        if os.path.isdir(project_dir) and not entry.startswith("."):
+        if os.path.isdir(project_dir) and _safe_scan_entry(entry):
             projects.append(entry)
     return projects

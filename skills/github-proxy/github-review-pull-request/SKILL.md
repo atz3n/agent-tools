@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: github-review-pull-request
 description: Call the GitHub PR proxy server via REST API to list, create, submit, update, dismiss, or delete pull request reviews, request reviewers, and manage review comments through the local proxy on port 8086.
 ---
@@ -210,8 +211,10 @@ Required: `body`, `commit_sha`, `path`, `line`. Optional: `side` (`LEFT`/`RIGHT`
 
 ## Update a Review Comment
 
+GitHub's update route is comment-scoped (no PR number):
+
 ```bash
-curl -s -X PATCH $PROXY/repos/{owner}/{repo}/pulls/42/comments/999 \
+curl -s -X PATCH $PROXY/repos/{owner}/{repo}/pulls/comments/999 \
   -H "Content-Type: application/json" \
   -d '{"body": "Updated comment text"}' | jq '.'
 ```
@@ -219,13 +222,13 @@ curl -s -X PATCH $PROXY/repos/{owner}/{repo}/pulls/42/comments/999 \
 ## List Review Comment Reactions
 
 ```bash
-curl -s $PROXY/repos/{owner}/{repo}/pulls/42/comments/999/reactions | jq '.'
+curl -s $PROXY/repos/{owner}/{repo}/pulls/comments/999/reactions | jq '.'
 ```
 
 ## Create a Review Comment Reaction
 
 ```bash
-curl -s -X POST $PROXY/repos/{owner}/{repo}/pulls/42/comments/999/reactions \
+curl -s -X POST $PROXY/repos/{owner}/{repo}/pulls/comments/999/reactions \
   -H "Content-Type: application/json" \
   -d '{"content": "+1"}' | jq '.'
 ```
@@ -235,21 +238,27 @@ curl -s -X POST $PROXY/repos/{owner}/{repo}/pulls/42/comments/999/reactions \
 ## Delete a Review Comment Reaction
 
 ```bash
-curl -s -X DELETE $PROXY/repos/{owner}/{repo}/pulls/42/comments/999/reactions/456
+curl -s -X DELETE $PROXY/repos/{owner}/{repo}/pulls/comments/999/reactions/456
 ```
 
 Replace `456` with the reaction ID.
 
 ## Get a Review Comment
 
+GitHub's get route is comment-scoped (no PR number):
+
 ```bash
-curl -s $PROXY/repos/{owner}/{repo}/pulls/42/comments/999 | jq '.'
+curl -s $PROXY/repos/{owner}/{repo}/pulls/comments/999 | jq '.'
 ```
 
-## Get Replies to a Review Comment
+## Reply to a Review Comment
+
+Upstream supports **POST only** on `/replies` — it creates a reply, there is no GET `/replies`; read a thread by listing the PR's review comments (`GET …/pulls/{number}/comments`):
 
 ```bash
-curl -s $PROXY/repos/{owner}/{repo}/pulls/42/comments/999/replies | jq '.'
+curl -s -X POST $PROXY/repos/{owner}/{repo}/pulls/42/comments/999/replies \
+  -H "Content-Type: application/json" \
+  -d '{"body": "Replying to that"}' | jq '.'
 ```
 
 ## Response Handling
@@ -269,7 +278,7 @@ curl -s -w "\nHTTP_CODE: %{http_code}" $PROXY/repos/{owner}/{repo}/pulls/999999/
 
 Common error responses:
 - `404` — PR not found or endpoint blocked
-- `403` — endpoint not allowed (non-PR path)
+- `502` — proxy could not reach GitHub (`upstream request failed`); retry
 - `422` — validation error (check response body for details)
 
 ## Automatic Review Posting

@@ -13,6 +13,10 @@ import time
 # ---------------------------------------------------------------------------
 
 PORT = int(os.environ.get("PROXY_PORT") or "8089")
+# Inside Docker the image must bind all interfaces; compose's 127.0.0.1 port
+# mapping provides the localhost-only publish. Set BIND_HOST=127.0.0.1 when
+# running the server directly on a host.
+BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")
 
 # Credentials. The OpenRouter route is disabled when the key is absent;
 # the mlx-serve route needs no credentials.
@@ -30,7 +34,9 @@ MLX_SERVE_URL = (os.environ.get("MLX_SERVE_URL") or "http://host.docker.internal
 # for minutes between tokens, so this is deliberately long.
 UPSTREAM_TIMEOUT = int(os.environ.get("LLM_UPSTREAM_TIMEOUT") or "600")
 
-# Model allowlist for /chat/completions requests. Empty = any model.
+# Model allowlist for completion request bodies — both the /chat/completions
+# and the /messages dialects, on every route. Empty = any model. When
+# non-empty the gate is strict: a body without a parsable "model" is 400.
 ALLOWED_MODELS = frozenset(m.strip() for m in os.environ.get("ALLOWED_MODELS", "").split(",") if m.strip())
 
 

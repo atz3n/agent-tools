@@ -7,7 +7,7 @@ import http.client
 import json
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from .config import SESSION_TIMEOUT, Config
 
@@ -57,10 +57,12 @@ class OdooSession:
         """Perform the two-step Odoo login flow."""
         # Step 1: GET /web/login to get CSRF token
         conn = self._connection()
-        conn.request("GET", f"{self.base_path}/web/login")
-        resp = conn.getresponse()
-        body = resp.read().decode("utf-8", errors="replace")
-        conn.close()
+        try:
+            conn.request("GET", f"{self.base_path}/web/login")
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8", errors="replace")
+        finally:
+            conn.close()
 
         match resp.status:
             case 200 | 302:
@@ -79,20 +81,25 @@ class OdooSession:
         # Extract initial session cookie from step 1 response
         initial_cookie = _extract_session_cookie(resp)
 
-        # Step 2: POST /web/login with credentials
+        # Step 2: POST /web/login with credentials (form body must be URL-encoded
+        # so special characters in user/password/csrf don't corrupt the fields)
         conn = self._connection()
-        post_body = (
-            f"csrf_token={csrf_token}"
-            f"&login={self.config['user']}"
-            f"&password={self.config['password']}"
+        post_body = urlencode(
+            {
+                "csrf_token": csrf_token,
+                "login": self.config["user"],
+                "password": self.config["password"],
+            }
         )
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         if initial_cookie:
             headers["Cookie"] = initial_cookie
 
-        conn.request("POST", f"{self.base_path}/web/login", body=post_body, headers=headers)
-        resp = conn.getresponse()
-        conn.close()
+        try:
+            conn.request("POST", f"{self.base_path}/web/login", body=post_body, headers=headers)
+            resp = conn.getresponse()
+        finally:
+            conn.close()
 
         match resp.status:
             case 200 | 302 | 303:
@@ -123,10 +130,12 @@ class OdooSession:
         Raises SessionExpiredError on 403/302 so the caller can retry.
         """
         conn = self._connection()
-        conn.request("POST", path, body=body, headers=headers)
-        resp = conn.getresponse()
-        data = resp.read()
-        conn.close()
+        try:
+            conn.request("POST", path, body=body, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+        finally:
+            conn.close()
 
         match resp.status:
             case 403 | 302:
@@ -138,7 +147,10 @@ class OdooSession:
             raise RuntimeError(f"Empty response from Odoo (HTTP {resp.status}, path={path})")
 
         try:
-            result = json.loads(data.decode("utf-8"))
+            # errors="replace": a non-UTF-8 upstream body (latin-1 gateway
+            # error page etc.) must fail into the JSON error below — a clean
+            # 502 — not escape the handler as a UnicodeDecodeError.
+            result = json.loads(data.decode("utf-8", errors="replace"))
         except json.JSONDecodeError as exc:
             raise RuntimeError(
                 f"Non-JSON response from Odoo (HTTP {resp.status}, path={path}): "
@@ -234,28 +246,42 @@ class OdooSession:
         message_type: str = "comment",
         subtype_xmlid: str = "mail.mt_note",
     ) -> dict:
-        """Post a note message to a thread via the standard Odoo RPC endpoint.
+        """Post a note message to a thread via Odoo's /mail/message/post route.
 
-        Uses /web/dataset/call_kw which is available on all Odoo instances.
+        This is the route Odoo's own web client uses (captured live in
+        spec/05-post-message.http). The generic /web/dataset/call_kw route
+        cannot target a record for ``message_post`` — it invokes the method on
+        an empty recordset, and ``body`` is message_post's first positional
+        parameter, so passing the thread id in ``args`` collides with the
+        ``body`` kwarg.
         """
         payload = {
             "jsonrpc": "2.0",
             "method": "call",
             "params": {
-                "model": thread_model,
-                "method": "message_post",
-                "args": [thread_id],
-                "kwargs": {
+                "thread_id": thread_id,
+                "thread_model": thread_model,
+                "context": {
+                    "lang": "en_GB",
+                    "tz": "Europe/Berlin",
+                },
+                "post_data": {
                     "body": body,
+                    "attachment_ids": [],
+                    "attachment_tokens": [],
+                    "canned_response_ids": [],
                     "message_type": message_type,
+                    "partner_ids": [],
                     "subtype_xmlid": subtype_xmlid,
+                    "partner_emails": [],
+                    "partner_additional_values": {},
                 },
             },
         }
 
         body_bytes = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json", "Cookie": self._cookie or ""}
-        path = f"{self.base_path}/web/dataset/call_kw"
+        path = f"{self.base_path}/mail/message/post"
 
         def _do() -> dict:
             self._ensure_session()
@@ -278,10 +304,14 @@ _session_config: Config | None = None
 
 
 def get_session(config: Config) -> OdooSession:
-    """Return the global OdooSession, initializing it if needed."""
+    """Return the global OdooSession, re-creating it only when the config changes.
+
+    Compares by value, not identity — callers may pass an equal dict on every
+    request without forcing a re-login.
+    """
     global _session, _session_config
-    if _session is None or _session_config is not config:
-        _session_config = config
+    if _session is None or _session_config != config:
+        _session_config = dict(config)
         _session = OdooSession(config)
     return _session
 
@@ -292,12 +322,17 @@ def get_session(config: Config) -> OdooSession:
 
 
 def _extract_session_cookie(resp: http.client.HTTPResponse) -> str:
-    """Extract session_id cookie parts from a response."""
-    set_cookie = resp.getheader("Set-Cookie")
-    if not set_cookie:
-        return ""
-    return "; ".join(
-        part.strip()
-        for part in set_cookie.split(";")
-        if part.strip().startswith("session_id=")
-    )
+    """Extract session_id cookie parts from a response.
+
+    HTTP allows repeated Set-Cookie headers and Odoo front-ends may emit
+    unrelated cookies before the session one, so every Set-Cookie header is
+    scanned — not just the first.
+    """
+    headers = resp.msg.get_all("Set-Cookie") or []
+    parts: list[str] = []
+    for header in headers:
+        for part in header.split(";"):
+            part = part.strip()
+            if part.startswith("session_id="):
+                parts.append(part)
+    return "; ".join(parts)

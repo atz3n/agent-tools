@@ -35,7 +35,7 @@ done
 # DEFINES
 ###################################################################################################
 
-HERE="$(pwd)/$(dirname $0)"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
 
 ###################################################################################################
@@ -49,7 +49,7 @@ FAILED=false
 echo "[INFO] Testing ${PROJECT_NAME}..."
 
 echo "[INFO] Running unittest..."
-if ! python -m unittest discover -s tests -v ; then
+if ! python3 -m unittest discover -s tests -v ; then
   FAILED=true
 fi
 

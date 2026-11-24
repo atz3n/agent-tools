@@ -13,11 +13,13 @@ _PR_PATHS: list[str] = [
     # PR CRUD
     r"^/repos/[^/]+/[^/]+/pulls$",
     r"^/repos/[^/]+/[^/]+/pulls/\d+$",
-    # Review comments (repository-wide)
+    # Review comments (repository-wide) — GitHub's get/update/delete route is
+    # comment-scoped (/pulls/comments/{id}); there is no
+    # /pulls/{n}/comments/{id} route.
     r"^/repos/[^/]+/[^/]+/pulls/comments$",
-    # Review comments (PR-specific)
+    r"^/repos/[^/]+/[^/]+/pulls/comments/\d+$",
+    # Review comments (PR-specific list/create + replies)
     r"^/repos/[^/]+/[^/]+/pulls/\d+/comments$",
-    r"^/repos/[^/]+/[^/]+/pulls/\d+/comments/\d+$",
     r"^/repos/[^/]+/[^/]+/pulls/\d+/comments/\d+/replies$",
     # Review comment reactions
     r"^/repos/[^/]+/[^/]+/pulls/comments/\d+/reactions$",
@@ -65,9 +67,9 @@ _ISSUE_PATHS: list[str] = [
     r"^/repos/[^/]+/[^/]+/labels$",
 ]
 
-_ALLOWED_PATHS: list[str] = _PR_PATHS + _ISSUE_PATHS
+ALLOWED_PATHS: list[str] = _PR_PATHS + _ISSUE_PATHS
 
-_ALLOWED_PATTERNS: list[re.Pattern[str]] = [re.compile(p) for p in _ALLOWED_PATHS]
+_ALLOWED_PATTERNS: list[re.Pattern[str]] = [re.compile(p) for p in ALLOWED_PATHS]
 
 # ---------------------------------------------------------------------------
 # Path aliases

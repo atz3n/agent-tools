@@ -1,4 +1,5 @@
 ---
+disable-model-invocation: true
 name: project-architecture
 description: Design a technical architecture for a specced feature. No code, only high-level design decisions — module structure, data model, tech choices, dependencies. Use when a feature spec exists and needs a technical design. Pass a feature name or ID as argument.
 ---
