@@ -37,6 +37,7 @@ The `pia` CLI lets you run multiple pi-agent containers in parallel, each with i
 | `pia run --docker` | Start with a throwaway sibling Docker daemon (opt-in; no host socket) |
 | `pia run --docker-full` | Start with the HOST Docker socket mounted (host-root-equivalent!) |
 | `pia run myproj -m . --ssh` | Start with name, mount, and SSH |
+| `pia run mail -e THUNDERBIRD_PROXY_TOKEN` | Start with the host's `THUNDERBIRD_PROXY_TOKEN` forwarded into the container |
 | `pia create [NAME] [OPTIONS]` | Create a stopped container without starting it (same options as `pia run`) |
 | `pia stop [NAME]` | Stop a named container |
 | `pia remove [NAME]` / `pia rm [NAME]` | Stop and remove a named container |
@@ -170,6 +171,7 @@ pia rename old-name new-name
 | Option | Description |
 |--------|-------------|
 | `-m, --mount <dir>` | Mount the specified directory into `/workspace` |
+| `-e, --env <spec>` | Set an environment variable in the container (repeatable). `NAME=VALUE` sets it directly; bare `NAME` forwards the host's value (like `docker run -e NAME`). `pia restart` carries specs over: unchanged → plain resume, changed → recreate with the new value, omitted → keep the container's current user env |
 | `-s, --ssh` | Mount the host SSH agent socket into the container |
 | `--docker` | Throwaway sibling Docker daemon per session (safe default, see below). Grants the agent root over the session — use it for your own code only |
 | `--docker-dev` | `--docker` plus the `-m` workspace mounted into the daemon at the same path (requires `-m`) |
@@ -196,7 +198,7 @@ URL-history options (`pia urls`):
 ### Notes
 
 - Containers are named with the `pia-` prefix — `pia run` starts an existing stopped container or creates a new one
-- `pia create` accepts the same options as `pia run` (`-m`, `--ssh`, `--docker`) but only creates the container and leaves it stopped; it fails if a container with that name already exists. Start it later with `pia run <NAME>` or run a one-shot prompt with `pia ask <NAME> <prompt>` (which starts the container, runs the prompt, and stops it again)
+- `pia create` accepts the same options as `pia run` (`-m`, `-e`, `--ssh`, `--docker`) but only creates the container and leaves it stopped; it fails if a container with that name already exists. Start it later with `pia run <NAME>` or run a one-shot prompt with `pia ask <NAME> <prompt>` (which starts the container, runs the prompt, and stops it again)
 - `pia resume` / `pia rs` start the most recently stopped container (by stop time, not creation time) and attach pi with `--continue`, so you land directly in the last session instead of reopening it; `pia run <NAME>` on a stopped container does the same for that container
 - `pia resume` selects the container itself and **takes no name** — `pia rs myproj` is rejected with a hint to use `pia run myproj`, rather than silently resuming a different session
 - `pia list` takes no arguments except `-a`/`--all` (which also shows the throwaway `NAME-dind` daemon containers, hidden by default); `pia clean` **takes no arguments** — an argument is rejected rather than ignored, so `pia clean --help` prints usage instead of removing containers

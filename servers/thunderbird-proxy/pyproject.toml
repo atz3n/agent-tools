@@ -1,0 +1,23 @@
+[project]
+name = "thunderbird-proxy"
+version = "0.1.0"
+description = "Mail proxy bridging agent REST calls to Thunderbird via a MailExtension add-on"
+requires-python = ">=3.14"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "coverage"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
