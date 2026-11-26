@@ -30,10 +30,12 @@
  *   (`pi --print`, which `pia ask` uses) never refreshes catalogs, so
  *   without persistence a print session would only ever see the empty list.
  * - A failed fetch keeps the previous list and never stalls startup.
- * - The async factory additionally performs one best-effort fetch at load
- *   time, so even a fresh container with an empty model store has a catalog
- *   in print mode. If mlx-serve is down, startup waits at most
- *   STARTUP_FETCH_TIMEOUT_MS and registers an empty baseline.
+ * - The async factory additionally performs a best-effort fetch at load
+ *   time (with one retry), so even a fresh container with an empty model
+ *   store has a catalog in print mode. If mlx-serve is down, startup waits
+ *   at most STARTUP_FETCH_ATTEMPTS * STARTUP_FETCH_TIMEOUT_MS and registers
+ *   an empty baseline — loudly, because a silently empty baseline is what
+ *   makes a later "Could not restore model" impossible to diagnose.
  *
  * Streaming is delegated to pi's built-in `openai-completions`
  * implementation — no custom stream code.
@@ -51,8 +53,10 @@ const CATALOG_URL = `${BASE_URL}/models`;
 /** Bearer credential for every llm-proxy route; matches the proxy's LLM_PROXY_TOKEN gate. */
 const PROXY_TOKEN = process.env.LLM_PROXY_TOKEN ?? "none";
 
-/** Cap on how long the load-time catalog fetch may delay pi startup. */
-const STARTUP_FETCH_TIMEOUT_MS = 3000;
+/** Cap on how long one load-time catalog fetch attempt may delay pi startup. */
+const STARTUP_FETCH_TIMEOUT_MS = 5000;
+/** Attempts for the load-time fetch — absorbs Docker's lost first DNS query for host.docker.internal. */
+const STARTUP_FETCH_ATTEMPTS = 2;
 
 /** Fallbacks for catalog entries that omit budget/context metadata. */
 const DEFAULT_CONTEXT_WINDOW = 128_000;
@@ -136,11 +140,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// and a fresh container has no persisted store yet, so without this pass
 	// `pia ask` would see no models at all. A failure here is not fatal.
 	let baseline: Model<"openai-completions">[] = [];
-	try {
-		baseline = await fetchCatalog(AbortSignal.timeout(STARTUP_FETCH_TIMEOUT_MS));
-	} catch {
-		// mlx-serve (or the proxy) down at startup: register with an empty
-		// baseline; interactive refreshes fill the list once it is reachable.
+	for (let attempt = 1; attempt <= STARTUP_FETCH_ATTEMPTS; attempt++) {
+		try {
+			baseline = await fetchCatalog(AbortSignal.timeout(STARTUP_FETCH_TIMEOUT_MS));
+			break;
+		} catch (error) {
+			// mlx-serve (or the proxy) down at startup: register with an empty
+			// baseline; interactive refreshes fill the list once it is reachable.
+			// Log it — pi's "Could not restore model" warning later would
+			// otherwise have no trace of why the list is empty.
+			const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+			console.error(`[llm-proxy] baseline catalog fetch failed (attempt ${attempt}/${STARTUP_FETCH_ATTEMPTS}): ${message}`);
+		}
 	}
 
 	pi.registerProvider(

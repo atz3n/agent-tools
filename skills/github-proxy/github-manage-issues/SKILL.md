@@ -1,5 +1,4 @@
 ---
-disable-model-invocation: true
 name: github-manage-issues
 description: Call the GitHub PR proxy server via REST API to list, create, get, update, comment on, label, and assign issues through the local proxy on port 8086.
 ---
