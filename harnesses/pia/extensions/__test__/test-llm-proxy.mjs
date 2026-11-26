@@ -155,30 +155,42 @@ test("registers the mlx-serve provider with a startup-fetched baseline", async (
 	assert.ok(mlxProvider.auth.apiKey, "provider must expose apiKey auth so refreshes run");
 });
 
-test("startup fetch failure still registers the provider with an empty baseline", async () => {
-	const { mlxProvider } = await loadAndRegister(
-		mockFetch(async () => {
-			throw new TypeError("fetch failed: ECONNREFUSED");
-		}),
-	);
+test("startup fetch failure retries, then registers an empty baseline", async () => {
+	const failing = mockFetch(async () => {
+		throw new TypeError("fetch failed: ECONNREFUSED");
+	});
+	const { mlxProvider } = await loadAndRegister(failing);
 	assert.equal(mlxProvider.id, "mlx-serve");
 	assert.deepEqual(mlxProvider.getModels(), []);
+	assert.equal(failing.requests.length, 2, "a failed baseline fetch is retried once");
+});
+
+test("a retried baseline fetch recovers when the first attempt fails", async () => {
+	let calls = 0;
+	const { mlxProvider } = await loadAndRegister(
+		mockFetch(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed: EAI_AGAIN host.docker.internal");
+			return okResponse(CATALOG);
+		}),
+	);
+	assert.equal(mlxProvider.getModels().length, 2, "retry fills the baseline after a transient DNS failure");
 });
 
 test("a hanging startup fetch is cut off by the timeout and registers an empty baseline", async () => {
 	const started = Date.now();
-	const { mlxProvider } = await loadAndRegister(
-		mockFetch(
-			(_url, options) =>
-				new Promise((_, reject) =>
-					options.signal.addEventListener("abort", () => reject(options.signal.reason)),
-				),
-		),
+	const hanging = mockFetch(
+		(_url, options) =>
+			new Promise((_, reject) =>
+				options.signal.addEventListener("abort", () => reject(options.signal.reason)),
+			),
 	);
+	const { mlxProvider } = await loadAndRegister(hanging);
 	assert.deepEqual(mlxProvider.getModels(), [], "unreachable catalog must not block startup");
-	// STARTUP_FETCH_TIMEOUT_MS is 3000 — boot may not wait longer than that
-	// (plus slack) for a catalog that never answers.
-	assert.ok(Date.now() - started < 6000, `startup took ${Date.now() - started}ms`);
+	assert.equal(hanging.requests.length, 2, "the timed-out attempt is retried once");
+	// STARTUP_FETCH_TIMEOUT_MS is 5000 with 2 attempts — boot may not wait
+	// longer than that (plus slack) for a catalog that never answers.
+	assert.ok(Date.now() - started < 12_000, `startup took ${Date.now() - started}ms`);
 });
 
 test("maps catalog entries onto pi chat model fields", async () => {
