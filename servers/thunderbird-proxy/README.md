@@ -74,7 +74,7 @@ The add-on source is in [`addon/`](addon/).
 2. For a permanent install, package it and install from file:
 
    ```bash
-   cd addon && web-ext build        # or: zip -r ../thunderbird-proxy-bridge.xpi *
+   cd addon && web-ext build        # or: zip -r ../thunderbird-proxy-bridge.xpi * -x '__test__*'
    ```
 
    Then *Add-ons and Themes* → gear → *Install Add-on From File*.
@@ -164,13 +164,19 @@ The three secrets live in `secrets/*.txt` (gitignored) and are loaded by
 
 ```bash
 python3 -m unittest discover -s tests -v   # or ./scripts/test-project.sh
+node --test addon/__test__/*.test.mjs   # add-on dispatcher tests (node)
 ./scripts/lint-project.sh
 ```
 
-The suite covers the endpoint whitelist and command mapping, body validation,
-config loading and mandatory-token startup check, the bridge (queue → poll →
-result correlation, timeouts, disconnect), and a live-socket HTTP pass
-against a fake add-on (token gate, 404/405, 504, end-to-end round-trips).
+The Python suite covers the endpoint whitelist and command mapping, body
+validation, config loading and mandatory-token startup check, the bridge
+(queue → poll → result correlation, timeouts, disconnect), and a live-socket
+HTTP pass against a fake add-on (token gate, 404/405, 504, end-to-end
+round-trips). The add-on dispatcher (`addon/commands.js`) has its own node
+tests under `addon/__test__/` (the plain script is loaded in a `vm` with a
+stubbed `browser`); `test-project.sh` runs both suites and skips the node
+ones loudly when node is unavailable. `addon/__test__/` is dev-only — the
+zip packaging command above excludes it from the xpi.
 
 ## Security notes
 

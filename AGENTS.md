@@ -87,7 +87,7 @@ agent-tools/
 │   │   └── README.md          # Server-specific docs
 │   ├── thunderbird-proxy/     # Mail proxy (command bridge to Thunderbird)
 │   │   ├── thunderbird_proxy/ # Package: config.py, whitelist.py (endpoint→command table), bridge.py, server.py
-│   │   ├── addon/             # Thunderbird MailExtension (manifest.json, background.js, commands.js, options/)
+│   │   ├── addon/             # Thunderbird MailExtension (manifest.json, background.js, commands.js, options/, __test__/ — dev-only node tests, excluded from the xpi)
 │   │   ├── docker/            # Dockerfile + docker-compose.yml
 │   │   ├── scripts/           # build/run/pause/stop/lint/test/clean scripts
 │   │   ├── secrets/           # Mandatory shared token (gitignored)
@@ -385,7 +385,7 @@ To use: copy the template into a project and run the initialization prompt from 
 
 ### Tests
 
-- Tests use `unittest` with `unittest.mock` for patching.
+- Tests use `unittest` with `unittest.mock` for patching. The thunderbird-proxy add-on additionally has node unit tests (`addon/__test__/`, `node --test`, vm-loaded `commands.js` with a stubbed `browser`), wired into its `test-project.sh`.
 - Tests cover: endpoint whitelist (allowed + blocked paths), query parameter handling, configuration loading, credential loading (env vars validated at startup), logging format, HTTP method support, session management (odoo-proxy), graceful shutdown, frontmatter parsing, task CRUD, project management (list, create), counter persistence, handler methods (tasks-server), route resolution, prefix stripping, credential injection/stripping, model allowlist, token gate, SSE passthrough, and 502 handling (llm-proxy).
 - Tests import the server module directly (tasks-server prepends `sys.path`; the others import through the package directory/cwd) — no actual server is started.
 
