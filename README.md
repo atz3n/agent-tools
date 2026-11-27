@@ -57,7 +57,7 @@ Agent (pia container) → curl → localhost:8090 (thunderbird-proxy) → Thunde
 | [odoo-proxy](servers/odoo-proxy/) | 8087 | Application server over Odoo: manages the login session internally and exposes `/task/data`, `/task/messages`, and `/task/message` for project tasks. |
 | [tasks-server](servers/tasks-server/) | 8088 | REST API + zero-dependency web UI for tasks stored as markdown files with YAML frontmatter, organized per project with auto-incrementing IDs. |
 | [llm-proxy](servers/llm-proxy/) | 8089 | Credential-injecting reverse proxy for LLM inference. One host:port, one path prefix per provider (`/openrouter`, `/mlx-serve`), per-route endpoint whitelist, optional model allowlist, unbuffered SSE passthrough. |
-| [thunderbird-proxy](servers/thunderbird-proxy/) | 8090 | Mail for agents. REST calls become commands from a closed set, executed by a bundled Thunderbird add-on that long-polls the proxy (an add-on can't be called over HTTP, so the bridge dials out) — read, search, flag, move, delete, draft, and send through your Thunderbird identity. |
+| [thunderbird-proxy](servers/thunderbird-proxy/) | 8090 | Mail for agents. REST calls become commands from a closed set, executed by a bundled Thunderbird add-on that long-polls the proxy (an add-on can't be called over HTTP, so the bridge dials out) — read, search, flag, move, delete, draft, and send through your Thunderbird identity, plus folder create/rename/delete. |
 
 Each server has its own README with endpoints, setup, and configuration.
 
@@ -72,7 +72,8 @@ Each server has its own README with endpoints, setup, and configuration.
 | odoo-proxy | `odoo-get-task-data`, `odoo-get-task-messages`, `odoo-post-task-message` |
 | project | `project-new-project`, `project-write-spec`, `project-architecture`, `project-implement`, `project-refine`, `project-qa`, `project-doctor`, `project-help`, `project-autopilot` |
 | tasks-server | `tasks-server` |
-| misc | `codebase-review`, `loop-prompt`, `incident-report` |
+| thunderbird-proxy | `thunderbird-mail` |
+| misc | `codebase-review`, `codebase-review-autopilot`, `loop-prompt`, `incident-report` |
 
 Install by copying a skill's directory into your agent's skills folder (e.g. `~/.pi/agent/skills/<feature>/<skill>/`).
 
