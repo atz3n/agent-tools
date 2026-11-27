@@ -6,7 +6,11 @@
 const ProxyCommands = {
   handlers: {
     async "accounts.list"(params) {
-      const accounts = await browser.accounts.list(Boolean(params.includeSubFolders));
+      // Query params arrive as strings — an explicit true (JSON boolean or
+      // the string "true") is the only thing that includes sub-folders;
+      // Boolean("false") would have been true.
+      const withSubFolders = params.includeSubFolders === true || params.includeSubFolders === "true";
+      const accounts = await browser.accounts.list(withSubFolders);
       return { accounts: accounts.map(slimAccount) };
     },
 
