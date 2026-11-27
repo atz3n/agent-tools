@@ -178,10 +178,7 @@ function messageKey(raw) {
 }
 
 function buildOutgoing(params) {
-  const details = { subject: params.subject, identityId: params.identityId };
-  for (const key of ["to", "cc", "bcc"]) {
-    if (params[key]) details[key] = params[key];
-  }
+  const details = copyRecipients({ subject: params.subject, identityId: params.identityId }, params);
   if (params.isPlainText === false) {
     details.body = params.body;
     details.isPlainText = false;
@@ -197,11 +194,18 @@ function firstMessage(result) {
   return result && result.messages ? result.messages[0] : result;
 }
 
-function buildComposeDetails(params) {
-  const details = { subject: params.subject, identityId: params.identityId };
+// The proxy legalizes empty cc/bcc arrays (only `to` must be non-empty), but
+// how Thunderbird treats details.cc = [] is unspecified — treat empty as
+// absent so the request matches one where the field was never sent.
+function copyRecipients(details, params) {
   for (const key of ["to", "cc", "bcc"]) {
-    if (params[key]) details[key] = params[key];
+    if (params[key] && params[key].length) details[key] = params[key];
   }
+  return details;
+}
+
+function buildComposeDetails(params) {
+  const details = copyRecipients({ subject: params.subject, identityId: params.identityId }, params);
   // Docs describe body as { format, plainText, html } — the runtime schema
   // demands a plain string, so give it exactly that.
   details.body = String(params.plainTextBody ?? params.body ?? "");

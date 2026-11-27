@@ -123,9 +123,15 @@ def path_known_any_method(path: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _recipient_list(value: object, field: str, item_label: str = "strings") -> str:
-    """Error message when value is not a non-empty list of non-empty strings."""
-    if not isinstance(value, list) or not value or not all(isinstance(v, str) and v.strip() for v in value):
+def _recipient_list(value: object, field: str, item_label: str = "strings", allow_empty: bool = False) -> str:
+    """Error message when value is not a list of non-empty strings.
+
+    An empty list passes only when allow_empty (cc/bcc, tags) — clearing
+    them with [] is a valid request; 'to' always needs at least one address.
+    """
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        return f"{field} must be {'an' if allow_empty else 'a non-empty'} array of {item_label}"
+    if not value and not allow_empty:
         return f"{field} must be a non-empty array of {item_label}"
     return ""
 
@@ -144,7 +150,7 @@ def validate_mail_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
         return None, "body must be a JSON object"
     for list_field in ("to", "cc", "bcc"):
         if list_field in payload:
-            error = _recipient_list(payload[list_field], list_field)
+            error = _recipient_list(payload[list_field], list_field, allow_empty=list_field != "to")
             if error:
                 return None, error
     if not payload.get("to"):
@@ -197,7 +203,8 @@ def validate_update_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
     if "starred" in payload and not isinstance(payload["starred"], bool):
         return None, "starred must be a boolean"
     if "tags" in payload:
-        error = _recipient_list(payload["tags"], "tags", "tag names")
+        # An empty array is valid — it clears the message's tags.
+        error = _recipient_list(payload["tags"], "tags", "tag names", allow_empty=True)
         if error:
             return None, error
     if "moveTo" in payload and not isinstance(payload["moveTo"], str):

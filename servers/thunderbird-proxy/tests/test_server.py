@@ -145,6 +145,17 @@ class TestBodyValidation(unittest.TestCase):
         self.assertFalse(params["isPlainText"])
         self.assertEqual(params["body"], "<b>hi</b>")
 
+    def test_send_empty_cc_bcc_clears_lists(self) -> None:
+        params, error = whitelist.validate_mail_body(
+            b'{"to": ["a@b.c"], "subject": "s", "body": "x", "cc": [], "bcc": []}'
+        )
+        assert params is not None
+        self.assertEqual(error, "")
+        self.assertEqual(params["cc"], [])
+        params, error = whitelist.validate_mail_body(b'{"to": [], "subject": "s", "body": "x"}')
+        self.assertIsNone(params)
+        self.assertIn("to must be", error)
+
     def test_send_identity_id(self) -> None:
         params, error = whitelist.validate_mail_body(
             b'{"to": ["a@b.c"], "subject": "s", "body": "x", "identityId": "id2"}'
@@ -170,6 +181,13 @@ class TestBodyValidation(unittest.TestCase):
         params, error = whitelist.validate_update_body(b'{"read": "yes"}')
         self.assertIsNone(params)
         self.assertIn("read must be a boolean", error)
+        params, error = whitelist.validate_update_body(b'{"tags": []}')
+        assert params is not None
+        self.assertEqual(error, "")
+        self.assertEqual(params["tags"], [])
+        params, error = whitelist.validate_update_body(b'{"tags": ["work", 7]}')
+        self.assertIsNone(params)
+        self.assertIn("tags must be an array of tag names", error)
 
     def test_extract_recipients(self) -> None:
         params, _ = whitelist.validate_mail_body(
