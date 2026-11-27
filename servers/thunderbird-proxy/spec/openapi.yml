@@ -84,8 +84,8 @@ paths:
     post:
       summary: >
         Mark every message in a folder as read (command folders.markRead) —
-        the only bulk flag Thunderbird's WebExtension API exposes; set-level
-        flag updates do not exist, per-message flags stay PATCH /mail/{id}.
+        a set-level folder operation; for a selection of ids use
+        POST /mail/mark, which also covers starring.
       requestBody:
         required: true
         content:
@@ -217,9 +217,11 @@ paths:
         call for the whole selection, not one round-trip per message. The
         moved messages get new ids in the destination folder (ids are
         per-folder session keys) — re-list before touching them again.
-        Batch endpoints exist only where Thunderbird natively takes id
-        arrays or offers a set-level operation; tags stay per-message
-        (PATCH /mail/{id}).
+        On slow providers a 504 timeout does not imply failure — the
+        server-side move often still completes; re-list both folders before
+        retrying. Batch endpoints exist only where Thunderbird natively
+        takes id arrays or offers a set-level operation; tags stay
+        per-message (PATCH /mail/{id}).
       requestBody:
         required: true
         content:

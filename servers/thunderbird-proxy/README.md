@@ -91,7 +91,7 @@ The add-on source is in [`addon/`](addon/).
    from `secrets/thunderbird-addon-token.txt` and the **response secret**
    from `secrets/thunderbird-addon-secret.txt`. The **command timeout**
    (default 60 s) is the add-on-side hard deadline for one Thunderbird
-   operation — raise it if a slow provider (Gmail IMAP moves run ~20-30 s)
+   operation — raise it if a slow provider (Gmail IMAP moves run ~20-60 s)
    trips it, but keep it below the proxy's `COMMAND_TIMEOUT`. The toolbar
    badge shows `on` when the bridge is connected.
 
@@ -178,8 +178,8 @@ curl -s -H "$AUTH" -X POST localhost:8090/mail/mark \
 curl -s -H "$AUTH" -X POST localhost:8090/mail/trash \
   -H "Content-Type: application/json" -d '{"ids":[15,16]}'
 
-# Mark a whole folder read (bulk flag — per-message flags stay PATCH-only,
-# the WebExtension API has no set-level update)
+# Mark a whole folder read (set-level folder operation — distinct from the
+# /mail/mark bulk flag, which takes a selection of ids)
 curl -s -H "$AUTH" -X POST localhost:8090/folders/mark-read \
   -H "Content-Type: application/json" -d '{"folderId":"account4://INBOX"}'
 
@@ -283,6 +283,13 @@ from the xpi it writes to `dist/`.
   user dismisses the prompt in Thunderbird. Keep `COMMAND_TIMEOUT` above the
   add-on deadline — below it the proxy times out first and the add-on's late
   result lands on an already-popped command.
+- **Moves re-key message ids and can outlive their timeout.** Session
+  message ids are per-folder: after a move the message has a new id in the
+  destination folder, so agents must re-list before touching a message they
+  just moved. And Gmail moves are slow (~20-60 s, worse under throttling):
+  a `504` from the proxy does not mean the move failed — the server-side
+  move often still completes after the timeout. Re-list both folders before
+  retrying rather than blind-retrying the move.
 - One add-on instance: a second `hello` (e.g. Thunderbird on two machines
   against one proxy) replaces the first.
 - If Thunderbird goes down mid-command, the waiting request fails with the

@@ -101,8 +101,8 @@ curl -s -H "$AUTH" -X POST "$PROXY/mail/mark" \
 curl -s -H "$AUTH" -X POST "$PROXY/mail/trash" \
   -H "Content-Type: application/json" -d '{"ids":[15,16]}'
 
-# Mark the whole folder read in one call (bulk flag — Thunderbird exposes
-# no set-level flag update, so per-message flags stay single PATCHes)
+# Mark the whole folder read in one call (set-level Thunderbird operation —
+# same native path as the bulk flag above, but scoped to the entire folder)
 curl -s -H "$AUTH" -X POST "$PROXY/folders/mark-read" \
   -H "Content-Type: application/json" -d '{"folderId":"<folderId>"}'
 
@@ -116,8 +116,11 @@ whole-folder `mark-read`. Tags are the one flag without a bulk path —
 per-message PATCH only; if you must tag many, loop and tell the user it
 will be slow. Message ids do not survive a move: the message gets a new id
 in the destination folder — re-list before any follow-up operation on
-messages you just moved. Gmail IMAP operations are slow (~20-30 s for a
-move); expect moves to take seconds, not milliseconds.
+messages you just moved. Gmail IMAP operations are slow (~20-60 s for a
+move); expect moves to take seconds, not milliseconds. A `504` timeout on
+a move does **not** mean it failed — the server-side move often still
+completes after the proxy gave up. Never blind-retry a timed-out move:
+re-list the source and destination folders first and act on what you find.
 
 ## Manage Folders
 
