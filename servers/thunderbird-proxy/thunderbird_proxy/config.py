@@ -18,10 +18,20 @@ PORT = int(os.environ.get("PROXY_PORT") or "8090")
 # running the server directly on a host.
 BIND_HOST = os.environ.get("BIND_HOST", "0.0.0.0")
 
-# Shared secret between the proxy, the agent callers, and the Thunderbird
-# add-on. Mandatory: this proxy can read and send mail, so unlike the
-# llm-proxy gate there is no open default.
+# Shared secret between the proxy and its agent callers. Mandatory: this
+# proxy can read and send mail, so unlike the llm-proxy gate there is no
+# open default.
 THUNDERBIRD_PROXY_TOKEN = os.environ.get("THUNDERBIRD_PROXY_TOKEN", "").strip()
+
+# Separate secret for the add-on face (/addon/*). Split from the agent token
+# so a process that squats the port and captures the add-on's credential
+# cannot use it on the agent face (and vice versa).
+THUNDERBIRD_ADDON_TOKEN = os.environ.get("THUNDERBIRD_ADDON_TOKEN", "").strip()
+
+# HMAC key with which the proxy signs every add-on-face response over
+# (request nonce, body). The add-on verifies it before executing any
+# command, so an impostor listening on the port cannot forge commands.
+THUNDERBIRD_ADDON_SECRET = os.environ.get("THUNDERBIRD_ADDON_SECRET", "").strip()
 
 # How long an agent request waits for the add-on to execute its command.
 COMMAND_TIMEOUT = int(os.environ.get("COMMAND_TIMEOUT") or "30")
@@ -58,11 +68,16 @@ logger.addHandler(_handler)
 
 
 def validate_config() -> None:
-    """Exit unless the mandatory shared token is configured."""
-    if not THUNDERBIRD_PROXY_TOKEN:
-        print(
-            "ERROR: THUNDERBIRD_PROXY_TOKEN is not set — it is mandatory "
-            "(both the agent face and the add-on face are gated by it)",
-            file=sys.stderr,
+    """Exit unless all three mandatory secrets are configured."""
+    missing = [
+        name
+        for name, value in (
+            ("THUNDERBIRD_PROXY_TOKEN", THUNDERBIRD_PROXY_TOKEN),
+            ("THUNDERBIRD_ADDON_TOKEN", THUNDERBIRD_ADDON_TOKEN),
+            ("THUNDERBIRD_ADDON_SECRET", THUNDERBIRD_ADDON_SECRET),
         )
+        if not value
+    ]
+    if missing:
+        print(f"ERROR: {', '.join(missing)} not set — all three secrets are mandatory", file=sys.stderr)
         sys.exit(1)

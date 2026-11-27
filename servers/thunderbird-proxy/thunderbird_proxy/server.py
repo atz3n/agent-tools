@@ -10,6 +10,7 @@ Agent requests block until their command comes back (or time out with 504).
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import http.server
 import json
@@ -47,6 +48,11 @@ def _shutdown(server: http.server.HTTPServer, signum: int, frame: object) -> Non
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     """Serve the agent face and the add-on face; reject everything else."""
 
+    # Set per request in _handle: add-on-face responses are HMAC-signed for
+    # the add-on to verify, keyed by the request nonce (replay-proof).
+    _addon_signed = False
+    _addon_nonce = ""
+
     def _reject(self, status: int, message: str, method: str, detail: str = "") -> None:
         logger.info(f"{method} {self.path} {status} from {self.client_address[0]}{detail}")
         self._respond(status, {"error": message}, body=method != "HEAD")
@@ -57,16 +63,29 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self._cors_header()
+        self._proof_header(data)
         self.end_headers()
         if body:
             self.wfile.write(data)
 
+    def _proof_header(self, data: bytes) -> None:
+        if not self._addon_signed:
+            return
+        secret = config.THUNDERBIRD_ADDON_SECRET
+        if not secret:
+            return
+        mac = hmac.new(secret.encode(), self._addon_nonce.encode() + b"\n" + data, hashlib.sha256)
+        self.send_header("X-Proxy-Proof", mac.hexdigest())
+
     def _cors_header(self) -> None:
         """Echo the add-on's moz-extension origin — Thunderbird may apply
-        CORS to the extension's fetches despite its host permission."""
+        CORS to the extension's fetches despite its host permission. The
+        proof header must be listed explicitly or cross-origin JS cannot
+        read it."""
         origin = self.headers.get("origin", "")
         if origin.startswith("moz-extension://"):
             self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Expose-Headers", "X-Proxy-Proof")
 
     def _log_ok(self, method: str, status: int, detail: str) -> None:
         logger.info(f"{method} {self.path} {status} from {self.client_address[0]} {detail}")
@@ -81,12 +100,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return None
         return self.rfile.read(content_length)
 
-    def _authorized(self, method: str) -> bool:
-        """Mandatory shared-secret gate for both faces (constant-time)."""
-        token = config.THUNDERBIRD_PROXY_TOKEN
+    def _authorized(self, method: str, env_var: str) -> bool:
+        """Mandatory per-face shared-secret gate (constant-time)."""
+        token = getattr(config, env_var)
         if not token:
-            # Only reachable when the server was started without validation.
-            self._reject(503, "proxy not configured: THUNDERBIRD_PROXY_TOKEN is required", method)
+            self._reject(503, f"proxy not configured: {env_var} is required", method)
             return False
         if not hmac.compare_digest(self.headers.get("authorization", ""), f"Bearer {token}"):
             self._reject(401, "unauthorized", method)
@@ -98,11 +116,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if payload is None:
             return
 
-        if not self._authorized(method):
+        path = self.path.partition("?")[0]
+        self._addon_signed = path.startswith("/addon/")
+        self._addon_nonce = self.headers.get("x-addon-nonce", "") if self._addon_signed else ""
+        gate = "THUNDERBIRD_ADDON_TOKEN" if self._addon_signed else "THUNDERBIRD_PROXY_TOKEN"
+        if not self._authorized(method, gate):
             return
 
-        path = self.path.partition("?")[0]
-        if path.startswith("/addon/"):
+        if self._addon_signed:
             self._addon_face(method, path, payload, body)
             return
 
@@ -155,10 +176,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if command is None:
                 self.send_response(204)
                 self._cors_header()
+                self._proof_header(b"")
                 self.end_headers()
             else:
                 self._respond(200, command)
             self._log_ok(method, 200 if command else 204, "poll")
+            return
+
+        if path == "/addon/status":
+            self._respond(200, bridge.status())
+            self._log_ok(method, 200, "addon status")
             return
 
         try:
@@ -219,7 +246,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, PATCH, DELETE")
-            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Addon-Nonce")
             self.send_header("Access-Control-Max-Age", "600")
             self.end_headers()
             self._log_ok("OPTIONS", 204, f"preflight {self.path.partition('?')[0]} as {requested} from {origin}")

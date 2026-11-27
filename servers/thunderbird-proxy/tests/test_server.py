@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import http.client
 import http.server
 import importlib
@@ -22,6 +24,8 @@ from thunderbird_proxy.bridge import Bridge, BridgeError
 from thunderbird_proxy.server import ProxyHandler, _shutdown
 
 TEST_TOKEN = "test-token"
+TEST_ADDON_TOKEN = "test-addon-token"
+TEST_ADDON_SECRET = "test-addon-secret"
 
 
 class _LogCapture(logging.Handler):
@@ -103,10 +107,15 @@ class TestWhitelist(unittest.TestCase):
             },
         )
 
-    def test_addon_face_is_exactly_the_trio(self) -> None:
+    def test_addon_face_is_exactly_the_fixed_set(self) -> None:
         self.assertEqual(
             whitelist.ADDON_ENDPOINTS,
-            {("POST", "/addon/hello"), ("GET", "/addon/poll"), ("POST", "/addon/result")},
+            {
+                ("POST", "/addon/hello"),
+                ("GET", "/addon/poll"),
+                ("POST", "/addon/result"),
+                ("GET", "/addon/status"),
+            },
         )
 
 
@@ -192,11 +201,16 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(module.COMMAND_TIMEOUT, 5)
         self.assertEqual(module.ALLOWED_SENDERS, frozenset({"a@b.c", "d@e.f"}))
 
-    def test_validate_requires_token(self) -> None:
-        with patch.object(config, "THUNDERBIRD_PROXY_TOKEN", ""), redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                config.validate_config()
-        with patch.object(config, "THUNDERBIRD_PROXY_TOKEN", "tok"):
+    def test_validate_requires_all_secrets(self) -> None:
+        for name in ("THUNDERBIRD_PROXY_TOKEN", "THUNDERBIRD_ADDON_TOKEN", "THUNDERBIRD_ADDON_SECRET"):
+            with patch.object(config, name, ""), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    config.validate_config()
+        with (
+            patch.object(config, "THUNDERBIRD_PROXY_TOKEN", "tok"),
+            patch.object(config, "THUNDERBIRD_ADDON_TOKEN", "addon"),
+            patch.object(config, "THUNDERBIRD_ADDON_SECRET", "secret"),
+        ):
             config.validate_config()  # must not raise
 
     def tearDown(self) -> None:
@@ -282,7 +296,7 @@ class _FakeAddon(threading.Thread):
     def _request(self, method: str, path: str, body: Any = None) -> http.client.HTTPResponse:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=35)
         payload = json.dumps(body) if body is not None else None
-        conn.request(method, path, body=payload, headers={"Authorization": f"Bearer {TEST_TOKEN}"})
+        conn.request(method, path, body=payload, headers={"Authorization": f"Bearer {TEST_ADDON_TOKEN}"})
         return conn.getresponse()
 
     def run(self) -> None:
@@ -328,6 +342,8 @@ class TestHTTPServer(unittest.TestCase):
             TestHTTPServer.last_addon.stop.set()
             TestHTTPServer.last_addon.join(2)
         patch.object(config, "THUNDERBIRD_PROXY_TOKEN", TEST_TOKEN).start()
+        patch.object(config, "THUNDERBIRD_ADDON_TOKEN", TEST_ADDON_TOKEN).start()
+        patch.object(config, "THUNDERBIRD_ADDON_SECRET", TEST_ADDON_SECRET).start()
         patch.object(config, "ADDON_POLL_WAIT", 0.2).start()
         patch.object(server_module, "bridge", Bridge()).start()
         self.addCleanup(patch.stopall)
@@ -349,11 +365,16 @@ class TestHTTPServer(unittest.TestCase):
         return resp.status, json.loads(data) if data else None
 
     def _raw(self, method: str, path: str, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str]]:
+        status, resp_headers, _ = self._raw_body(method, path, headers)
+        return status, resp_headers
+
+    def _raw_body(
+        self, method: str, path: str, headers: dict[str, str] | None = None
+    ) -> tuple[int, dict[str, str], str]:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         conn.request(method, path, headers=headers or {})
         resp = conn.getresponse()
-        resp.read()
-        return resp.status, dict(resp.headers)
+        return resp.status, dict(resp.headers), resp.read().decode()
 
     def _start_addon(self, responder: Any = None) -> _FakeAddon:
         self.addon = _FakeAddon(self.port, responder)
@@ -385,6 +406,41 @@ class TestHTTPServer(unittest.TestCase):
         status, _ = self._request("GET", "/addon/poll", token=None)
         self.assertEqual(status, 401)
 
+    def test_agent_token_rejected_on_addon_face(self) -> None:
+        status, _ = self._raw("GET", "/addon/poll", {"Authorization": f"Bearer {TEST_TOKEN}"})
+        self.assertEqual(status, 401)
+
+    def test_addon_token_rejected_on_agent_face(self) -> None:
+        status, _ = self._raw("GET", "/status", {"Authorization": f"Bearer {TEST_ADDON_TOKEN}"})
+        self.assertEqual(status, 401)
+
+    # -- response signing (proxy -> add-on) -----------------------------------
+
+    def _expected_proof(self, nonce: str, body: str) -> str:
+        message = nonce.encode() + b"\n" + body.encode()
+        return hmac.new(TEST_ADDON_SECRET.encode(), message, hashlib.sha256).hexdigest()
+
+    def test_addon_status_signed(self) -> None:
+        nonce = "abc123"
+        status, headers, body = self._raw_body(
+            "GET", "/addon/status", {"Authorization": f"Bearer {TEST_ADDON_TOKEN}", "X-Addon-Nonce": nonce}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("X-Proxy-Proof"), self._expected_proof(nonce, body))
+
+    def test_poll_empty_response_signed(self) -> None:
+        nonce = "nonce-42"
+        status, headers, _ = self._raw_body(
+            "GET", "/addon/poll", {"Authorization": f"Bearer {TEST_ADDON_TOKEN}", "X-Addon-Nonce": nonce}
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(headers.get("X-Proxy-Proof"), self._expected_proof(nonce, ""))
+
+    def test_agent_face_not_signed(self) -> None:
+        status, headers, _ = self._raw_body("GET", "/status", {"Authorization": f"Bearer {TEST_TOKEN}"})
+        self.assertEqual(status, 200)
+        self.assertNotIn("X-Proxy-Proof", headers)
+
     # -- CORS on the add-on face --------------------------------------------
 
     def test_preflight_allowed_on_addon_face(self) -> None:
@@ -392,6 +448,7 @@ class TestHTTPServer(unittest.TestCase):
         self.assertEqual(status, 204)
         self.assertEqual(headers["Access-Control-Allow-Origin"], "moz-extension://abc")
         self.assertIn("authorization", headers["Access-Control-Allow-Headers"].lower())
+        self.assertIn("x-addon-nonce", headers["Access-Control-Allow-Headers"].lower())
 
     def test_preflight_refused_for_plain_origin(self) -> None:
         status, _ = self._raw("OPTIONS", "/status", {"Origin": "https://evil.example"})
@@ -403,10 +460,11 @@ class TestHTTPServer(unittest.TestCase):
 
     def test_addon_responses_echo_moz_extension_origin(self) -> None:
         status, headers = self._raw(
-            "GET", "/addon/poll", {"Origin": "moz-extension://abc", "Authorization": f"Bearer {TEST_TOKEN}"}
+            "GET", "/addon/poll", {"Origin": "moz-extension://abc", "Authorization": f"Bearer {TEST_ADDON_TOKEN}"}
         )
         self.assertEqual(status, 204)
         self.assertEqual(headers["Access-Control-Allow-Origin"], "moz-extension://abc")
+        self.assertIn("X-Proxy-Proof", headers["Access-Control-Expose-Headers"])
 
     def test_moz_extension_origin_echoed_on_agent_face(self) -> None:
         headers = {"Origin": "moz-extension://abc", "Authorization": f"Bearer {TEST_TOKEN}"}
@@ -509,13 +567,13 @@ class TestHTTPServer(unittest.TestCase):
         conn.request(
             "POST", "/addon/result",
             body=json.dumps({"id": "nope", "ok": True}),
-            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+            headers={"Authorization": f"Bearer {TEST_ADDON_TOKEN}"},
         )
         self.assertEqual(conn.getresponse().status, 404)
 
     def test_addon_unknown_path_404(self) -> None:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        conn.request("POST", "/addon/evil", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
+        conn.request("POST", "/addon/evil", headers={"Authorization": f"Bearer {TEST_ADDON_TOKEN}"})
         self.assertEqual(conn.getresponse().status, 404)
 
     def test_patch_validation_400(self) -> None:

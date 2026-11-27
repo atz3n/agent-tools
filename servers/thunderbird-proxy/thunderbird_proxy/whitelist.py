@@ -74,8 +74,11 @@ ENDPOINTS: tuple[Endpoint, ...] = (
 COMMANDS: frozenset[str] = frozenset(e.command for e in ENDPOINTS if e.command)
 
 # Add-on face: exact (method, path) pairs, handled before the agent table.
+# /addon/status is the add-on's own health probe (options page "Test
+# connection") — the agent-face /status needs the agent token, which the
+# add-on no longer holds.
 ADDON_ENDPOINTS: frozenset[tuple[str, str]] = frozenset(
-    {("POST", "/addon/hello"), ("GET", "/addon/poll"), ("POST", "/addon/result")}
+    {("POST", "/addon/hello"), ("GET", "/addon/poll"), ("POST", "/addon/result"), ("GET", "/addon/status")}
 )
 
 

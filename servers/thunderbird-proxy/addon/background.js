@@ -1,10 +1,11 @@
 // Persistent background script: keeps a long-poll loop against the local
 // thunderbird-proxy, executes dispatched commands, and reports results.
 // The proxy is the only thing this add-on talks to; if it is down we back
-// off exponentially and keep retrying.
-/* global browser */
+// off exponentially and keep retrying. Every proxy response must carry a
+// valid X-Proxy-Proof signature (see proxyauth.js) before we act on it.
+/* global browser, randomNonce, proofValid */
 
-const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "" };
+const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "", responseSecret: "" };
 
 let settings = { ...DEFAULTS };
 let backoffMs = 1000;
@@ -13,15 +14,27 @@ async function loadSettings() {
   settings = { ...DEFAULTS, ...(await browser.storage.local.get(DEFAULTS)) };
 }
 
-function api(path, options = {}) {
-  return fetch(settings.proxyUrl + path, {
+// Signed request to the proxy. Resolves to { res, json } once the response
+// signature has been verified; throws on an unverifiable response, which
+// the poll loop treats exactly like a disconnect.
+async function api(path, options = {}) {
+  const nonce = randomNonce();
+  const res = await fetch(settings.proxyUrl + path, {
     ...options,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${settings.token}`,
+      "X-Addon-Nonce": nonce,
       ...(options.headers || {}),
     },
   });
+  const body = await res.arrayBuffer();
+  const text = new TextDecoder().decode(body);
+  if (!settings.responseSecret) throw new Error("no response secret configured (options page)");
+  if (!(await proofValid(settings.responseSecret, nonce, text, res.headers.get("X-Proxy-Proof") || ""))) {
+    throw new Error("proxy response signature invalid — refusing to trust the service on this port");
+  }
+  return { res, json: () => JSON.parse(text) };
 }
 
 function setBadge(connected) {
@@ -38,7 +51,7 @@ async function register() {
   } catch {
     // getBrowserInfo may be unavailable — registration still succeeds.
   }
-  const res = await api("/addon/hello", { method: "POST", body: JSON.stringify(info) });
+  const { res } = await api("/addon/hello", { method: "POST", body: JSON.stringify(info) });
   if (!res.ok) throw new Error(`hello failed: ${res.status}`);
 }
 
@@ -50,7 +63,7 @@ async function execute(command) {
     result.ok = false;
     result.error = String((error && error.message) || error);
   }
-  const res = await api("/addon/result", { method: "POST", body: JSON.stringify(result) });
+  const { res } = await api("/addon/result", { method: "POST", body: JSON.stringify(result) });
   if (!res.ok) console.warn(`result for ${command.id} rejected: ${res.status}`);
 }
 
@@ -63,10 +76,10 @@ async function pollLoop() {
       backoffMs = 1000;
       setBadge(true);
       for (;;) {
-        const res = await api("/addon/poll");
+        const { res, json } = await api("/addon/poll");
         if (res.status === 204) continue;
         if (!res.ok) throw new Error(`poll failed: ${res.status}`);
-        await execute(await res.json());
+        await execute(json());
       }
     } catch (error) {
       setBadge(false);
@@ -78,7 +91,7 @@ async function pollLoop() {
 }
 
 browser.storage.onChanged.addListener(() => {
-  // A settings change restarts the loop so a new URL/token applies at once.
+  // A settings change restarts the loop so a new URL/token/secret applies.
   loadSettings().then(() => {
     backoffMs = 1000;
   });

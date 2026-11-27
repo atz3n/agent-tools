@@ -23,13 +23,23 @@
   </p>
   <label for="proxyUrl">Proxy URL</label>
   <input id="proxyUrl" type="text" placeholder="http://127.0.0.1:8090" />
-  <label for="token">Shared token</label>
+  <label for="token">Add-on token</label>
   <input id="token" type="password" />
+  <label for="responseSecret">Response secret (proxy &rarr; add-on)</label>
+  <input id="responseSecret" type="password" />
+  <p class="hint">
+    The add-on token is the <code>THUNDERBIRD_ADDON_TOKEN</code> of the
+    proxy's <code>secrets/</code> file; the response secret is its
+    <code>THUNDERBIRD_ADDON_SECRET</code>. The proxy signs every add-on-face
+    response with the secret and this add-on refuses to execute anything it
+    cannot verify — a look-alike service on the same port gets nowhere.
+  </p>
   <div>
     <button id="save">Save</button>
     <button id="test">Test connection</button>
   </div>
   <div id="status"></div>
+  <script src="../proxyauth.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

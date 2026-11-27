@@ -1,12 +1,16 @@
 openapi: "3.0.3"
 info:
   title: thunderbird-proxy
-  version: "0.2.0"
+  version: "0.3.0"
   description: >
     Mail proxy for agents. Every agent-face operation is translated into a
     command from a closed set, executed by the Thunderbird MailExtension
-    add-on, and returned to the caller. All requests (both faces) require
-    'Authorization: Bearer <THUNDERBIRD_PROXY_TOKEN>'. Non-whitelisted paths
+    add-on, and returned to the caller. Each face has its own bearer token:
+    agents use THUNDERBIRD_PROXY_TOKEN, the add-on uses
+    THUNDERBIRD_ADDON_TOKEN under /addon/*. The proxy signs every
+    add-on-face response with THUNDERBIRD_ADDON_SECRET as
+    X-Proxy-Proof = HMAC-SHA256(secret, "<X-Addon-Nonce>\n<body>"), which
+    the add-on verifies before executing anything. Non-whitelisted paths
     return 404; a whitelisted path with the wrong method returns 405; the
     error body is always {"error": "..."}. When Thunderbird is not connected
     or a command times out, 504 is returned; an add-on-side failure returns
@@ -164,17 +168,32 @@ paths:
   /addon/hello:
     post:
       summary: Add-on face — register the add-on (called by Thunderbird, not agents)
+      security:
+        - addonToken: []
       responses:
-        "200": { description: "{ ok: true }" }
+        "200": { description: "{ ok: true }, signed with X-Proxy-Proof" }
   /addon/poll:
     get:
       summary: Add-on face — long-poll for one queued command
+      security:
+        - addonToken: []
+      parameters:
+        - { name: X-Addon-Nonce, in: header, required: false, schema: { type: string }, description: per-request nonce mixed into the response signature }
       responses:
-        "200": { description: "{ id, command, params }" }
-        "204": { description: no command within the poll window }
+        "200": { description: "{ id, command, params }, signed with X-Proxy-Proof" }
+        "204": { description: "no command within the poll window (also signed)" }
+  /addon/status:
+    get:
+      summary: Add-on face — health probe for the add-on options page (no round-trip)
+      security:
+        - addonToken: []
+      responses:
+        "200": { description: "connected flag and add-on info, signed with X-Proxy-Proof" }
   /addon/result:
     post:
       summary: Add-on face — report a command result
+      security:
+        - addonToken: []
       responses:
         "200": { description: "{ ok: true }" }
         "404": { description: unknown command id }
@@ -183,7 +202,11 @@ components:
     bearerToken:
       type: http
       scheme: bearer
-      description: THUNDERBIRD_PROXY_TOKEN
+      description: THUNDERBIRD_PROXY_TOKEN (agent face)
+    addonToken:
+      type: http
+      scheme: bearer
+      description: THUNDERBIRD_ADDON_TOKEN (add-on face only)
   parameters:
     MessageId:
       name: messageId
