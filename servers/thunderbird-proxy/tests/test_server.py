@@ -6,11 +6,13 @@ from __future__ import annotations
 import http.client
 import http.server
 import importlib
+import io
 import json
 import logging
 import os
 import threading
 import unittest
+from contextlib import redirect_stderr
 from typing import Any
 from unittest.mock import patch
 
@@ -42,6 +44,7 @@ class TestWhitelist(unittest.TestCase):
     def test_agent_endpoints_map_to_commands(self) -> None:
         cases = {
             "GET /accounts": "accounts.list",
+            "GET /identities?account=acc1": "identities.list",
             "GET /folders?account=acc1": "folders.list",
             "GET /mail/list?folderId=f1&limit=5": "messages.list",
             "GET /mail/search?subject=hi": "messages.search",
@@ -62,6 +65,11 @@ class TestWhitelist(unittest.TestCase):
         matched = whitelist.match_endpoint("GET", "/status")
         assert matched is not None
         self.assertIsNone(matched[0].command)
+
+    def test_search_query_params_forwarded(self) -> None:
+        matched = whitelist.match_endpoint("GET", "/mail/search?unread=true&to=a%40b.c&subject=hi&evil=1")
+        assert matched is not None
+        self.assertEqual(matched[1], {"unread": "true", "to": "a@b.c", "subject": "hi"})
 
     def test_unknown_paths_never_match(self) -> None:
         for path in ("/", "/mail", "/mail/forward/xyz", "/admin", "/addon/poll", "/mail/list/extra"):
@@ -90,7 +98,7 @@ class TestWhitelist(unittest.TestCase):
         self.assertEqual(
             whitelist.COMMANDS,
             {
-                "accounts.list", "folders.list", "messages.list", "messages.search",
+                "accounts.list", "identities.list", "folders.list", "messages.list", "messages.search",
                 "message.get", "message.send", "message.draft", "message.update", "message.delete",
             },
         )
@@ -127,6 +135,19 @@ class TestBodyValidation(unittest.TestCase):
         assert params is not None
         self.assertFalse(params["isPlainText"])
         self.assertEqual(params["body"], "<b>hi</b>")
+
+    def test_send_identity_id(self) -> None:
+        params, error = whitelist.validate_mail_body(
+            b'{"to": ["a@b.c"], "subject": "s", "body": "x", "identityId": "id2"}'
+        )
+        assert params is not None
+        self.assertEqual(error, "")
+        self.assertEqual(params["identityId"], "id2")
+        params, error = whitelist.validate_mail_body(
+            b'{"to": ["a@b.c"], "subject": "s", "body": "x", "identityId": 7}'
+        )
+        self.assertIsNone(params)
+        self.assertIn("identityId must be a string", error)
 
     def test_update_keys(self) -> None:
         params, error = whitelist.validate_update_body(b'{"read": true, "starred": false}')
@@ -172,7 +193,7 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(module.ALLOWED_SENDERS, frozenset({"a@b.c", "d@e.f"}))
 
     def test_validate_requires_token(self) -> None:
-        with patch.object(config, "THUNDERBIRD_PROXY_TOKEN", ""):
+        with patch.object(config, "THUNDERBIRD_PROXY_TOKEN", ""), redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 config.validate_config()
         with patch.object(config, "THUNDERBIRD_PROXY_TOKEN", "tok"):
@@ -269,9 +290,14 @@ class _FakeAddon(threading.Thread):
         while not self.stop.is_set():
             try:
                 res = self._request("GET", "/addon/poll")
+                payload = res.read()
                 if res.status == 204:
                     continue
-                command = json.loads(res.read())
+                if res.status != 200:
+                    # A poll racing teardown sees the reverted token/bridge
+                    # reject or return nothing — retire the thread quietly.
+                    return
+                command = json.loads(payload)
             except (OSError, ValueError):
                 if self.stop.is_set():
                     return
@@ -322,6 +348,13 @@ class TestHTTPServer(unittest.TestCase):
         data = resp.read()
         return resp.status, json.loads(data) if data else None
 
+    def _raw(self, method: str, path: str, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str]]:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(method, path, headers=headers or {})
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status, dict(resp.headers)
+
     def _start_addon(self, responder: Any = None) -> _FakeAddon:
         self.addon = _FakeAddon(self.port, responder)
         TestHTTPServer.last_addon = self.addon
@@ -351,6 +384,41 @@ class TestHTTPServer(unittest.TestCase):
     def test_addon_face_also_gated(self) -> None:
         status, _ = self._request("GET", "/addon/poll", token=None)
         self.assertEqual(status, 401)
+
+    # -- CORS on the add-on face --------------------------------------------
+
+    def test_preflight_allowed_on_addon_face(self) -> None:
+        status, headers = self._raw("OPTIONS", "/addon/poll", {"Origin": "moz-extension://abc"})
+        self.assertEqual(status, 204)
+        self.assertEqual(headers["Access-Control-Allow-Origin"], "moz-extension://abc")
+        self.assertIn("authorization", headers["Access-Control-Allow-Headers"].lower())
+
+    def test_preflight_refused_for_plain_origin(self) -> None:
+        status, _ = self._raw("OPTIONS", "/status", {"Origin": "https://evil.example"})
+        self.assertEqual(status, 501)
+
+    def test_preflight_without_origin_501(self) -> None:
+        status, _ = self._raw("OPTIONS", "/addon/poll", {})
+        self.assertEqual(status, 501)
+
+    def test_addon_responses_echo_moz_extension_origin(self) -> None:
+        status, headers = self._raw(
+            "GET", "/addon/poll", {"Origin": "moz-extension://abc", "Authorization": f"Bearer {TEST_TOKEN}"}
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(headers["Access-Control-Allow-Origin"], "moz-extension://abc")
+
+    def test_moz_extension_origin_echoed_on_agent_face(self) -> None:
+        headers = {"Origin": "moz-extension://abc", "Authorization": f"Bearer {TEST_TOKEN}"}
+        status, resp_headers = self._raw("GET", "/status", headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(resp_headers["Access-Control-Allow-Origin"], "moz-extension://abc")
+
+    def test_plain_origin_gets_no_cors(self) -> None:
+        headers = {"Origin": "https://evil.example", "Authorization": f"Bearer {TEST_TOKEN}"}
+        status, resp_headers = self._raw("GET", "/status", headers)
+        self.assertEqual(status, 200)
+        self.assertNotIn("Access-Control-Allow-Origin", resp_headers)
 
     # -- routing ------------------------------------------------------------
 

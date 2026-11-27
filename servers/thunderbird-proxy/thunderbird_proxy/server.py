@@ -56,9 +56,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        self._cors_header()
         self.end_headers()
         if body:
             self.wfile.write(data)
+
+    def _cors_header(self) -> None:
+        """Echo the add-on's moz-extension origin — Thunderbird may apply
+        CORS to the extension's fetches despite its host permission."""
+        origin = self.headers.get("origin", "")
+        if origin.startswith("moz-extension://"):
+            self.send_header("Access-Control-Allow-Origin", origin)
 
     def _log_ok(self, method: str, status: int, detail: str) -> None:
         logger.info(f"{method} {self.path} {status} from {self.client_address[0]} {detail}")
@@ -146,6 +154,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             command = bridge.poll()
             if command is None:
                 self.send_response(204)
+                self._cors_header()
                 self.end_headers()
             else:
                 self._respond(200, command)
@@ -194,6 +203,28 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         self._handle("DELETE", body=True)
+
+    def do_OPTIONS(self) -> None:
+        """CORS preflight from the add-on (any path, preflights carry no
+        token and reveal nothing).
+
+        Thunderbird has been seen to apply CORS to the add-on's fetches even
+        with the host permission declared, so the bridge must not depend on
+        the grant behaviour. Other origins keep the 501 default; the real
+        request behind any preflight is fully token-gated.
+        """
+        origin = self.headers.get("origin", "")
+        requested = self.headers.get("access-control-request-method", "?")
+        if origin.startswith("moz-extension://"):
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, PATCH, DELETE")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.end_headers()
+            self._log_ok("OPTIONS", 204, f"preflight {self.path.partition('?')[0]} as {requested} from {origin}")
+            return
+        self._reject(501, "method not implemented", "OPTIONS")
 
     def log_message(self, format: str, *args: object) -> None:
         """Override to silence the default access log (we use logger instead)."""

@@ -1,6 +1,6 @@
 /* global browser */
 
-const DEFAULTS = { proxyUrl: "http://localhost:8090", token: "" };
+const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "" };
 
 const $ = (id) => document.getElementById(id);
 

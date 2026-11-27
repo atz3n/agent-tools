@@ -2,7 +2,7 @@
     "manifest_version": 2,
     "name": "Thunderbird Proxy Bridge",
     "description": "Bridges the local thunderbird-proxy command queue to Thunderbird's mail APIs so agents can read, search, organize and send mail through the proxy.",
-    "version": "0.1.0",
+    "version": "0.1.7",
     "author": "agent-tools",
     "browser_specific_settings": {
         "gecko": {
@@ -30,8 +30,14 @@
     "permissions": [
         "accountsRead",
         "messagesRead",
-        "messagesModify",
+        "messagesUpdate",
+        "messagesMove",
+        "messagesDelete",
+        "messages.save",
+        "compose",
+        "compose.send",
         "storage",
-        "http://localhost:8090/*"
+        "http://localhost:8090/*",
+        "http://127.0.0.1:8090/*"
     ]
 }

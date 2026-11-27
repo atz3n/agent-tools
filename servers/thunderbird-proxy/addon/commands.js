@@ -10,6 +10,11 @@ const ProxyCommands = {
       return { accounts: accounts.map(slimAccount) };
     },
 
+    async "identities.list"(params) {
+      const identities = await browser.identities.list(params.account || undefined);
+      return { identities: identities.map((i) => ({ id: i.id, accountId: i.account ? i.account.id : undefined, email: i.email, name: i.name })) };
+    },
+
     async "folders.list"(params) {
       if (!params.account) throw new Error("account is required");
       const folders = await browser.folders.query({ accountId: params.account });
@@ -20,12 +25,15 @@ const ProxyCommands = {
       const folderId = await resolveFolderId(params);
       const limit = clampCount(params.limit, 25, 200);
       const offset = clampCount(params.offset, 0, 100000);
-      let page = await browser.messages.list(folderId, { maxCount: Math.min(limit + offset, 200) });
+      // options accepts only sortType/sortOrder (TB 148+) — no maxCount; pages
+      // come via continueList until the MessageList id turns null.
+      let page = await browser.messages.list(folderId, { sortType: "date", sortOrder: "descending" });
       let messages = page.messages;
-      while (messages.length < offset + limit && page.nextOffset != null) {
+      while (messages.length < offset + limit && page.id != null) {
         page = await browser.messages.continueList(page.id);
         messages = messages.concat(page.messages);
       }
+      if (page.id != null) await browser.messages.abortList(page.id);
       return { messages: messages.slice(offset, offset + limit).map(slimMessage) };
     },
 
@@ -34,41 +42,83 @@ const ProxyCommands = {
       for (const key of ["subject", "body", "author"]) {
         if (params[key]) queryInfo[key] = params[key];
       }
-      if (!Object.keys(queryInfo).length) throw new Error("at least one of subject, body, author is required");
-      const folderId = params.folderId || params.folder || params.account ? await resolveFolderId(params, true) : null;
-      if (folderId) queryInfo.folderIds = [folderId];
-      const page = await browser.messages.query(queryInfo);
-      return { messages: page.messages.map(slimMessage) };
+      if (params.to) queryInfo.recipients = params.to;
+      if (params.folderId || params.folder) {
+        queryInfo.folderId = await resolveFolderId(params); // singular "folderId", TB 121+
+      } else if (params.account) {
+        queryInfo.accountId = params.account;
+      }
+      // The read-state query property has flip-flopped across TB versions
+      // (unread -> read) — try whichever the running schema accepts.
+      const flagVariants =
+        params.unread === undefined
+          ? [{}]
+          : [
+              { read: String(params.unread) === "false" },
+              { unread: String(params.unread) !== "false" },
+            ];
+      if (!Object.keys(queryInfo).length && flagVariants.length === 1) {
+        throw new Error("at least one of subject, body, author, to, unread, account/folder is required");
+      }
+      let page = null;
+      let lastError = new Error("messages.query failed");
+      for (const flag of flagVariants) {
+        try {
+          page = await browser.messages.query({ ...queryInfo, ...flag });
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (!page) throw lastError;
+      let messages = page.messages;
+      while (page.id != null && messages.length < 500) {
+        page = await browser.messages.continueList(page.id);
+        messages = messages.concat(page.messages);
+      }
+      if (page.id != null) await browser.messages.abortList(page.id);
+      return { messages: messages.slice(0, 500).map(slimMessage) };
     },
 
     async "message.get"(params) {
-      const header = await browser.messages.get(params.message_id);
-      const full = await browser.messages.getFull(params.message_id);
+      const id = messageKey(params.message_id); // MessageId is an integer (TB 122+)
+      const header = await browser.messages.get(id);
+      const full = await browser.messages.getFull(id, { decodeContent: true });
       return { header: slimMessage(header), parts: full.parts };
     },
 
     async "message.send"(params) {
-      const message = await browser.messages.sendMessage(buildOutgoing(params), { mode: "sendNow" });
-      return { sent: true, message: slimMessage(message) };
+      if (typeof browser.messages.sendMessage === "function") {
+        const result = await browser.messages.sendMessage(buildOutgoing(params), { mode: "sendNow" });
+        return { sent: true, message: slimMessage(firstMessage(result)) };
+      }
+      // Some TB builds gate messages.sendMessage behind a "messages.send"
+      // permission the manifest validator refuses to accept — send through a
+      // compose window instead (the pre-153 path; the window flashes open
+      // and closes itself once the message is away).
+      const tab = await browser.compose.beginNew(undefined, buildComposeDetails(params));
+      await browser.compose.sendMessage(tab.id, { mode: "sendNow" });
+      return { sent: true, message: {} };
     },
 
     async "message.draft"(params) {
-      const message = await browser.messages.saveMessage(buildOutgoing(params));
-      return { draft: true, message: slimMessage(message) };
+      const result = await browser.messages.saveMessage(buildOutgoing(params));
+      return { draft: true, message: slimMessage(firstMessage(result)) };
     },
 
     async "message.update"(params) {
+      const id = messageKey(params.message_id);
       const properties = {};
       for (const key of ["read", "flagged", "tags"]) {
         if (params[key] !== undefined) properties[key] = params[key];
       }
-      if (Object.keys(properties).length) await browser.messages.update(params.message_id, properties);
-      if (params.moveTo) await browser.messages.move([params.message_id], params.moveTo);
+      if (Object.keys(properties).length) await browser.messages.update(id, properties);
+      if (params.moveTo) await browser.messages.move([id], params.moveTo);
       return { updated: true };
     },
 
     async "message.delete"(params) {
-      await browser.messages.delete([params.message_id]);
+      await browser.messages.delete([messageKey(params.message_id)]);
       return { deleted: true };
     },
   },
@@ -113,8 +163,18 @@ function slimMessage(message) {
     starred: message.flagged,
     new: message.new,
     folder: message.folder ? message.folder.name : undefined,
+    folderId: message.folder ? message.folder.id : undefined,
+    accountId: message.folder ? message.folder.accountId : undefined,
     size: message.size,
   };
+}
+
+// MessageId is an integer in the WebExtension API (TB 122+), while the REST
+// path hands it over as a string — convert, and fail loudly on garbage.
+function messageKey(raw) {
+  const id = Number(raw);
+  if (!Number.isInteger(id)) throw new Error(`message id must be numeric, got: ${raw}`);
+  return id;
 }
 
 function buildOutgoing(params) {
@@ -132,6 +192,22 @@ function buildOutgoing(params) {
   return details;
 }
 
+// sendMessage/saveMessage resolve to { messages: [...], ... }, not a bare header.
+function firstMessage(result) {
+  return result && result.messages ? result.messages[0] : result;
+}
+
+function buildComposeDetails(params) {
+  const details = { subject: params.subject, identityId: params.identityId };
+  for (const key of ["to", "cc", "bcc"]) {
+    if (params[key]) details[key] = params[key];
+  }
+  // Docs describe body as { format, plainText, html } — the runtime schema
+  // demands a plain string, so give it exactly that.
+  details.body = String(params.plainTextBody ?? params.body ?? "");
+  return details;
+}
+
 function clampCount(raw, fallback, max) {
   const value = Number.parseInt(raw, 10);
   if (Number.isNaN(value) || value < 0) return fallback;
@@ -139,12 +215,11 @@ function clampCount(raw, fallback, max) {
 }
 
 // Resolve folderId directly, or an `account` + `folder` (name or path) pair,
-// or just `folder` (a raw folder id). Returns null when nothing was asked for.
-async function resolveFolderId(params, optional = false) {
+// or just `folder` (a raw folder id).
+async function resolveFolderId(params) {
   if (params.folderId) return params.folderId;
   if (!params.folder) {
     if (params.account) throw new Error("folder is required when account is given");
-    if (optional) return null;
     throw new Error("folderId (or account + folder) is required");
   }
   if (!params.account) return params.folder; // raw folder id in `folder`

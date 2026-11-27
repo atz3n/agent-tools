@@ -53,12 +53,13 @@ def _endpoint(
 ENDPOINTS: tuple[Endpoint, ...] = (
     _endpoint("GET", r"^/status$", None),
     _endpoint("GET", r"^/accounts$", "accounts.list", query=("includeSubFolders",)),
+    _endpoint("GET", r"^/identities$", "identities.list", query=("account",)),
     _endpoint("GET", r"^/folders$", "folders.list", query=("account",)),
     _endpoint("GET", r"^/mail/list$", "messages.list", query=("folderId", "account", "folder", "limit", "offset")),
     (
         _endpoint(
             "GET", r"^/mail/search$", "messages.search",
-            query=("subject", "body", "author", "folderId", "account", "folder"),
+            query=("subject", "body", "author", "to", "unread", "folderId", "account", "folder"),
         )
     ),
     _endpoint("POST", r"^/mail/send$", "message.send"),
@@ -160,6 +161,10 @@ def validate_mail_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
     for optional in ("cc", "bcc"):
         if optional in payload:
             params[optional] = payload[optional]
+    if "identityId" in payload:
+        if not isinstance(payload["identityId"], str):
+            return None, "identityId must be a string"
+        params["identityId"] = payload["identityId"]
     html = payload.get("html")
     if html is not None:
         if not isinstance(html, str):

@@ -1,7 +1,7 @@
 openapi: "3.0.3"
 info:
   title: thunderbird-proxy
-  version: "0.1.0"
+  version: "0.2.0"
   description: >
     Mail proxy for agents. Every agent-face operation is translated into a
     command from a closed set, executed by the Thunderbird MailExtension
@@ -9,7 +9,9 @@ info:
     'Authorization: Bearer <THUNDERBIRD_PROXY_TOKEN>'. Non-whitelisted paths
     return 404; a whitelisted path with the wrong method returns 405; the
     error body is always {"error": "..."}. When Thunderbird is not connected
-    or a command times out, 504 is returned.
+    or a command times out, 504 is returned; an add-on-side failure returns
+    502. OPTIONS requests carrying an Origin from a moz-extension:// add-on
+    are answered with 204 and CORS headers (preflight support).
 servers:
   - url: http://localhost:8090
 security:
@@ -30,6 +32,16 @@ paths:
           schema: { type: boolean }
       responses:
         "200": { description: "{ accounts: [...] }" }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /identities:
+    get:
+      summary: List sending identities (command identities.list) — the ids for identityId
+      parameters:
+        - name: account
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: "{ identities: [{ id, accountId, email, name }] }" }
         "504": { $ref: "#/components/responses/Disconnected" }
   /folders:
     get:
@@ -61,12 +73,14 @@ paths:
         - { name: subject, in: query, schema: { type: string } }
         - { name: body, in: query, schema: { type: string } }
         - { name: author, in: query, schema: { type: string } }
+        - { name: to, in: query, schema: { type: string }, description: recipient address }
+        - { name: unread, in: query, schema: { type: boolean }, description: only unread (true) or only read (false) }
         - { name: folderId, in: query, schema: { type: string } }
         - { name: account, in: query, schema: { type: string } }
         - { name: folder, in: query, schema: { type: string } }
       responses:
-        "200": { description: "{ messages: [...] }" }
-        "400": { description: no search field given }
+        "200": { description: "{ messages: [...] } — up to 500 results" }
+        "502": { description: no search criteria given, or add-on-side failure }
         "504": { $ref: "#/components/responses/Disconnected" }
   /mail/send:
     post:
@@ -85,6 +99,7 @@ paths:
                 subject: { type: string }
                 body: { type: string, description: plain-text body (or HTML when html is set) }
                 html: { type: string, description: send as HTML with body as the text alternative }
+                identityId: { type: string, description: sending identity (GET /identities); defaults to the account default identity }
       responses:
         "200": { description: "{ sent: true, message: {...} }" }
         "400": { description: invalid body (error names the offending field) }
@@ -107,6 +122,7 @@ paths:
                 subject: { type: string }
                 body: { type: string }
                 html: { type: string }
+                identityId: { type: string }
       responses:
         "200": { description: "{ draft: true, message: {...} }" }
         "400": { description: invalid body }
@@ -173,8 +189,10 @@ components:
       name: messageId
       in: path
       required: true
-      schema: { type: string }
-      description: Opaque Thunderbird message id (percent-encode any '/').
+      schema: { type: integer }
+      description: >
+        Numeric Thunderbird message key. Valid only for the current
+        Thunderbird session — re-fetch ids after a Thunderbird restart.
   responses:
     Disconnected:
       description: Thunderbird not connected, or the command timed out
