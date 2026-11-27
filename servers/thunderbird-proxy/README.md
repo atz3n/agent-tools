@@ -89,8 +89,11 @@ The add-on source is in [`addon/`](addon/).
    `localhost` to `::1`, which the loopback-published proxy does not listen
    on, and the fetch then fails with `NetworkError`), the **add-on token**
    from `secrets/thunderbird-addon-token.txt` and the **response secret**
-   from `secrets/thunderbird-addon-secret.txt`. The toolbar badge shows `on`
-   when the bridge is connected.
+   from `secrets/thunderbird-addon-secret.txt`. The **command timeout**
+   (default 60 s) is the add-on-side hard deadline for one Thunderbird
+   operation — raise it if a slow provider (Gmail IMAP moves run ~20-30 s)
+   trips it, but keep it below the proxy's `COMMAND_TIMEOUT`. The toolbar
+   badge shows `on` when the bridge is connected.
 
 ### Troubleshooting
 
@@ -130,6 +133,7 @@ re-fetch them after a Thunderbird restart.
 | GET | `/identities` | `identities.list` | `?account=<accountId>` (optional) — the ids for `identityId` when sending |
 | GET | `/folders` | `folders.list` | `?account=<accountId>` (required) |
 | POST | `/folders` | `folders.create` | `{"name":"Newsletter","parentFolderId":"<id>"}` — or `"account"`+`"folder"` (parent name/path); the two locators are mutually exclusive (`400` if both given) |
+| POST | `/folders/mark-read` | `folders.markRead` | `{"folderId":"<id>"}` (or `"account"`+`"folder"`) — marks the **whole folder** read; the only bulk flag Thunderbird exposes to add-ons |
 | PATCH | `/folders/{folderId}` | `folders.update` | `{"name":"<new name>"}` (rename — ids are path-derived, so the id **changes**; the response carries the new one) |
 | DELETE | `/folders/{folderId}` | `folders.delete` | **only empty folders** — a folder that still holds messages, or whose sub-folders do, gets `502 folder is not empty` |
 | GET | `/mail/list` | `messages.list` | `?folderId=` or `?account=&folder=`; `?limit=` (≤200), `?offset=`; newest first |
@@ -137,7 +141,10 @@ re-fetch them after a Thunderbird restart.
 | GET | `/mail/{id}` | `message.get` | header + body parts |
 | POST | `/mail/send` | `message.send` | `{"to":[...],"subject":...,"body":...,"cc"?,"bcc"?,"html"?,"identityId"?}` |
 | POST | `/mail/draft` | `message.draft` | same body, saved to the identity's Drafts |
-| PATCH | `/mail/{id}` | `message.update` | subset of `{"read":bool,"starred":bool,"tags":[...],"moveTo":"folderId"}` |
+| POST | `/mail/move` | `messages.move` | `{"ids":[...],"to":"<folderId>"}` — batch move (≤500 ids), one Thunderbird call for the whole selection. Moved messages get **new ids** in the destination folder — re-list before reusing them |
+| POST | `/mail/mark` | `messages.mark` | `{"ids":[...],"read"?:bool,"starred"?:bool}` — batch read/star via Thunderbird's set-level folder operations (through the bundled `mailBulk` experiment API): one call per folder holding messages, never one per message. No folder needed: ids resolve session-wide, each carrying its own folder. If any id is unknown (ids are per-session), nothing is marked and the error names the id. Tags stay per-message |
+| POST | `/mail/trash` | `messages.trash` | `{"ids":[...]}` — batch move to Trash; if any id is already in Trash, nothing is moved and the error names the id (a second delete would purge it) |
+| PATCH | `/mail/{id}` | `message.update` | subset of `{"read":bool,"starred":bool,"tags":[...],"moveTo":"folderId","junk":bool}` — `junk:true` marks as junk **and** moves to the account's Junk folder (like the UI's junk button; mark-only if no junk folder resolves, `movedToJunk` says) |
 | DELETE | `/mail/{id}` | `message.delete` | moves the message to the account's **Trash** — the proxy never deletes mail permanently (deleting a message that already sits in Trash is refused with `502`) |
 
 `HEAD` is supported on every GET path. Folder ids in paths must be
@@ -160,6 +167,22 @@ curl -s -H "$AUTH" -X POST localhost:8090/mail/send \
 curl -s -H "$AUTH" -X PATCH localhost:8090/mail/<messageId> \
   -H "Content-Type: application/json" -d '{"read":true}'
 
+# Batch operations — one Thunderbird/IMAP operation each. Only native bulk
+# paths are exposed: id arrays for move/trash, and the set-level folder
+# operations (markMessagesRead/markMessagesFlagged) for bulk read/star.
+# Tags have no native bulk path and stay per-message (PATCH).
+curl -s -H "$AUTH" -X POST localhost:8090/mail/move \
+  -H "Content-Type: application/json" -d '{"ids":[12,13,14],"to":"account4://INBOX/Newsletter"}'
+curl -s -H "$AUTH" -X POST localhost:8090/mail/mark \
+  -H "Content-Type: application/json" -d '{"ids":[12,13,14],"read":true}'
+curl -s -H "$AUTH" -X POST localhost:8090/mail/trash \
+  -H "Content-Type: application/json" -d '{"ids":[15,16]}'
+
+# Mark a whole folder read (bulk flag — per-message flags stay PATCH-only,
+# the WebExtension API has no set-level update)
+curl -s -H "$AUTH" -X POST localhost:8090/folders/mark-read \
+  -H "Content-Type: application/json" -d '{"folderId":"account4://INBOX"}'
+
 # Folder management — create, rename, delete (empty folders only)
 curl -s -H "$AUTH" -X POST localhost:8090/folders \
   -H "Content-Type: application/json" -d '{"name":"Newsletter","parentFolderId":"<parentFolderId>"}'
@@ -177,7 +200,7 @@ curl -s -H "$AUTH" -X DELETE localhost:8090/folders/<folderId>
 | `THUNDERBIRD_PROXY_TOKEN` | — **required** | agent-face secret; startup exits without it |
 | `THUNDERBIRD_ADDON_TOKEN` | — **required** | add-on-face secret (separate so a leak on one face cannot use the other) |
 | `THUNDERBIRD_ADDON_SECRET` | — **required** | HMAC key for signing add-on-face responses (`X-Proxy-Proof`) |
-| `COMMAND_TIMEOUT` | `30` | seconds an agent request waits for the add-on — must stay above the add-on's 25 s command deadline: set lower and the proxy 504s first, and the add-on's late result then arrives for an id the bridge no longer knows (`/addon/result` answers 404) |
+| `COMMAND_TIMEOUT` | `75` | seconds an agent request waits for the add-on — must stay above the add-on's command deadline (options page, default 60 s): set lower and the proxy 504s first, and the add-on's late result then arrives for an id the bridge no longer knows (`/addon/result` answers 404). Sized for Gmail, where a single IMAP move measured ~21 s |
 | `ALLOWED_SENDERS` | *(any)* | comma-separated recipient allowlist for send/draft |
 
 The three secrets live in `secrets/*.txt` (gitignored) and are loaded by
@@ -195,10 +218,11 @@ The Python suite covers the endpoint whitelist and command mapping, body
 validation, config loading and mandatory-token startup check, the bridge
 (queue → poll → result correlation, timeouts, disconnect), and a live-socket
 HTTP pass against a fake add-on (token gate, 404/405, 504, end-to-end
-round-trips). The add-on dispatcher (`addon/commands.js`) has its own node
-tests under `addon/__test__/` (the plain script is loaded in a `vm` with a
-stubbed `browser`); `test-project.sh` runs both suites and skips the node
-ones loudly when node is unavailable. `addon/__test__/` is dev-only —
+round-trips). The add-on dispatcher (`addon/commands.js`) and the `mailBulk`
+experiment API (`addon/bulk/api.js`) have their own node tests under
+`addon/__test__/` (the plain scripts are loaded in a `vm` with a stubbed
+`browser` / extension context); `test-project.sh` runs both suites and skips
+the node ones loudly when node is unavailable. `addon/__test__/` is dev-only —
 `scripts/build-addon.sh` excludes it (and any dotfile or previous archive)
 from the xpi it writes to `dist/`.
 
@@ -219,6 +243,17 @@ from the xpi it writes to `dist/`.
 - Nothing is persisted: commands and results only live in the in-memory
   queue; no message content touches disk.
 - The add-on executes only the closed command set with checked parameters.
+- **Experiment API for bulk flags**: the WebExtension API has no set-level
+  flag update, so bulk read/star is the one operation that runs outside it.
+  It lives in a dedicated `mailBulk` experiment API (`bulk/`) whose parent
+  script has the chrome-side access the sandboxed background page lacks; it
+  calls exactly two folder methods
+  (`markMessagesRead`/`markMessagesFlagged`, the ones Thunderbird's own UI
+  uses) and nothing else. Message ids resolve through the extension's own
+  message manager — the same lookup a single `PATCH /mail/{id}` uses — so
+  bulk and single flagging address messages identically. Everything else,
+  including all reads and deletes, stays on the permission-gated
+  WebExtension APIs.
 - **Mail is never destroyed.** `message.delete` always moves to Trash
   (options `{ deletePermanently: false }`, never omitted-to-true or set)
   and refuses messages already in a trash-type folder — and fails closed,
@@ -240,19 +275,18 @@ from the xpi it writes to `dist/`.
   with mail in it (or in its sub-folders) is ever removed.
 - A folder rename can hang inside Thunderbird on server-side name conflicts
   (observed with Gmail). The add-on pre-checks sibling collisions and aborts
-  any command that exceeds 25 s, so the bridge survives — the agent gets a
+  any command that exceeds its deadline (options page, default 60 s), so
+  the bridge survives — the agent gets a
   timeout error instead of a silent wedge. The abort does not release the
   wedge itself: the parked Thunderbird prompt survives it, so further folder
   commands keep timing out (and the proxy keeps 504/502-ing them) until the
   user dismisses the prompt in Thunderbird. Keep `COMMAND_TIMEOUT` above the
-  25 s deadline — below it the proxy times out first and the add-on's late
+  add-on deadline — below it the proxy times out first and the add-on's late
   result lands on an already-popped command.
 - One add-on instance: a second `hello` (e.g. Thunderbird on two machines
   against one proxy) replaces the first.
 - If Thunderbird goes down mid-command, the waiting request fails with the
   command timeout; commands queued while disconnected are refused at once.
-- On builds where `messages.sendMessage` cannot be unlocked (the documented
-  `messages.send` permission is rejected by the manifest validator), sending
-  falls back to `compose.beginNew` + `compose.sendMessage` — a compose window
-  briefly opens and closes itself after the send.
-- Thunderbird < 153 is not supported by the current API handlers.
+- Thunderbird < 153 is not supported: the add-on targets the current
+  MailExtensions APIs only — no legacy fallbacks are kept, so older builds
+  fail loudly rather than differently.

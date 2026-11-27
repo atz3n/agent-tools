@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, unquote
 # '/' when raw, so callers must percent-encode; the pattern accepts literal
 # id-safe characters plus %XX escapes, and the value is unquoted after
 # matching — routing never sees a decoded '/'.
-_MESSAGE_ID = r"(?:[A-Za-z0-9_\-]|%[0-9A-Fa-f]{2})+"
+_MESSAGE_ID = r"\d+"
 
 # Thunderbird folder ids commonly contain '/' (IMAP ids look like
 # "account3/INBOX/News"), so callers must percent-encode it; the pattern
@@ -61,6 +61,7 @@ ENDPOINTS: tuple[Endpoint, ...] = (
     _endpoint("GET", r"^/identities$", "identities.list", query=("account",)),
     _endpoint("GET", r"^/folders$", "folders.list", query=("account",)),
     _endpoint("POST", r"^/folders$", "folders.create"),
+    _endpoint("POST", r"^/folders/mark-read$", "folders.markRead"),
     _endpoint(
         "PATCH", rf"^/folders/(?P<folder_id>{_FOLDER_ID})$", "folders.update", path_params=("folder_id",)
     ),
@@ -76,6 +77,9 @@ ENDPOINTS: tuple[Endpoint, ...] = (
     ),
     _endpoint("POST", r"^/mail/send$", "message.send"),
     _endpoint("POST", r"^/mail/draft$", "message.draft"),
+    _endpoint("POST", r"^/mail/move$", "messages.move"),
+    _endpoint("POST", r"^/mail/mark$", "messages.mark"),
+    _endpoint("POST", r"^/mail/trash$", "messages.trash"),
     _endpoint("GET", rf"^/mail/(?P<message_id>{_MESSAGE_ID})$", "message.get", path_params=("message_id",)),
     _endpoint("PATCH", rf"^/mail/(?P<message_id>{_MESSAGE_ID})$", "message.update", path_params=("message_id",)),
     _endpoint("DELETE", rf"^/mail/(?P<message_id>{_MESSAGE_ID})$", "message.delete", path_params=("message_id",)),
@@ -196,7 +200,7 @@ def validate_mail_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
     return params, ""
 
 
-UPDATE_KEYS = frozenset({"read", "starred", "tags", "moveTo"})
+UPDATE_KEYS = frozenset({"read", "starred", "tags", "moveTo", "junk"})
 
 
 def validate_update_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
@@ -210,20 +214,17 @@ def validate_update_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
     unknown = set(payload) - UPDATE_KEYS
     if unknown:
         return None, f"unsupported field: {sorted(unknown)[0]} (allowed: {', '.join(sorted(UPDATE_KEYS))})"
-    if "read" in payload and not isinstance(payload["read"], bool):
-        return None, "read must be a boolean"
-    if "starred" in payload and not isinstance(payload["starred"], bool):
-        return None, "starred must be a boolean"
-    if "tags" in payload:
-        # An empty array is valid — it clears the message's tags.
-        error = _recipient_list(payload["tags"], "tags", "tag names", allow_empty=True)
-        if error:
-            return None, error
     if "moveTo" in payload and (not isinstance(payload["moveTo"], str) or not payload["moveTo"].strip()):
         return None, "moveTo must be a non-empty folder id string"
-    params: dict[str, Any] = dict(payload)
-    if "starred" in params:
-        params["flagged"] = params.pop("starred")
+    if "junk" in payload and not isinstance(payload["junk"], bool):
+        return None, "junk must be a boolean"
+    params, error = _flag_params(payload)
+    if params is None:
+        return None, error
+    if "moveTo" in payload:
+        params["moveTo"] = payload["moveTo"]
+    if "junk" in payload:
+        params["junk"] = payload["junk"]
     return params, ""
 
 
@@ -293,6 +294,121 @@ def validate_folder_update_body(body: bytes) -> tuple[dict[str, Any] | None, str
     if error:
         return None, error
     return {"name": name}, ""
+
+
+MAX_MOVE_IDS = 500
+
+
+def _message_ids(payload: dict[str, Any]) -> tuple[list[str] | None, str]:
+    """Validate the shared batch 'ids' field: strings or numbers, 1..cap.
+
+    The listing hands ids out as numbers, agents copy them either way; the
+    add-on converts them with Number(). Only Thunderbird's native batch
+    APIs (messages.move, messages.delete) back the batch endpoints — a
+    batched flags update would just hide N sequential IMAP commands behind
+    one request and hit the same server-side rate limits.
+    """
+    ids = payload.get("ids")
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or not all(isinstance(i, (str, int)) and not isinstance(i, bool) and str(i).strip() for i in ids)
+    ):
+        return None, "ids must be a non-empty array of message ids"
+    if len(ids) > MAX_MOVE_IDS:
+        return None, f"ids must contain at most {MAX_MOVE_IDS} message ids"
+    return [str(i) for i in ids], ""
+
+
+def _flag_params(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """Extract read/starred/tags from a body, translating starred→flagged."""
+    if "read" in payload and not isinstance(payload["read"], bool):
+        return None, "read must be a boolean"
+    if "starred" in payload and not isinstance(payload["starred"], bool):
+        return None, "starred must be a boolean"
+    if "tags" in payload:
+        # An empty array is valid — it clears the messages' tags.
+        error = _recipient_list(payload["tags"], "tags", "tag names", allow_empty=True)
+        if error:
+            return None, error
+    params: dict[str, Any] = {k: v for k, v in payload.items() if k in ("read", "starred", "tags")}
+    if "starred" in params:
+        params["flagged"] = params.pop("starred")
+    return params, ""
+
+
+def validate_move_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
+    """Parse a messages.move POST body: {"ids": [...], "to": "<folderId>"}."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None, "body must be valid JSON"
+    if not isinstance(payload, dict):
+        return None, "body must be a JSON object"
+    unknown = set(payload) - {"ids", "to"}
+    if unknown:
+        return None, "unsupported field: " + sorted(unknown)[0]
+    ids, error = _message_ids(payload)
+    if ids is None:
+        return None, error
+    to = payload.get("to")
+    if not isinstance(to, str) or not to.strip():
+        return None, "to must be a folder id string"
+    return {"ids": ids, "to": to}, ""
+
+
+def validate_trash_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
+    """Parse a messages.trash POST body: {"ids": [...]} — nothing else."""
+    payload, error = _json_object(body, frozenset({"ids"}))
+    if payload is None:
+        return None, error
+    ids, error = _message_ids(payload)
+    if ids is None:
+        return None, error
+    return {"ids": ids}, ""
+
+
+def _folder_locator(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """Validate a folder locator: a raw folderId, or an account + folder
+    (name or path) pair resolved by the add-on. Mutually exclusive."""
+    for key in ("folderId", "account", "folder"):
+        if key in payload and (not isinstance(payload[key], str) or not payload[key].strip()):
+            return None, f"{key} must be a non-empty string"
+    if "folderId" in payload and ("account" in payload or "folder" in payload):
+        return None, "specify one locator: folderId or account + folder, not both"
+    if "folderId" not in payload and not ("account" in payload and "folder" in payload):
+        return None, "folderId (or account + folder) is required"
+    return {k: v for k, v in payload.items() if k in ("folderId", "account", "folder")}, ""
+
+
+def validate_folder_read_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
+    """Parse a folders.markRead POST body: a folder locator."""
+    payload, error = _json_object(body, frozenset({"folderId", "account", "folder"}))
+    if payload is None:
+        return None, error
+    return _folder_locator(payload)
+
+
+def validate_mark_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
+    """Parse a messages.mark POST body: ids and at least one of read/starred.
+
+    No folder is needed — the experiment API resolves the session message ids
+    through the extension's own message manager (the same lookup as a single
+    update), which knows each message's folder. Tags are not part of this
+    endpoint (no native bulk path — use PATCH /mail/{id}).
+    """
+    payload, error = _json_object(body, frozenset({"ids", "read", "starred"}))
+    if payload is None:
+        return None, error
+    ids, error = _message_ids(payload)
+    if ids is None:
+        return None, error
+    if "read" not in payload and "starred" not in payload:
+        return None, "at least one of read, starred is required"
+    params, error = _flag_params(payload)
+    if params is None:
+        return None, error
+    return {"ids": ids, **params}, ""
 
 
 def extract_recipients(params: dict[str, Any]) -> list[str]:

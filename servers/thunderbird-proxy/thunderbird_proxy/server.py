@@ -154,6 +154,30 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._reject(400, error, method)
                 return
             params.update(update_params)
+        elif endpoint.command == "messages.move":
+            move_params, error = whitelist.validate_move_body(payload)
+            if move_params is None:
+                self._reject(400, error, method)
+                return
+            params.update(move_params)
+        elif endpoint.command == "messages.mark":
+            mark_params, error = whitelist.validate_mark_body(payload)
+            if mark_params is None:
+                self._reject(400, error, method)
+                return
+            params.update(mark_params)
+        elif endpoint.command == "messages.trash":
+            trash_params, error = whitelist.validate_trash_body(payload)
+            if trash_params is None:
+                self._reject(400, error, method)
+                return
+            params.update(trash_params)
+        elif endpoint.command == "folders.markRead":
+            read_params, error = whitelist.validate_folder_read_body(payload)
+            if read_params is None:
+                self._reject(400, error, method)
+                return
+            params.update(read_params)
         elif endpoint.command == "folders.create":
             folder_params, error = whitelist.validate_folder_create_body(payload)
             if folder_params is None:

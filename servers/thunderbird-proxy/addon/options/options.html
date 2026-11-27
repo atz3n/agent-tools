@@ -27,12 +27,21 @@
   <input id="token" type="password" />
   <label for="responseSecret">Response secret (proxy &rarr; add-on)</label>
   <input id="responseSecret" type="password" />
+  <label for="commandTimeoutSec">Command timeout (seconds)</label>
+  <input id="commandTimeoutSec" type="number" min="5" max="600" step="1" placeholder="60" />
   <p class="hint">
     The add-on token is the <code>THUNDERBIRD_ADDON_TOKEN</code> of the
     proxy's <code>secrets/</code> file; the response secret is its
     <code>THUNDERBIRD_ADDON_SECRET</code>. The proxy signs every add-on-face
     response with the secret and this add-on refuses to execute anything it
     cannot verify — a look-alike service on the same port gets nowhere.
+  </p>
+  <p class="hint">
+    Hard deadline for a single Thunderbird operation — a wedged call (e.g. a
+    rename stuck on a server prompt) is reported as failed after this long
+    instead of blocking the bridge. Gmail IMAP moves take ~20-30 s, so stay
+    above your slowest operation; keep it below the proxy's COMMAND_TIMEOUT
+    (default 75 s). Blank uses 60 s.
   </p>
   <div>
     <button id="save">Save</button>

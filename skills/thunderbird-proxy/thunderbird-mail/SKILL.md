@@ -74,10 +74,50 @@ curl -s -H "$AUTH" -X PATCH "$PROXY/mail/<messageId>" \
   -H "Content-Type: application/json" -d '{"read": true}'
 # also: {"starred": true}, {"tags": ["work"]}, {"moveTo": "<folderId>"}
 
-# Delete a message — this moves it to the account's Trash; mail is never
-# permanently deleted (deleting a message already in Trash is refused).
+# Mark as spam — marks junk and moves the message to the account's Junk
+# folder (what trains Gmail's spam filter); the response's movedToJunk
+# says where it went (false = marked only).
+curl -s -H "$AUTH" -X PATCH "$PROXY/mail/<messageId>" \
+  -H "Content-Type: application/json" -d '{"junk": true}'
+
+# Batch move — one Thunderbird/IMAP call for the whole list (≤500 ids).
+# Always prefer this over PATCH+moveTo per message when sorting many mails.
+curl -s -H "$AUTH" -X POST "$PROXY/mail/move" \
+  -H "Content-Type: application/json" \
+  -d '{"ids":[12,13,14],"to":"<folderId>"}'
+
+# Batch flag — read/star for many messages in one call (one set-level
+# Thunderbird call per folder involved, not one per message); no folder
+# needed, ids resolve session-wide. If any id is unknown — e.g. Thunderbird
+# restarted since you listed — nothing is marked and the error names the id:
+# re-list and retry.
+curl -s -H "$AUTH" -X POST "$PROXY/mail/mark" \
+  -H "Content-Type: application/json" \
+  -d '{"ids":[12,13,14],"read":true}'
+
+# Batch trash — moves to the account's Trash in one call; if any listed id
+# is already in Trash, nothing is moved and the error names that id (a
+# second delete would purge it).
+curl -s -H "$AUTH" -X POST "$PROXY/mail/trash" \
+  -H "Content-Type: application/json" -d '{"ids":[15,16]}'
+
+# Mark the whole folder read in one call (bulk flag — Thunderbird exposes
+# no set-level flag update, so per-message flags stay single PATCHes)
+curl -s -H "$AUTH" -X POST "$PROXY/folders/mark-read" \
+  -H "Content-Type: application/json" -d '{"folderId":"<folderId>"}'
+
+# Delete one message — moves it to Trash; mail is never permanently deleted.
 curl -s -H "$AUTH" -X DELETE "$PROXY/mail/<messageId>"
 ```
+
+Batch endpoints cover what Thunderbird can do in bulk natively: id arrays
+for move/trash, set-level folder operations for bulk read/star, and
+whole-folder `mark-read`. Tags are the one flag without a bulk path —
+per-message PATCH only; if you must tag many, loop and tell the user it
+will be slow. Message ids do not survive a move: the message gets a new id
+in the destination folder — re-list before any follow-up operation on
+messages you just moved. Gmail IMAP operations are slow (~20-30 s for a
+move); expect moves to take seconds, not milliseconds.
 
 ## Manage Folders
 

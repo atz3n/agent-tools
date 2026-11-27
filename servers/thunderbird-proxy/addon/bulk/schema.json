@@ -1,0 +1,29 @@
+[
+  {
+    "namespace": "mailBulk",
+    "description": "Set-level message flagging - the bridge's single privileged operation, because the WebExtension API has no bulk flag update.",
+    "functions": [
+      {
+        "name": "markMessages",
+        "type": "function",
+        "async": true,
+        "description": "Mark messages read and/or flagged using the folder-level operations Thunderbird's own UI uses: ids are grouped per folder and each folder gets one set-level call, not one per message. Message ids are the WebExtension ids from the current session; all ids resolve before anything is marked, so a single unknown id marks nothing and names itself in the error.",
+        "parameters": [
+          {
+            "name": "details",
+            "type": "object",
+            "properties": {
+              "messageIds": {
+                "type": "array",
+                "items": { "type": "integer" },
+                "minItems": 1
+              },
+              "read": { "type": "boolean", "optional": true },
+              "flagged": { "type": "boolean", "optional": true }
+            }
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -80,6 +80,27 @@ paths:
         "400": { description: invalid body (error names the offending field) }
         "502": { description: add-on reported a failure (e.g. parent folder not found) }
         "504": { $ref: "#/components/responses/Disconnected" }
+  /folders/mark-read:
+    post:
+      summary: >
+        Mark every message in a folder as read (command folders.markRead) —
+        the only bulk flag Thunderbird's WebExtension API exposes; set-level
+        flag updates do not exist, per-message flags stay PATCH /mail/{id}.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                folderId: { type: string, description: folder to mark read }
+                account: { type: string, description: with folder — resolve by account + name/path instead }
+                folder: { type: string, description: folder name or path (requires account) }
+      responses:
+        "200": { description: "{ markedRead: true, folderId: <id> }" }
+        "400": { description: invalid body (error names the offending field) }
+        "502": { description: add-on reported a failure (e.g. folder not found) }
+        "504": { $ref: "#/components/responses/Disconnected" }
   /folders/{folderId}:
     patch:
       summary: Rename a folder (command folders.update) — the id is path-derived and changes; the response carries the new one
@@ -97,10 +118,7 @@ paths:
       responses:
         "200": { description: "{ folder: {...} }" }
         "400": { description: invalid body }
-        "502": { description: >
-            add-on reported a failure — folder not found, or the rename
-            collided with an existing folder in the same account (refused up
-            front: Thunderbird's conflict prompt can hang forever) }
+        "502": { description: "add-on reported a failure — folder not found, or the rename collided with an existing folder in the same account (refused up front: Thunderbird's conflict prompt can hang forever)" }
         "504": { $ref: "#/components/responses/Disconnected" }
     delete:
       summary: Delete a folder (command folders.delete) — only when it and its sub-folders hold no messages
@@ -108,11 +126,12 @@ paths:
         - { $ref: "#/components/parameters/FolderId" }
       responses:
         "200": { description: "{ deleted: true }" }
-        "502": { description: >
+        "502":
+          description: >
             add-on reported a failure — folder not found, or a folder whose
             own or nested subtree still holds messages is never deleted;
             deleting IMAP folders fails upstream in current Thunderbird
-            (bug 2013929) }
+            (bug 2013929)
         "504": { $ref: "#/components/responses/Disconnected" }
   /mail/list:
     get:
@@ -191,6 +210,91 @@ paths:
         "403": { description: recipient outside ALLOWED_SENDERS }
         "502": { description: add-on reported a failure }
         "504": { $ref: "#/components/responses/Disconnected" }
+  /mail/move:
+    post:
+      summary: >
+        Move messages in batch (command messages.move) — one Thunderbird
+        call for the whole selection, not one round-trip per message. The
+        moved messages get new ids in the destination folder (ids are
+        per-folder session keys) — re-list before touching them again.
+        Batch endpoints exist only where Thunderbird natively takes id
+        arrays or offers a set-level operation; tags stay per-message
+        (PATCH /mail/{id}).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, to]
+              properties:
+                ids:
+                  type: array
+                  items: { oneOf: [ { type: string }, { type: integer } ] }
+                  minItems: 1
+                  maxItems: 500
+                to: { type: string, description: target folder id }
+      responses:
+        "200": { description: "{ moved: <count>, folderId: <id> }" }
+        "400": { description: invalid body (error names the offending field) }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /mail/mark:
+    post:
+      summary: >
+        Flag messages in batch (command messages.mark) — bulk read/star via
+        Thunderbird's set-level folder operations, executed by the bundled
+        mailBulk experiment API: one set-level call per folder holding the
+        messages, never one per message. No folder locator — session message
+        ids resolve globally, each carrying its own folder. Every id must
+        resolve before anything is marked, so a single unknown id marks
+        nothing and names itself in the error. Tags are not part of this
+        endpoint (no native bulk path — use PATCH /mail/{id}).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { oneOf: [ { type: string }, { type: integer } ] }
+                  minItems: 1
+                  maxItems: 500
+                read: { type: boolean }
+                starred: { type: boolean }
+      responses:
+        "200": { description: "{ updated: <count> }" }
+        "400": { description: invalid body (no flags, unsupported field) }
+        "502": { description: add-on reported a failure (message ids not found — ids are per-session, re-list them) }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /mail/trash:
+    post:
+      summary: >
+        Move messages to the Trash in batch (command messages.trash) — one
+        Thunderbird call, never a purge. If any listed message already sits
+        in a trash-type folder, nothing is moved and the error names the id
+        (a second delete would purge it).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { oneOf: [ { type: string }, { type: integer } ] }
+                  minItems: 1
+                  maxItems: 500
+      responses:
+        "200": { description: "{ trashed: <count> }" }
+        "400": { description: invalid body }
+        "502": { description: add-on reported a failure (a message is already in the Trash — its id is named) }
+        "504": { $ref: "#/components/responses/Disconnected" }
   /mail/{messageId}:
     get:
       summary: Read one message — header plus body parts (command message.get)
@@ -216,8 +320,9 @@ paths:
                 starred: { type: boolean }
                 tags: { type: array, items: { type: string } }
                 moveTo: { type: string, description: target folder id (moves the message) — must be non-empty }
+                junk: { type: boolean, description: mark as (un)junk — true additionally moves the message to the account's junk folder when one resolves }
       responses:
-        "200": { description: "{ updated: true }" }
+        "200": { description: '{ updated: true } — with junk also { movedToJunk: "<folderId>" | false }' }
         "400": { description: invalid body }
         "502": { description: add-on reported a failure }
         "504": { $ref: "#/components/responses/Disconnected" }
@@ -230,10 +335,11 @@ paths:
         - { $ref: "#/components/parameters/MessageId" }
       responses:
         "200": { description: "{ deleted: true } — the message is in the Trash" }
-        "502": { description: >
+        "502":
+          description: >
             add-on reported a failure (message already in the Trash, or
             trash membership could not be determined — the guard fails
-            closed and refuses to delete) }
+            closed and refuses to delete)
         "504": { $ref: "#/components/responses/Disconnected" }
   /addon/hello:
     post:

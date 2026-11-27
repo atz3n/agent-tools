@@ -34,7 +34,9 @@ THUNDERBIRD_ADDON_TOKEN = os.environ.get("THUNDERBIRD_ADDON_TOKEN", "").strip()
 THUNDERBIRD_ADDON_SECRET = os.environ.get("THUNDERBIRD_ADDON_SECRET", "").strip()
 
 # How long an agent request waits for the add-on to execute its command.
-COMMAND_TIMEOUT = int(os.environ.get("COMMAND_TIMEOUT") or "30")
+# Must exceed the add-on's COMMAND_DEADLINE_MS (60s) so the add-on reports a
+# timeout first; Gmail IMAP moves/marks alone can run ~20-30s.
+COMMAND_TIMEOUT = int(os.environ.get("COMMAND_TIMEOUT") or "75")
 
 # Long-poll window the add-on's GET /addon/poll is held open for.
 ADDON_POLL_WAIT = 30

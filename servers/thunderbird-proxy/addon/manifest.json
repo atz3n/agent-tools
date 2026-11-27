@@ -2,7 +2,7 @@
     "manifest_version": 2,
     "name": "Thunderbird Proxy Bridge",
     "description": "Bridges the local thunderbird-proxy command queue to Thunderbird's mail APIs so agents can read, search, organize and send mail through the proxy.",
-    "version": "1.1.1",
+    "version": "1.4.0",
     "author": "agent-tools",
     "browser_specific_settings": {
         "gecko": {
@@ -27,6 +27,16 @@
     },
     "browser_action": {
         "default_title": "thunderbird-proxy bridge"
+    },
+    "experiment_apis": {
+        "mailBulk": {
+            "schema": "bulk/schema.json",
+            "parent": {
+                "scopes": ["addon_parent"],
+                "paths": [["mailBulk"]],
+                "script": "bulk/api.js"
+            }
+        }
     },
     "permissions": [
         "accountsRead",

@@ -5,20 +5,31 @@
 // valid X-Proxy-Proof signature (see proxyauth.js) before we act on it.
 /* global browser, randomNonce, proofValid */
 
-const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "", responseSecret: "" };
+const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "", responseSecret: "", commandTimeoutSec: 60 };
 
 // A Thunderbird API call can hang forever (e.g. a rename onto a conflicting
 // name parks on a prompt) — report the command as failed instead of letting
-// one wedged call silence the whole bridge.
-const COMMAND_DEADLINE_MS = 25000; // must stay under the proxy's COMMAND_TIMEOUT (default 30s) — below it the proxy 504s first and the late result hits an empty bridge
+// one wedged call silence the whole bridge. The budget is configurable on
+// the options page (Gmail IMAP moves measure ~20-30 s, so the default of
+// 60 s clears them) and must stay under the proxy's COMMAND_TIMEOUT
+// (default 75 s) so the add-on reports first and the late result never
+// lands on a cleared bridge.
+const TIMEOUT_LIMITS = { min: 5, max: 600, fallback: 60 };
+
+function commandDeadlineMs() {
+  const raw = Number(settings.commandTimeoutSec);
+  const sec = Number.isFinite(raw) ? Math.min(Math.max(raw, TIMEOUT_LIMITS.min), TIMEOUT_LIMITS.max) : TIMEOUT_LIMITS.fallback;
+  return sec * 1000;
+}
 
 async function withDeadline(name, promise) {
   let timer;
+  const ms = commandDeadlineMs();
   try {
     return await Promise.race([
       promise,
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${name} did not complete within ${COMMAND_DEADLINE_MS / 1000}s`)), COMMAND_DEADLINE_MS);
+        timer = setTimeout(() => reject(new Error(`${name} did not complete within ${ms / 1000}s`)), ms);
       }),
     ]);
   } finally {

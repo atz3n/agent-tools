@@ -48,21 +48,6 @@ test("message.draft omits empty cc/bcc arrays (saveMessage never sees cc: [])", 
   assert.equal("bcc" in saved, false);
 });
 
-test("message.send compose fallback omits empty cc/bcc arrays too", async () => {
-  let details = null;
-  const commands = load({
-    messages: {}, // no messages.sendMessage on this build — forces the compose fallback
-    compose: {
-      beginNew: async (_undefined, d) => { details = d; return { id: 1 }; },
-      sendMessage: async () => {},
-    },
-  });
-  await commands.run("message.send", { to: ["a@b.c"], cc: [], bcc: [], subject: "s", body: "t" });
-  assert.deepEqual(details.to, ["a@b.c"]);
-  assert.equal("cc" in details, false);
-  assert.equal("bcc" in details, false);
-});
-
 test("message.update passes an empty tags array through (clears tags)", async () => {
   let updated = null;
   const commands = load({
@@ -104,6 +89,19 @@ test("folder lookup prefers an exact name/path match over a case-insensitive one
   assert.deepEqual(calls, ["acc1/INBOX", "acc1/lo", "acc1/lo"]);
 });
 
+test("folders.markRead resolves the locator and calls folders.markAsRead once", async () => {
+  const calls = [];
+  const commands = load({
+    folders: {
+      markAsRead: async (id) => { calls.push(id); },
+      query: async () => [{ id: "acc1/INBOX", name: "Inbox", path: "/INBOX" }],
+    },
+  });
+  await commands.run("folders.markRead", { folderId: "acc1/INBOX" });
+  await commands.run("folders.markRead", { account: "acc1", folder: "INBOX" });
+  assert.deepEqual(calls, ["acc1/INBOX", "acc1/INBOX"]);
+});
+
 test("folders.update renames through browser.folders.rename", async () => {
   const calls = [];
   const seen = [];
@@ -117,22 +115,6 @@ test("folders.update renames through browser.folders.rename", async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["acc1/News", "Archive"]]);
   assert.equal(JSON.parse(JSON.stringify(result)).folder.name, "Archive");
   assert.deepEqual(JSON.parse(JSON.stringify(seen)), [{}]); // the pre-check queries all folders
-});
-
-test("folders.update collision check reads the account from the nested object when accountId is absent", async () => {
-  const calls = [];
-  const commands = load({
-    folders: {
-      query: async () => [
-        { id: "acc1/News", account: { id: "acc1" }, name: "News", path: "/News" },
-        { id: "acc2/Archive", account: { id: "acc2" }, name: "Archive", path: "/Archive" }, // other account — no clash
-      ],
-      rename: async (id, newName) => { calls.push([id, newName]); return { id, name: newName }; },
-    },
-  });
-  const result = await commands.run("folders.update", { folder_id: "acc1/News", name: "Archive" });
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["acc1/News", "Archive"]]);
-  assert.equal(JSON.parse(JSON.stringify(result)).folder.name, "Archive");
 });
 
 test("folders.update reports a clear error when the folder entry has no path", async () => {
@@ -281,6 +263,110 @@ test("folders.delete turns Thunderbird's opaque IMAP failure into a named cause"
   await assert.rejects(() => commands.run("folders.delete", { folder_id: "acc1/x" }), /bug 2013929/);
 });
 
+test("message.update with junk mirrors the UI: marks, then moves to the junk folder", async () => {
+  const calls = { updated: null, moved: [] };
+  const commands = load({
+    messages: {
+      update: async (id, props) => { calls.updated = [id, props]; },
+      get: async () => ({ id: 7, folder: { id: "acc1/INBOX", accountId: "acc1", specialUse: ["inbox"] } }),
+      move: async (ids, folderId) => { calls.moved.push([ids, folderId]); },
+    },
+    folders: {
+      query: async () => [
+        { id: "acc1/INBOX", specialUse: ["inbox"] },
+        { id: "acc1/Junk", specialUse: ["junk"] },
+      ],
+    },
+  });
+  const result = await commands.run("message.update", { message_id: "7", junk: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.updated)), [7, { junk: true }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.moved)), [[[7], "acc1/Junk"]]);
+  assert.equal(result.movedToJunk, "acc1/Junk");
+});
+
+test("junk=false only un-marks (no move), and a missing junk folder degrades to mark-only", async () => {
+  const calls = { updated: null, moved: [] };
+  const commands = load({
+    messages: {
+      update: async (id, props) => { calls.updated = [id, props]; },
+      get: async () => ({ id: 7, folder: { id: "acc1/INBOX", accountId: "acc1", specialUse: ["inbox"] } }),
+      move: async (ids, folderId) => { calls.moved.push([ids, folderId]); },
+    },
+    folders: { query: async () => [{ id: "acc1/INBOX", specialUse: ["inbox"] }] },
+  });
+  const unmark = await commands.run("message.update", { message_id: "7", junk: false });
+  assert.deepEqual(JSON.parse(JSON.stringify(unmark)), { updated: true, movedToJunk: false });
+  assert.deepEqual(calls.moved, []);
+  const mark = await commands.run("message.update", { message_id: "7", junk: true });
+  assert.equal(mark.movedToJunk, false); // no junk folder to move to — mark-only
+  assert.deepEqual(calls.moved, []);
+});
+
+test("messages.move moves the whole batch in one Thunderbird call", async () => {
+  const calls = [];
+  const commands = load({
+    messages: { move: async (ids, folderId) => { calls.push([ids, folderId]); } },
+  });
+  const result = await commands.run("messages.move", { ids: ["7", "8"], to: "acc1/News" });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[[7, 8], "acc1/News"]]);
+  assert.equal(result.moved, 2);
+});
+
+test("messages.move rejects non-numeric ids instead of guessing", async () => {
+  const commands = load({ messages: { move: async () => {} } });
+  await assert.rejects(() => commands.run("messages.move", { ids: ["7", "oops"], to: "f" }), /numeric/);
+});
+
+test("messages.mark hands the batch to the mailBulk experiment API", async () => {
+  let details = null;
+  const commands = load({
+    mailBulk: { markMessages: async (d) => { details = d; return { updated: d.messageIds.length, missing: [] }; } },
+  });
+  const result = await commands.run("messages.mark", { ids: ["7", "8"], read: true, flagged: false });
+  assert.deepEqual(JSON.parse(JSON.stringify(details)), { messageIds: [7, 8], read: true, flagged: false });
+  assert.equal(result.updated, 2);
+});
+
+test("messages.mark converts ids and rejects garbage before calling the experiment", async () => {
+  const commands = load({ mailBulk: { markMessages: async () => ({ updated: 1, missing: [] }) } });
+  await assert.rejects(() => commands.run("messages.mark", { ids: ["not-a-number"], read: true }), /numeric/);
+});
+
+test("messages.mark turns missing ids into a readable error naming them", async () => {
+  const commands = load({
+    mailBulk: { markMessages: async () => ({ updated: 0, missing: [99] }) },
+  });
+  await assert.rejects(() => commands.run("messages.mark", { ids: ["7", "99"], read: true }), /not found.*99/);
+});
+
+test("messages.trash deletes the whole batch in one Thunderbird call", async () => {
+  const calls = [];
+  const commands = load({
+    messages: {
+      get: async (id) => ({ id, folder: { id: "acc1/INBOX", specialUse: ["inbox"] } }),
+      delete: async (ids, options) => { calls.push([ids, options]); },
+    },
+  });
+  const result = await commands.run("messages.trash", { ids: ["7", "8"] });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[[7, 8], { deletePermanently: false }]]);
+  assert.equal(result.trashed, 2);
+});
+
+test("messages.trash refuses the whole batch if any message is already in the Trash", async () => {
+  let deleted = false;
+  const commands = load({
+    messages: {
+      get: async (id) =>
+        id === 8
+          ? { id, folder: { id: "acc1/[Gmail]/Bin", specialUse: ["trash"] } }
+          : { id, folder: { id: "acc1/INBOX", specialUse: ["inbox"] } },
+      delete: async () => { deleted = true; },
+    },
+  });
+  await assert.rejects(() => commands.run("messages.trash", { ids: ["7", "8"] }), /message 8.*permanently/);
+  assert.equal(deleted, false);
+});
+
 test("message.delete moves to Trash and never sets deletePermanently", async () => {
   const calls = [];
   const commands = load({
@@ -305,18 +391,6 @@ test("message.delete refuses a message already in the Trash (would purge it)", a
   assert.equal(called, false);
 });
 
-test("message.delete still honours the legacy folder type property", async () => {
-  let called = false;
-  const commands = load({
-    messages: {
-      get: async () => ({ id: 7, folder: { id: "acc1/Trash", type: "trash" } }), // pre-specialUse build
-      delete: async () => { called = true; },
-    },
-  });
-  await assert.rejects(() => commands.run("message.delete", { message_id: "7" }), /permanently/);
-  assert.equal(called, false);
-});
-
 test("message.delete fails closed when trash membership cannot be determined", async () => {
   let called = false;
   const commands = load({
@@ -334,7 +408,7 @@ test("message.delete resolves a bare header folder via folders.query before dele
   let called = false;
   const commands = load({
     messages: {
-      get: async () => ({ id: 7, folder: { id: "acc1/Trash" }, folderId: "acc1/Trash" }), // no specialUse, no type
+      get: async () => ({ id: 7, folder: { id: "acc1/Trash" }, folderId: "acc1/Trash" }), // header folder has no specialUse yet
       delete: async () => { called = true; },
     },
     folders: { query: async () => [{ id: "acc1/Trash", specialUse: ["trash"] }] },

@@ -1,6 +1,7 @@
 /* global browser, randomNonce, proofValid */
 
-const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "", responseSecret: "" };
+const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "", responseSecret: "", commandTimeoutSec: 60 };
+const TIMEOUT_LIMITS = { min: 5, max: 600 };
 
 const $ = (id) => document.getElementById(id);
 
@@ -9,6 +10,7 @@ async function load() {
   $("proxyUrl").value = stored.proxyUrl ?? DEFAULTS.proxyUrl;
   $("token").value = stored.token ?? DEFAULTS.token;
   $("responseSecret").value = stored.responseSecret ?? DEFAULTS.responseSecret;
+  $("commandTimeoutSec").value = stored.commandTimeoutSec ?? "";
 }
 
 function show(message, ok) {
@@ -18,10 +20,16 @@ function show(message, ok) {
 }
 
 $("save").addEventListener("click", async () => {
+  const raw = $("commandTimeoutSec").value.trim();
+  const sec = raw === "" ? DEFAULTS.commandTimeoutSec : Number(raw);
+  if (!Number.isInteger(sec) || sec < TIMEOUT_LIMITS.min || sec > TIMEOUT_LIMITS.max) {
+    return show(`Command timeout must be a whole number of seconds between ${TIMEOUT_LIMITS.min} and ${TIMEOUT_LIMITS.max}.`, false);
+  }
   await browser.storage.local.set({
     proxyUrl: $("proxyUrl").value.trim() || DEFAULTS.proxyUrl,
     token: $("token").value.trim(),
     responseSecret: $("responseSecret").value.trim(),
+    commandTimeoutSec: sec,
   });
   show("Saved. The bridge reconnects automatically.", true);
 });

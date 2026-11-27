@@ -16,7 +16,7 @@ const ProxyCommands = {
 
     async "identities.list"(params) {
       const identities = await browser.identities.list(params.account || undefined);
-      return { identities: identities.map((i) => ({ id: i.id, accountId: i.account ? i.account.id : undefined, email: i.email, name: i.name })) };
+      return { identities: identities.map((i) => ({ id: i.id, accountId: i.accountId, email: i.email, name: i.name })) };
     },
 
     async "folders.list"(params) {
@@ -47,6 +47,14 @@ const ProxyCommands = {
       // renaming is its own API (folders.rename, TB 68+).
       const folder = await browser.folders.rename(params.folder_id, params.name);
       return { folder: slimFolder(folder) };
+    },
+
+    async "folders.markRead"(params) {
+      // Whole-folder mark-as-read — the one bulk flag the WebExtension API
+      // itself exposes; partial selections go through messages.mark.
+      const folderId = await resolveFolderId(params);
+      await browser.folders.markAsRead(folderId);
+      return { markedRead: true, folderId };
     },
 
     async "folders.delete"(params) {
@@ -86,7 +94,7 @@ const ProxyCommands = {
       const folderId = await resolveFolderId(params);
       const limit = clampCount(params.limit, 25, 200);
       const offset = clampCount(params.offset, 0, 100000);
-      // options accepts only sortType/sortOrder (TB 148+) — no maxCount; pages
+      // options accepts only sortType/sortOrder — no maxCount; pages
       // come via continueList until the MessageList id turns null.
       let page = await browser.messages.list(folderId, { sortType: "date", sortOrder: "descending" });
       let messages = page.messages;
@@ -105,7 +113,7 @@ const ProxyCommands = {
       }
       if (params.to) queryInfo.recipients = params.to;
       if (params.folderId || params.folder) {
-        queryInfo.folderId = await resolveFolderId(params); // singular "folderId", TB 121+
+        queryInfo.folderId = await resolveFolderId(params);
       } else if (params.account) {
         queryInfo.accountId = params.account;
       }
@@ -142,24 +150,15 @@ const ProxyCommands = {
     },
 
     async "message.get"(params) {
-      const id = messageKey(params.message_id); // MessageId is an integer (TB 122+)
+      const id = messageKey(params.message_id);
       const header = await browser.messages.get(id);
       const full = await browser.messages.getFull(id, { decodeContent: true });
       return { header: slimMessage(header), parts: full.parts };
     },
 
     async "message.send"(params) {
-      if (typeof browser.messages.sendMessage === "function") {
-        const result = await browser.messages.sendMessage(buildOutgoing(params), { mode: "sendNow" });
-        return { sent: true, message: slimMessage(firstMessage(result)) };
-      }
-      // Some TB builds gate messages.sendMessage behind a "messages.send"
-      // permission the manifest validator refuses to accept — send through a
-      // compose window instead (the pre-153 path; the window flashes open
-      // and closes itself once the message is away).
-      const tab = await browser.compose.beginNew(undefined, buildComposeDetails(params));
-      await browser.compose.sendMessage(tab.id, { mode: "sendNow" });
-      return { sent: true, message: {} };
+      const result = await browser.messages.sendMessage(buildOutgoing(params), { mode: "sendNow" });
+      return { sent: true, message: slimMessage(firstMessage(result)) };
     },
 
     async "message.draft"(params) {
@@ -173,33 +172,79 @@ const ProxyCommands = {
       for (const key of ["read", "flagged", "tags"]) {
         if (params[key] !== undefined) properties[key] = params[key];
       }
-      if (Object.keys(properties).length) await browser.messages.update(id, properties);
-      if (params.moveTo) await browser.messages.move([id], params.moveTo);
-      return { updated: true };
+      if (params.junk === undefined) {
+        if (Object.keys(properties).length) await browser.messages.update(id, properties);
+        if (params.moveTo) await browser.messages.move([id], params.moveTo);
+        return { updated: true };
+      }
+      // Junk mirrors the UI's junk button: mark the message, then move it
+      // to the account's junk folder — on Gmail-style providers the move
+      // is what trains the spam filter. Mark-only when no junk folder can
+      // be resolved; the response says which happened.
+      await browser.messages.update(id, { ...properties, junk: Boolean(params.junk) });
+      let movedToJunk = false;
+      if (params.junk) {
+        const header = await browser.messages.get(id);
+        const accountId = accountIdOf(header.folder);
+        const folders = await browser.folders.query(accountId ? { accountId } : {});
+        const junkFolder = folders.find((f) => hasSpecialUse(f, "junk"));
+        if (junkFolder) {
+          await browser.messages.move([id], junkFolder.id);
+          movedToJunk = junkFolder.id;
+        }
+      }
+      return { updated: true, movedToJunk };
+    },
+
+    async "messages.move"(params) {
+      // One Thunderbird call for the whole selection, not one round-trip per
+      // message (the per-message version is what hammers IMAP rate limits).
+      const ids = params.ids.map(messageKey);
+      await browser.messages.move(ids, params.to);
+      return { moved: ids.length, folderId: params.to };
+    },
+
+    async "messages.mark"(params) {
+      // Bulk read/starred. The WebExtension API has no set-level update, so
+      // the bundled mailBulk experiment API does it with the folder methods
+      // Thunderbird's own UI uses: one set-level call per folder holding the
+      // messages, never one call per message. Message ids resolve through the
+      // extension's own message manager — the same lookup
+      // browser.messages.update does — so no folder is needed.
+      const details = { messageIds: params.ids.map(messageKey) };
+      if (params.read !== undefined) details.read = params.read;
+      if (params.flagged !== undefined) details.flagged = params.flagged;
+      const result = await browser.mailBulk.markMessages(details);
+      // The experiment never flags a partial batch; surface the stale ids as
+      // a real error (a throw from here reaches the agent verbatim).
+      if (result.missing.length) {
+        throw new Error(`messages not found (ids are per-session — re-list them): ${result.missing.join(", ")}`);
+      }
+      return { updated: result.updated };
+    },
+
+    async "messages.trash"(params) {
+      // Same never-destroy rule as a single delete, checked for every id
+      // before anything is touched: one already-trashed message refuses the
+      // whole batch rather than purging it silently.
+      const ids = params.ids.map(messageKey);
+      const headers = await Promise.all(ids.map((id) => browser.messages.get(id)));
+      for (const [i, header] of headers.entries()) {
+        try {
+          await assertTrashSafe(header);
+        } catch (error) {
+          throw new Error(`message ${ids[i]}: ${error.message}`);
+        }
+      }
+      await browser.messages.delete(ids, { deletePermanently: false });
+      return { trashed: ids.length };
     },
 
     async "message.delete"(params) {
       const id = messageKey(params.message_id);
-      // Deletion means "move to Trash", never "purge": deletePermanently is
-      // explicitly false (options object, TB 137+ — the boolean form is
-      // deprecated), and a message already sitting in a trash-type folder is
-      // refused (deleting it again would delete it for good). Current builds
-      // mark folders with the specialUse array; the legacy type property is
-      // checked too. The guard fails closed: when neither is present the
-      // folder is resolved via folders.query, and if trash membership still
-      // cannot be established the delete is refused.
-      const header = await browser.messages.get(id);
-      let folder = header.folder || null;
-      if (!trashDeterminable(folder) && header.folderId) {
-        const resolved = await browser.folders.query({ id: header.folderId });
-        if (resolved.length) folder = resolved[0];
-      }
-      if (trashDeterminable(folder) && inTrash(folder)) {
-        throw new Error("message is already in the Trash — the proxy never deletes mail permanently");
-      }
-      if (!trashDeterminable(folder)) {
-        throw new Error("cannot tell whether the message is in the Trash — refusing to delete");
-      }
+      // Deletion means "move to Trash", never "purge" — deletePermanently
+      // is explicitly false.
+      await assertTrashSafe(await browser.messages.get(id));
       await browser.messages.delete([id], { deletePermanently: false });
       return { deleted: true };
     },
@@ -224,20 +269,42 @@ function slimAccount(account) {
   };
 }
 
-// Some Thunderbird builds expose a folder's account as accountId, others
-// only as the nested account object — read it through here so every
-// account comparison sees the same value (undefined === undefined would
-// otherwise match across accounts).
+// MailFolder.accountId identifies the owning folder account (and thus its
+// email identities).
 function accountIdOf(folder) {
-  return folder.accountId ?? (folder.account ? folder.account.id : undefined);
+  return folder.accountId;
 }
 
 function trashDeterminable(folder) {
-  return Boolean(folder) && (Array.isArray(folder.specialUse) || folder.type !== undefined);
+  return Boolean(folder) && Array.isArray(folder.specialUse);
+}
+
+// Folder purposes come from the specialUse array.
+function hasSpecialUse(folder, use) {
+  return (folder.specialUse || []).includes(use);
 }
 
 function inTrash(folder) {
-  return (folder.specialUse || []).includes("trash") || folder.type === "trash";
+  return hasSpecialUse(folder, "trash");
+}
+
+// Refuses a delete that would purge mail: a message already sitting in a
+// trash folder would be deleted for good by another delete. The guard fails
+// closed: when the folder record cannot say (no specialUse array), the
+// folder is resolved via folders.query, and if trash membership still cannot
+// be established the delete is refused.
+async function assertTrashSafe(header) {
+  let folder = header.folder || null;
+  if (!trashDeterminable(folder) && header.folderId) {
+    const resolved = await browser.folders.query({ id: header.folderId });
+    if (resolved.length) folder = resolved[0];
+  }
+  if (trashDeterminable(folder) && inTrash(folder)) {
+    throw new Error("message is already in the Trash — the proxy never deletes mail permanently");
+  }
+  if (!trashDeterminable(folder)) {
+    throw new Error("cannot tell whether the message is in the Trash — refusing to delete");
+  }
 }
 
 function slimFolder(folder) {
@@ -246,7 +313,6 @@ function slimFolder(folder) {
     accountId: accountIdOf(folder),
     name: folder.name,
     path: folder.path,
-    type: folder.type,
     specialUse: folder.specialUse,
   };
 }
@@ -261,15 +327,15 @@ function slimMessage(message) {
     read: message.read,
     starred: message.flagged,
     new: message.new,
-    folder: message.folder ? message.folder.name : undefined,
-    folderId: message.folder ? message.folder.id : undefined,
-    accountId: message.folder ? accountIdOf(message.folder) : undefined,
+    folder: message.folder.name,
+    folderId: message.folder.id,
+    accountId: accountIdOf(message.folder),
     size: message.size,
   };
 }
 
-// MessageId is an integer in the WebExtension API (TB 122+), while the REST
-// path hands it over as a string — convert, and fail loudly on garbage.
+// MessageId is an integer in the WebExtension API, while the REST path
+// hands it over as a string — convert, and fail loudly on garbage.
 function messageKey(raw) {
   const id = Number(raw);
   if (!Number.isInteger(id)) throw new Error(`message id must be numeric, got: ${raw}`);
@@ -300,14 +366,6 @@ function copyRecipients(details, params) {
   for (const key of ["to", "cc", "bcc"]) {
     if (params[key] && params[key].length) details[key] = params[key];
   }
-  return details;
-}
-
-function buildComposeDetails(params) {
-  const details = copyRecipients({ subject: params.subject, identityId: params.identityId }, params);
-  // Docs describe body as { format, plainText, html } — the runtime schema
-  // demands a plain string, so give it exactly that.
-  details.body = String(params.plainTextBody ?? params.body ?? "");
   return details;
 }
 

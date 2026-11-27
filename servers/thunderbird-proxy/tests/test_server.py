@@ -51,15 +51,19 @@ class TestWhitelist(unittest.TestCase):
             "GET /identities?account=acc1": "identities.list",
             "GET /folders?account=acc1": "folders.list",
             "POST /folders": "folders.create",
+            "POST /folders/mark-read": "folders.markRead",
             "PATCH /folders/acc1%2FNews": "folders.update",
             "DELETE /folders/f1": "folders.delete",
             "GET /mail/list?folderId=f1&limit=5": "messages.list",
             "GET /mail/search?subject=hi": "messages.search",
-            "GET /mail/msgABC123": "message.get",
+            "GET /mail/1234567890": "message.get",
             "POST /mail/send": "message.send",
             "POST /mail/draft": "message.draft",
-            "PATCH /mail/msgABC123": "message.update",
-            "DELETE /mail/msgABC123": "message.delete",
+            "POST /mail/move": "messages.move",
+            "POST /mail/mark": "messages.mark",
+            "POST /mail/trash": "messages.trash",
+            "PATCH /mail/1234567890": "message.update",
+            "DELETE /mail/1234567890": "message.delete",
         }
         for spec, command in cases.items():
             method, path = spec.split(" ")
@@ -83,6 +87,8 @@ class TestWhitelist(unittest.TestCase):
         paths += ("/folders/acc1/News",)  # raw '/' in a folder id is not routable
         for path in paths:
             self.assertIsNone(whitelist.match_endpoint("GET", path), path)
+        # mark-read is a literal POST route, not a folder id
+        self.assertIsNone(whitelist.match_endpoint("POST", "/folders/mark-read/extra"))
 
     def test_wrong_method_is_known_path(self) -> None:
         self.assertIsNone(whitelist.match_endpoint("POST", "/accounts"))
@@ -99,9 +105,16 @@ class TestWhitelist(unittest.TestCase):
         self.assertIsNotNone(matched)
 
     def test_path_param_extracted_and_unquoted(self) -> None:
-        matched = whitelist.match_endpoint("GET", "/mail/abc%2Fdef%3D%3D")
+        matched = whitelist.match_endpoint("GET", "/mail/12345")
         assert matched is not None
-        self.assertEqual(matched[1]["message_id"], "abc/def==")
+        self.assertEqual(matched[1]["message_id"], "12345")
+
+    def test_static_mail_routes_are_not_shadowed_by_message_id(self) -> None:
+        matched = whitelist.match_endpoint("GET", "/mail/send")
+        self.assertIsNone(matched)  # send is POST-only...
+        self.assertTrue(whitelist.path_known_any_method("/mail/send"))  # ...so: 405, not a message.get
+        self.assertIsNone(whitelist.match_endpoint("GET", "/mail/abc"))  # ids are numeric
+        self.assertFalse(whitelist.path_known_any_method("/mail/abc"))  # so: 404
 
     def test_folder_id_path_param_unquoted(self) -> None:
         matched = whitelist.match_endpoint("PATCH", "/folders/acc1%2FNews%5Bx%5D")
@@ -117,9 +130,10 @@ class TestWhitelist(unittest.TestCase):
         self.assertEqual(
             whitelist.COMMANDS,
             {
-                "accounts.list", "identities.list", "folders.list", "folders.create", "folders.update",
-                "folders.delete", "messages.list", "messages.search", "message.get", "message.send",
-                "message.draft", "message.update", "message.delete",
+                "accounts.list", "identities.list", "folders.list", "folders.create", "folders.markRead",
+                "folders.update", "folders.delete", "messages.list", "messages.search", "messages.move",
+                "messages.mark", "messages.trash", "message.get", "message.send", "message.draft",
+                "message.update", "message.delete",
             },
         )
 
@@ -204,6 +218,13 @@ class TestBodyValidation(unittest.TestCase):
         params, error = whitelist.validate_update_body(b'{"tags": ["work", 7]}')
         self.assertIsNone(params)
         self.assertIn("tags must be an array of tag names", error)
+        params, error = whitelist.validate_update_body(b'{"junk": true}')
+        self.assertEqual(error, "")
+        assert params is not None
+        self.assertEqual(params, {"junk": True})
+        params, error = whitelist.validate_update_body(b'{"junk": "yes"}')
+        self.assertIsNone(params)
+        self.assertIn("junk must be a boolean", error)
         params, error = whitelist.validate_update_body(b'{"moveTo": "acc1/INBOX"}')
         self.assertEqual(error, "")
         params, error = whitelist.validate_update_body(b'{"moveTo": ""}')
@@ -261,6 +282,67 @@ class TestBodyValidation(unittest.TestCase):
             self.assertIsNone(params, body)
             self.assertIn(fragment, error, f"{body}: {error}")
 
+    def test_move_body(self) -> None:
+        params, error = whitelist.validate_move_body(b'{"ids": [7, "8"], "to": "acc1/News"}')
+        self.assertEqual(error, "")
+        assert params is not None
+        self.assertEqual(params, {"ids": ["7", "8"], "to": "acc1/News"})
+        for body, fragment in [
+            (b'{"ids": [], "to": "f"}', "ids must be a non-empty array"),
+            (b'{"ids": [1, null], "to": "f"}', "ids must be a non-empty array"),
+            (b'{"ids": [true], "to": "f"}', "ids must be a non-empty array"),
+            (b'{"ids": [1]}', "to must be a folder id string"),
+            (b'{"ids": [1], "to": ""}', "to must be a folder id string"),
+            (b'{"ids": [1], "to": "f", "extra": 1}', "unsupported field"),
+            (json.dumps({"ids": list(range(whitelist.MAX_MOVE_IDS + 1)), "to": "f"}).encode(), "at most"),
+        ]:
+            params, error = whitelist.validate_move_body(body)
+            self.assertIsNone(params, body)
+            self.assertIn(fragment, error, f"{body}: {error}")
+
+    def test_folder_read_body(self) -> None:
+        params, error = whitelist.validate_folder_read_body(b'{"folderId": "acc1/INBOX"}')
+        self.assertEqual(error, "")
+        assert params is not None
+        self.assertEqual(params, {"folderId": "acc1/INBOX"})
+        for body, fragment in [
+            (b"{}", "folderId (or account + folder) is required"),
+            (b'{"account": "a"}', "folderId (or account + folder) is required"),
+            (b'{"folderId": 7}', "folderId must be a non-empty string"),
+            (b'{"folderId": "f", "account": "a", "folder": "b"}', "not both"),
+            (b'{"folderId": "f", "ids": [1]}', "unsupported field"),
+        ]:
+            params, error = whitelist.validate_folder_read_body(body)
+            self.assertIsNone(params, body)
+            self.assertIn(fragment, error, f"{body}: {error}")
+
+    def test_mark_body(self) -> None:
+        params, error = whitelist.validate_mark_body(b'{"ids": [1, 2], "starred": true}')
+        self.assertEqual(error, "")
+        assert params is not None
+        self.assertEqual(params, {"ids": ["1", "2"], "flagged": True})
+        for body, fragment in [
+            (b'{"ids": [1]}', "at least one of read, starred is required"),
+            (b'{"ids": [1], "read": "yes"}', "read must be a boolean"),
+            (b'{"ids": [1], "tags": ["x"], "read": true}', "unsupported field"),
+            (b'{"ids": [1], "folderId": "f", "read": true}', "unsupported field"),
+        ]:
+            params, error = whitelist.validate_mark_body(body)
+            self.assertIsNone(params, body)
+            self.assertIn(fragment, error, f"{body}: {error}")
+
+    def test_trash_body(self) -> None:
+        params, error = whitelist.validate_trash_body(b'{"ids": [7, "8"]}')
+        self.assertEqual(error, "")
+        assert params is not None
+        self.assertEqual(params, {"ids": ["7", "8"]})
+        params, error = whitelist.validate_trash_body(b'{"ids": [1], "read": true}')
+        self.assertIsNone(params)
+        self.assertIn("unsupported field", error)
+        params, error = whitelist.validate_trash_body(b'{"ids": []}')
+        self.assertIsNone(params)
+        self.assertIn("ids must be a non-empty array", error)
+
     def test_extract_recipients(self) -> None:
         params, _ = whitelist.validate_mail_body(
             b'{"to": ["A@B.c"], "cc": ["c@d.e"], "subject": "s", "body": "x"}'
@@ -280,7 +362,7 @@ class TestConfig(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False):
             module = importlib.reload(config)
         self.assertEqual(module.PORT, 8090)
-        self.assertEqual(module.COMMAND_TIMEOUT, 30)
+        self.assertEqual(module.COMMAND_TIMEOUT, 75)
         self.assertEqual(module.ALLOWED_SENDERS, frozenset())
 
     def test_env_overrides(self) -> None:
@@ -647,7 +729,7 @@ class TestHTTPServer(unittest.TestCase):
 
     def test_addon_error_maps_to_502(self) -> None:
         self._start_addon(lambda c: {"ok": False, "error": "no such folder"})
-        status, body = self._request("GET", "/mail/abc")
+        status, body = self._request("GET", "/mail/123")
         self.assertEqual(status, 502)
         assert body is not None
         self.assertEqual(body["error"], "no such folder")
@@ -668,7 +750,7 @@ class TestHTTPServer(unittest.TestCase):
 
     def test_patch_validation_400(self) -> None:
         self._start_addon()
-        status, body = self._request("PATCH", "/mail/abc", {"delete": True})
+        status, body = self._request("PATCH", "/mail/123", {"delete": True})
         self.assertEqual(status, 400)
         assert body is not None
         self.assertIn("unsupported field", body["error"])
@@ -725,6 +807,43 @@ class TestHTTPServer(unittest.TestCase):
         self.assertEqual(status, 502)
         assert body is not None
         self.assertIn("not empty", body["error"])
+
+    def test_mail_move_roundtrip(self) -> None:
+        self._start_addon(lambda c: {"ok": True, "data": {"moved": 2}})
+        status, body = self._request("POST", "/mail/move", {"ids": [7, 8], "to": "acc1/News"})
+        self.assertEqual(status, 200)
+        assert body is not None
+        self.assertEqual(body["moved"], 2)
+        command = self._wait_for_command()
+        self.assertEqual(command["command"], "messages.move")
+        self.assertEqual(command["params"], {"ids": ["7", "8"], "to": "acc1/News"})
+
+    def test_mail_move_validation_400(self) -> None:
+        self._start_addon()
+        status, body = self._request("POST", "/mail/move", {"ids": [], "to": "acc1/News"})
+        self.assertEqual(status, 400)
+        assert body is not None
+        self.assertIn("ids", body["error"])
+
+    def test_mail_mark_roundtrip(self) -> None:
+        self._start_addon(lambda c: {"ok": True, "data": {"updated": 2}})
+        status, body = self._request("POST", "/mail/mark", {"ids": [7, 8], "read": True})
+        self.assertEqual(status, 200)
+        assert body is not None
+        self.assertEqual(body["updated"], 2)
+        command = self._wait_for_command()
+        self.assertEqual(command["command"], "messages.mark")
+        self.assertEqual(command["params"], {"ids": ["7", "8"], "read": True})
+
+    def test_mail_trash_roundtrip(self) -> None:
+        self._start_addon(lambda c: {"ok": True, "data": {"trashed": 2}})
+        status, body = self._request("POST", "/mail/trash", {"ids": [7, 8]})
+        self.assertEqual(status, 200)
+        assert body is not None
+        self.assertEqual(body["trashed"], 2)
+        command = self._wait_for_command()
+        self.assertEqual(command["command"], "messages.trash")
+        self.assertEqual(command["params"], {"ids": ["7", "8"]})
 
     # -- logging ------------------------------------------------------------
 
