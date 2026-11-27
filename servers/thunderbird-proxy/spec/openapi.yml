@@ -36,6 +36,7 @@ paths:
           schema: { type: boolean }
       responses:
         "200": { description: "{ accounts: [...] }" }
+        "502": { description: add-on reported a failure }
         "504": { $ref: "#/components/responses/Disconnected" }
   /identities:
     get:
@@ -46,6 +47,7 @@ paths:
           schema: { type: string }
       responses:
         "200": { description: "{ identities: [{ id, accountId, email, name }] }" }
+        "502": { description: add-on reported a failure }
         "504": { $ref: "#/components/responses/Disconnected" }
   /folders:
     get:
@@ -57,6 +59,7 @@ paths:
           schema: { type: string }
       responses:
         "200": { description: "{ folders: [...] }" }
+        "502": { description: add-on reported a failure }
         "504": { $ref: "#/components/responses/Disconnected" }
   /mail/list:
     get:
@@ -69,6 +72,7 @@ paths:
         - { name: offset, in: query, schema: { type: integer, default: 0 } }
       responses:
         "200": { description: "{ messages: [...] }" }
+        "502": { description: add-on reported a failure }
         "504": { $ref: "#/components/responses/Disconnected" }
   /mail/search:
     get:
@@ -101,13 +105,14 @@ paths:
                 cc: { type: array, items: { type: string } }
                 bcc: { type: array, items: { type: string } }
                 subject: { type: string }
-                body: { type: string, description: plain-text body (or HTML when html is set) }
-                html: { type: string, description: send as HTML with body as the text alternative }
+                body: { type: string, description: plain-text body (ignored when html is set) }
+                html: { type: string, description: send as HTML only — no plain-text alternative is attached and body is dropped }
                 identityId: { type: string, description: sending identity (GET /identities); defaults to the account default identity }
       responses:
         "200": { description: "{ sent: true, message: {...} }" }
         "400": { description: invalid body (error names the offending field) }
         "403": { description: recipient outside ALLOWED_SENDERS }
+        "502": { description: add-on reported a failure }
         "504": { $ref: "#/components/responses/Disconnected" }
   /mail/draft:
     post:
@@ -120,7 +125,7 @@ paths:
               type: object
               required: [to, subject, body]
               properties:
-                to: { type: array, items: { type: string } }
+                to: { type: array, items: { type: string }, minItems: 1 }
                 cc: { type: array, items: { type: string } }
                 bcc: { type: array, items: { type: string } }
                 subject: { type: string }
@@ -131,6 +136,8 @@ paths:
         "200": { description: "{ draft: true, message: {...} }" }
         "400": { description: invalid body }
         "403": { description: recipient outside ALLOWED_SENDERS }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
   /mail/{messageId}:
     get:
       summary: Read one message — header plus body parts (command message.get)
@@ -159,12 +166,16 @@ paths:
       responses:
         "200": { description: "{ updated: true }" }
         "400": { description: invalid body }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
     delete:
       summary: Delete a message (command message.delete)
       parameters:
         - { $ref: "#/components/parameters/MessageId" }
       responses:
         "200": { description: "{ deleted: true }" }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
   /addon/hello:
     post:
       summary: Add-on face — register the add-on (called by Thunderbird, not agents)
@@ -212,10 +223,12 @@ components:
       name: messageId
       in: path
       required: true
-      schema: { type: integer }
+      schema: { type: string }
       description: >
-        Numeric Thunderbird message key. Valid only for the current
-        Thunderbird session — re-fetch ids after a Thunderbird restart.
+        Opaque Thunderbird message id (numeric for current Thunderbird
+        builds — the add-on converts it with Number()). Valid only for the
+        current Thunderbird session — re-fetch ids after a Thunderbird
+        restart.
   responses:
     Disconnected:
       description: Thunderbird not connected, or the command timed out

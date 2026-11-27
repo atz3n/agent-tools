@@ -17,9 +17,9 @@
 <body>
   <h1>Thunderbird Proxy Bridge</h1>
   <p class="hint">
-    The bridge polls the thunderbird-proxy for commands. Both must share the
-    same token (the <code>THUNDERBIRD_PROXY_TOKEN</code> of the proxy's
-    <code>secrets/</code> file).
+    The bridge polls the thunderbird-proxy for commands; the proxy verifies
+    the add-on with its own <code>THUNDERBIRD_ADDON_TOKEN</code> — never the
+    agent-facing <code>THUNDERBIRD_PROXY_TOKEN</code>.
   </p>
   <label for="proxyUrl">Proxy URL</label>
   <input id="proxyUrl" type="text" placeholder="http://127.0.0.1:8090" />
