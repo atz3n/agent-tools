@@ -89,7 +89,7 @@ agent-tools/
 │   │   ├── thunderbird_proxy/ # Package: config.py, whitelist.py (endpoint→command table), bridge.py, server.py
 │   │   ├── addon/             # Thunderbird MailExtension (manifest.json, background.js, commands.js, options/, __test__/ — dev-only node tests, excluded from the xpi)
 │   │   ├── docker/            # Dockerfile + docker-compose.yml
-│   │   ├── scripts/           # build/run/pause/stop/lint/test/clean scripts
+│   │   ├── scripts/           # build/run/pause/stop/lint/test/clean scripts + build-addon.sh (zips addon/ into dist/*.xpi, stdlib zipfile)
 │   │   ├── secrets/           # Mandatory secrets — agent token, add-on token, signing secret (gitignored)
 │   │   ├── spec/              # OpenAPI spec (openapi.yml)
 │   │   ├── tests/             # unittest test suite

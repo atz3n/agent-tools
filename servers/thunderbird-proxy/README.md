@@ -74,8 +74,13 @@ The add-on source is in [`addon/`](addon/).
 2. For a permanent install, package it and install from file:
 
    ```bash
-   cd addon && web-ext build        # or: zip -r ../thunderbird-proxy-bridge.xpi * -x '__test__*'
+   ./scripts/build-addon.sh          # -> dist/thunderbird-proxy-bridge-<version>.xpi
    ```
+
+   The script zips `addon/` with the stdlib (`zipfile` — no `web-ext`, no
+   `zip` needed), names the archive after the version in
+   `addon/manifest.json`, and leaves out dev-only files. Use `--out DIR` for
+   a different output directory.
 
    Then *Add-ons and Themes* → gear → *Install Add-on From File*.
 
@@ -175,8 +180,9 @@ HTTP pass against a fake add-on (token gate, 404/405, 504, end-to-end
 round-trips). The add-on dispatcher (`addon/commands.js`) has its own node
 tests under `addon/__test__/` (the plain script is loaded in a `vm` with a
 stubbed `browser`); `test-project.sh` runs both suites and skips the node
-ones loudly when node is unavailable. `addon/__test__/` is dev-only — the
-zip packaging command above excludes it from the xpi.
+ones loudly when node is unavailable. `addon/__test__/` is dev-only —
+`scripts/build-addon.sh` excludes it (and any dotfile or previous archive)
+from the xpi it writes to `dist/`.
 
 ## Security notes
 

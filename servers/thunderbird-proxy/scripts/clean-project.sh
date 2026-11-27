@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Removes build artifacts (__pycache__, .ruff_cache, .mypy_cache, .coverage,
-# htmlcov, etc.) from a project.
+# htmlcov, dist, etc.) from a project.
 
 ###################################################################################################
 # CONFIGURATION
@@ -59,6 +59,9 @@ FIND_ARGS+=(".pytest_cache")
 FIND_ARGS+=("-o")
 FIND_ARGS+=("-name")
 FIND_ARGS+=("htmlcov")
+FIND_ARGS+=("-o")
+FIND_ARGS+=("-name")
+FIND_ARGS+=("dist")
 FIND_ARGS+=(")")
 FIND_ARGS+=("-prune")
 FIND_ARGS+=("-exec")
