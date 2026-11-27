@@ -54,7 +54,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-if [ "$(echo "$ENV_ARGS_OUT" | grep -n "FOO=bar" | cut -d: -f1)" -lt \
+if [ "$(echo "$ENV_ARGS_OUT" | grep -nx "FOO=bar" | cut -d: -f1)" -lt \
      "$(echo "$ENV_ARGS_OUT" | grep -nx "$IMAGE_NAME" | cut -d: -f1)" ]; then
     TOTAL=$((TOTAL + 1))
     echo -e "  ${GREEN}PASS${NC}: -e args come before the image name"
@@ -62,6 +62,18 @@ if [ "$(echo "$ENV_ARGS_OUT" | grep -n "FOO=bar" | cut -d: -f1)" -lt \
 else
     TOTAL=$((TOTAL + 1))
     echo -e "  ${RED}FAIL${NC}: -e args must precede the image name (got '$ENV_ARGS_OUT')"
+    FAIL=$((FAIL + 1))
+fi
+
+# Unit: build_docker_args stamps the specs on the container ('pia.user-env'
+# label) so 'restart' carries them over without diffing the image env.
+if echo "$ENV_ARGS_OUT" | grep -q "^pia.user-env=FOO=bar"; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${GREEN}PASS${NC}: build_docker_args stamps the pia.user-env label"
+    PASS=$((PASS + 1))
+else
+    TOTAL=$((TOTAL + 1))
+    echo -e "  ${RED}FAIL${NC}: pia.user-env label missing (got '$ENV_ARGS_OUT')"
     FAIL=$((FAIL + 1))
 fi
 
@@ -73,9 +85,11 @@ else
     ENV_TEST="pia-test-env"
     register_test_container "$ENV_TEST"
 
-    # timeout kills the attaching client mid-session, leaving the container
-    # running for the exec checks (same pattern as the run/stop tests).
+    # timeout kills the attaching client mid-session and pia stops the
+    # container with it — 'docker start' revives the idle entrypoint so the
+    # exec checks see the container config (same pattern as the checks below).
     timeout 10 bash "$AGENTS" run "$ENV_TEST" -e PIA_TEST_ENV=hello < /dev/null > /dev/null 2>&1 || true
+    docker start "$ENV_TEST" > /dev/null 2>&1 || true
 
     ENV_EXEC=$(timeout 5 bash "$AGENTS" exec "$ENV_TEST" printenv PIA_TEST_ENV < /dev/null 2>&1) || true
     assert_output_contains "hello" "$ENV_EXEC" "container environment carries PIA_TEST_ENV=hello"
@@ -101,6 +115,13 @@ else
     docker start "$ENV_TEST" > /dev/null 2>&1 || true
     CHG_EXEC=$(timeout 5 bash "$AGENTS" exec "$ENV_TEST" printenv PIA_TEST_ENV < /dev/null 2>&1) || true
     assert_output_contains "changed" "$CHG_EXEC" "changed -e value recreates with the new value"
+
+    # --fresh resets the pi session, not the environment — the stamped user
+    # env carries over even on a forced recreate.
+    timeout 15 bash "$AGENTS" restart "$ENV_TEST" --fresh < /dev/null > /dev/null 2>&1 || true
+    docker start "$ENV_TEST" > /dev/null 2>&1 || true
+    FRESH_EXEC=$(timeout 5 bash "$AGENTS" exec "$ENV_TEST" printenv PIA_TEST_ENV < /dev/null 2>&1) || true
+    assert_output_contains "changed" "$FRESH_EXEC" "--fresh recreate keeps the user environment"
 
     timeout 10 bash "$AGENTS" remove "$ENV_TEST" < /dev/null > /dev/null 2>&1 || true
     timeout 10 bash "$AGENTS" remove "$ENV_PT" < /dev/null > /dev/null 2>&1 || true

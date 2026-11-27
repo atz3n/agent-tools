@@ -171,7 +171,7 @@ pia rename old-name new-name
 | Option | Description |
 |--------|-------------|
 | `-m, --mount <dir>` | Mount the specified directory into `/workspace` |
-| `-e, --env <spec>` | Set an environment variable in the container (repeatable). `NAME=VALUE` sets it directly; bare `NAME` forwards the host's value (like `docker run -e NAME`). `pia restart` carries specs over: unchanged → plain resume, changed → recreate with the new value, omitted → keep the container's current user env |
+| `-e, --env <spec>` | Set an environment variable in the container (repeatable). `NAME=VALUE` sets it directly; bare `NAME` forwards the host's value (like `docker run -e NAME`). `pia restart` carries specs over: unchanged → plain resume, changed → recreate with the new value, omitted → keep the container's current user env — on every recreate, including `--fresh`, which resets the pi session, not the environment |
 | `-s, --ssh` | Mount the host SSH agent socket into the container |
 | `--docker` | Throwaway sibling Docker daemon per session (safe default, see below). Grants the agent root over the session — use it for your own code only |
 | `--docker-dev` | `--docker` plus the `-m` workspace mounted into the daemon at the same path (requires `-m`) |
