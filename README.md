@@ -107,8 +107,10 @@ open http://localhost:8088/ui
 cd servers/llm-proxy && ./scripts/build-docker.sh && ./scripts/run-docker.sh
 curl -s http://localhost:8089/openrouter/v1/models
 
-# thunderbird-proxy — token mandatory; Thunderbird + bridge add-on must be running:
+# thunderbird-proxy — three mandatory secrets; Thunderbird + bridge add-on must be running:
 #   openssl rand -hex 32 > secrets/thunderbird-proxy-token.txt
+#   openssl rand -hex 32 > secrets/thunderbird-addon-token.txt
+#   openssl rand -hex 32 > secrets/thunderbird-addon-secret.txt
 cd servers/thunderbird-proxy && ./scripts/build-docker.sh && ./scripts/run-docker.sh
 curl -s -H "Authorization: Bearer $(cat secrets/thunderbird-proxy-token.txt)" http://localhost:8090/status
 
