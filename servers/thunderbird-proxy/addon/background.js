@@ -10,7 +10,7 @@ const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "", responseSecret:
 // A Thunderbird API call can hang forever (e.g. a rename onto a conflicting
 // name parks on a prompt) — report the command as failed instead of letting
 // one wedged call silence the whole bridge.
-const COMMAND_DEADLINE_MS = 25000; // stays under the proxy's 30s command timeout
+const COMMAND_DEADLINE_MS = 25000; // must stay under the proxy's COMMAND_TIMEOUT (default 30s) — below it the proxy 504s first and the late result hits an empty bridge
 
 async function withDeadline(name, promise) {
   let timer;

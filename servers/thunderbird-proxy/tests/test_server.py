@@ -204,6 +204,14 @@ class TestBodyValidation(unittest.TestCase):
         params, error = whitelist.validate_update_body(b'{"tags": ["work", 7]}')
         self.assertIsNone(params)
         self.assertIn("tags must be an array of tag names", error)
+        params, error = whitelist.validate_update_body(b'{"moveTo": "acc1/INBOX"}')
+        self.assertEqual(error, "")
+        params, error = whitelist.validate_update_body(b'{"moveTo": ""}')
+        self.assertIsNone(params)
+        self.assertIn("moveTo must be a non-empty folder id string", error)
+        params, error = whitelist.validate_update_body(b'{"moveTo": "  "}')
+        self.assertIsNone(params)
+        self.assertIn("moveTo must be a non-empty folder id string", error)
 
     def test_folder_create_body_parent_variants(self) -> None:
         params, error = whitelist.validate_folder_create_body(b'{"name": "Newsletter", "parentFolderId": "acc1"}')
@@ -225,7 +233,12 @@ class TestBodyValidation(unittest.TestCase):
             (b'{"name": "a/b", "parentFolderId": "p"}', "name must not contain"),
             (b'{"name": "n"}', "parentFolderId (or account + folder) is required"),
             (b'{"name": "n", "account": "a"}', "parentFolderId (or account + folder) is required"),
-            (b'{"name": "n", "parentFolderId": 3}', "parentFolderId must be a string"),
+            (b'{"name": "n", "parentFolderId": 3}', "parentFolderId must be a non-empty string"),
+            (b'{"name": "n", "parentFolderId": ""}', "parentFolderId must be a non-empty string"),
+            (b'{"name": "n", "account": "a", "folder": ""}', "folder must be a non-empty string"),
+            (b'{"name": "n", "account": "  ", "folder": "INBOX"}', "account must be a non-empty string"),
+            (b'{"name": "n", "parentFolderId": "p", "account": "a", "folder": "f"}', "specify one parent locator"),
+            (b'{"name": "n", "parentFolderId": "p", "folder": "f"}', "specify one parent locator"),
             (b'{"name": "n", "parentFolderId": "p", "extra": 1}', "unsupported field"),
             (b"not json", "valid JSON"),
             (b"[]", "must be a JSON object"),
@@ -686,12 +699,25 @@ class TestHTTPServer(unittest.TestCase):
         self.assertIn("name is required", body["error"])
 
     def test_folder_rename_and_delete_roundtrips(self) -> None:
-        self._start_addon(lambda c: {"ok": True, "data": {"folder": {"id": "acc1/News"}}})
+        self._start_addon(lambda c: {"ok": True, "data": {"folder": {"id": "acc1/News"}, "deleted": True}})
         status, _ = self._request("PATCH", "/folders/acc1%2FNews", {"name": "Archive"})
         self.assertEqual(status, 200)
         command = self._wait_for_command()
         self.assertEqual(command["command"], "folders.update")
         self.assertEqual(command["params"], {"folder_id": "acc1/News", "name": "Archive"})
+        status, body = self._request("DELETE", "/folders/acc1%2FNews")
+        self.assertEqual(status, 200)
+        assert body is not None
+        self.assertTrue(body["deleted"])
+        for _ in range(100):
+            if len(self.addon.seen) > 1:  # type: ignore[union-attr]
+                break
+            threading.Event().wait(0.02)
+        else:
+            self.fail("add-on never received the delete command")
+        delete = self.addon.seen[1]  # type: ignore[index]
+        self.assertEqual(delete["command"], "folders.delete")
+        self.assertEqual(delete["params"], {"folder_id": "acc1/News"})
 
     def test_folder_delete_not_empty_is_502(self) -> None:
         self._start_addon(lambda c: {"ok": False, "error": "folder is not empty — move or trash its messages first"})

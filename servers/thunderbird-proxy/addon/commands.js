@@ -36,11 +36,11 @@ const ProxyCommands = {
       // conflict prompt that never resolves — refuse up front instead.
       const all = await browser.folders.query({});
       const target = all.find((f) => f.id === params.folder_id);
-      if (!target) throw new Error(`folder not found: ${params.folder_id}`);
+      if (!target || !target.path) throw new Error(`folder not found: ${params.folder_id}`);
       const parentPath = target.path.slice(0, target.path.lastIndexOf("/"));
       const wanted = `${parentPath}/${params.name}`.toLowerCase();
       const clash = all.some(
-        (f) => f.id !== target.id && f.accountId === target.accountId && f.path.toLowerCase() === wanted
+        (f) => f.id !== target.id && accountIdOf(f) === accountIdOf(target) && String(f.path ?? "").toLowerCase() === wanted
       );
       if (clash) throw new Error(`cannot rename to "${params.name}" — a folder already exists there`);
       // On recent Thunderbird folders.update only edits isFavorite —
@@ -52,16 +52,21 @@ const ProxyCommands = {
     async "folders.delete"(params) {
       // A folder that still holds mail is never deleted — and neither is one
       // whose sub-folders do (deleting a folder deletes its whole subtree).
-      const subtree = new Set([params.folder_id]);
-      const walk = (folders) => {
-        for (const folder of folders) {
-          subtree.add(folder.id);
-          if (folder.subFolders) walk(folder.subFolders);
-        }
-      };
-      walk(await browser.folders.getSubFolders(params.folder_id, true));
+      // The subtree is derived from paths, not from a tree walk: getSubFolders
+      // may return a flat list without subFolders, or ignore `recursive`, and
+      // a shrunken subtree would silently let nested mail be deleted.
+      const all = await browser.folders.query({});
+      const target = all.find((f) => f.id === params.folder_id);
+      // A path-less target (real on some builds) would compute a "/" prefix
+      // and match every folder in the account — same guard as folders.update.
+      if (!target || !target.path) throw new Error(`folder not found: ${params.folder_id}`);
+      const targetAccount = accountIdOf(target);
+      const prefix = `${target.path.toLowerCase()}/`;
+      const inSubtree = (f) =>
+        f.id === params.folder_id ||
+        (accountIdOf(f) === targetAccount && String(f.path ?? "").toLowerCase().startsWith(prefix));
       const nonEmpty = await browser.folders.query({ hasMessages: true });
-      if (nonEmpty.some((folder) => subtree.has(folder.id))) {
+      if (nonEmpty.some(inSubtree)) {
         throw new Error("folder is not empty — move or trash its messages first");
       }
       try {
@@ -180,12 +185,20 @@ const ProxyCommands = {
       // deprecated), and a message already sitting in a trash-type folder is
       // refused (deleting it again would delete it for good). Current builds
       // mark folders with the specialUse array; the legacy type property is
-      // checked too so the guard never fails open.
+      // checked too. The guard fails closed: when neither is present the
+      // folder is resolved via folders.query, and if trash membership still
+      // cannot be established the delete is refused.
       const header = await browser.messages.get(id);
-      const folder = header.folder || {};
-      const uses = folder.specialUse || [];
-      if (uses.includes("trash") || folder.type === "trash") {
+      let folder = header.folder || null;
+      if (!trashDeterminable(folder) && header.folderId) {
+        const resolved = await browser.folders.query({ id: header.folderId });
+        if (resolved.length) folder = resolved[0];
+      }
+      if (trashDeterminable(folder) && inTrash(folder)) {
         throw new Error("message is already in the Trash — the proxy never deletes mail permanently");
+      }
+      if (!trashDeterminable(folder)) {
+        throw new Error("cannot tell whether the message is in the Trash — refusing to delete");
       }
       await browser.messages.delete([id], { deletePermanently: false });
       return { deleted: true };
@@ -211,10 +224,26 @@ function slimAccount(account) {
   };
 }
 
+// Some Thunderbird builds expose a folder's account as accountId, others
+// only as the nested account object — read it through here so every
+// account comparison sees the same value (undefined === undefined would
+// otherwise match across accounts).
+function accountIdOf(folder) {
+  return folder.accountId ?? (folder.account ? folder.account.id : undefined);
+}
+
+function trashDeterminable(folder) {
+  return Boolean(folder) && (Array.isArray(folder.specialUse) || folder.type !== undefined);
+}
+
+function inTrash(folder) {
+  return (folder.specialUse || []).includes("trash") || folder.type === "trash";
+}
+
 function slimFolder(folder) {
   return {
     id: folder.id,
-    accountId: folder.accountId ?? (folder.account ? folder.account.id : undefined),
+    accountId: accountIdOf(folder),
     name: folder.name,
     path: folder.path,
     type: folder.type,
@@ -234,7 +263,7 @@ function slimMessage(message) {
     new: message.new,
     folder: message.folder ? message.folder.name : undefined,
     folderId: message.folder ? message.folder.id : undefined,
-    accountId: message.folder ? message.folder.accountId : undefined,
+    accountId: message.folder ? accountIdOf(message.folder) : undefined,
     size: message.size,
   };
 }
@@ -303,7 +332,7 @@ async function resolveFolderId(params) {
   const wanted = String(params.folder).toLowerCase();
   const match =
     folders.find((f) => f.name === params.folder || f.path === params.folder) ||
-    folders.find((f) => f.name.toLowerCase() === wanted || f.path.toLowerCase() === wanted);
+    folders.find((f) => String(f.name ?? "").toLowerCase() === wanted || String(f.path ?? "").toLowerCase() === wanted);
   if (!match) throw new Error(`folder not found: ${params.folder}`);
   return match.id;
 }

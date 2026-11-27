@@ -219,8 +219,8 @@ def validate_update_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
         error = _recipient_list(payload["tags"], "tags", "tag names", allow_empty=True)
         if error:
             return None, error
-    if "moveTo" in payload and not isinstance(payload["moveTo"], str):
-        return None, "moveTo must be a folder id string"
+    if "moveTo" in payload and (not isinstance(payload["moveTo"], str) or not payload["moveTo"].strip()):
+        return None, "moveTo must be a non-empty folder id string"
     params: dict[str, Any] = dict(payload)
     if "starred" in params:
         params["flagged"] = params.pop("starred")
@@ -269,8 +269,10 @@ def validate_folder_create_body(body: bytes) -> tuple[dict[str, Any] | None, str
     if error:
         return None, error
     for key in ("parentFolderId", "account", "folder"):
-        if key in payload and not isinstance(payload[key], str):
-            return None, f"{key} must be a string"
+        if key in payload and (not isinstance(payload[key], str) or not payload[key].strip()):
+            return None, f"{key} must be a non-empty string"
+    if "parentFolderId" in payload and ("account" in payload or "folder" in payload):
+        return None, "specify one parent locator: parentFolderId or account + folder, not both"
     params: dict[str, Any] = {"name": name}
     if isinstance(payload.get("parentFolderId"), str):
         params["folderId"] = payload["parentFolderId"]

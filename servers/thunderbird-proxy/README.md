@@ -129,7 +129,7 @@ re-fetch them after a Thunderbird restart.
 | GET | `/accounts` | `accounts.list` | `?includeSubFolders=` |
 | GET | `/identities` | `identities.list` | `?account=<accountId>` (optional) — the ids for `identityId` when sending |
 | GET | `/folders` | `folders.list` | `?account=<accountId>` (required) |
-| POST | `/folders` | `folders.create` | `{"name":"Newsletter","parentFolderId":"<id>"}` — or `"account"`+`"folder"` (parent name/path) instead of `parentFolderId` |
+| POST | `/folders` | `folders.create` | `{"name":"Newsletter","parentFolderId":"<id>"}` — or `"account"`+`"folder"` (parent name/path); the two locators are mutually exclusive (`400` if both given) |
 | PATCH | `/folders/{folderId}` | `folders.update` | `{"name":"<new name>"}` (rename — ids are path-derived, so the id **changes**; the response carries the new one) |
 | DELETE | `/folders/{folderId}` | `folders.delete` | **only empty folders** — a folder that still holds messages, or whose sub-folders do, gets `502 folder is not empty` |
 | GET | `/mail/list` | `messages.list` | `?folderId=` or `?account=&folder=`; `?limit=` (≤200), `?offset=`; newest first |
@@ -177,7 +177,7 @@ curl -s -H "$AUTH" -X DELETE localhost:8090/folders/<folderId>
 | `THUNDERBIRD_PROXY_TOKEN` | — **required** | agent-face secret; startup exits without it |
 | `THUNDERBIRD_ADDON_TOKEN` | — **required** | add-on-face secret (separate so a leak on one face cannot use the other) |
 | `THUNDERBIRD_ADDON_SECRET` | — **required** | HMAC key for signing add-on-face responses (`X-Proxy-Proof`) |
-| `COMMAND_TIMEOUT` | `30` | seconds an agent request waits for the add-on |
+| `COMMAND_TIMEOUT` | `30` | seconds an agent request waits for the add-on — must stay above the add-on's 25 s command deadline: set lower and the proxy 504s first, and the add-on's late result then arrives for an id the bridge no longer knows (`/addon/result` answers 404) |
 | `ALLOWED_SENDERS` | *(any)* | comma-separated recipient allowlist for send/draft |
 
 The three secrets live in `secrets/*.txt` (gitignored) and are loaded by
@@ -221,9 +221,13 @@ from the xpi it writes to `dist/`.
 - The add-on executes only the closed command set with checked parameters.
 - **Mail is never destroyed.** `message.delete` always moves to Trash
   (options `{ deletePermanently: false }`, never omitted-to-true or set)
-  and refuses messages already in a trash-type folder; `folders.delete`
-  refuses folders whose own or nested subtree still holds messages, so no
-  command can permanently delete mail.
+  and refuses messages already in a trash-type folder — and fails closed,
+  refusing the delete when trash membership cannot be determined (the
+  header's folder is resolved via `folders.query` first). `folders.delete`
+  refuses folders whose own or nested subtree still holds messages (the
+  subtree is derived from folder paths, so it does not depend on how
+  `getSubFolders` shapes its result), so no command can permanently delete
+  mail.
 - Set `ALLOWED_SENDERS` if agents should only mail known addresses.
 
 ## Known limitations
@@ -237,7 +241,12 @@ from the xpi it writes to `dist/`.
 - A folder rename can hang inside Thunderbird on server-side name conflicts
   (observed with Gmail). The add-on pre-checks sibling collisions and aborts
   any command that exceeds 25 s, so the bridge survives — the agent gets a
-  timeout error instead of a silent wedge.
+  timeout error instead of a silent wedge. The abort does not release the
+  wedge itself: the parked Thunderbird prompt survives it, so further folder
+  commands keep timing out (and the proxy keeps 504/502-ing them) until the
+  user dismisses the prompt in Thunderbird. Keep `COMMAND_TIMEOUT` above the
+  25 s deadline — below it the proxy times out first and the add-on's late
+  result lands on an already-popped command.
 - One add-on instance: a second `hello` (e.g. Thunderbird on two machines
   against one proxy) replaces the first.
 - If Thunderbird goes down mid-command, the waiting request fails with the

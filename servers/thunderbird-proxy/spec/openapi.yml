@@ -72,9 +72,9 @@ paths:
               required: [name]
               properties:
                 name: { type: string, description: new folder name — must not contain '/' }
-                parentFolderId: { type: string, description: id of the parent folder }
-                account: { type: string, description: with folder — resolve the parent by account + name/path instead }
-                folder: { type: string, description: parent folder name or path (requires account) }
+                parentFolderId: { type: string, description: id of the parent folder (mutually exclusive with account + folder — both at once is 400) }
+                account: { type: string, description: with folder — resolve the parent by account + name/path instead of parentFolderId }
+                folder: { type: string, description: parent folder name or path (requires account; mutually exclusive with parentFolderId) }
       responses:
         "200": { description: "{ folder: {...} }" }
         "400": { description: invalid body (error names the offending field) }
@@ -97,7 +97,10 @@ paths:
       responses:
         "200": { description: "{ folder: {...} }" }
         "400": { description: invalid body }
-        "502": { description: add-on reported a failure }
+        "502": { description: >
+            add-on reported a failure — folder not found, or the rename
+            collided with an existing folder in the same account (refused up
+            front: Thunderbird's conflict prompt can hang forever) }
         "504": { $ref: "#/components/responses/Disconnected" }
     delete:
       summary: Delete a folder (command folders.delete) — only when it and its sub-folders hold no messages
@@ -106,9 +109,10 @@ paths:
       responses:
         "200": { description: "{ deleted: true }" }
         "502": { description: >
-            add-on reported a failure — a folder whose own or nested subtree
-            still holds messages is never deleted; deleting IMAP folders
-            fails upstream in current Thunderbird (bug 2013929) }
+            add-on reported a failure — folder not found, or a folder whose
+            own or nested subtree still holds messages is never deleted;
+            deleting IMAP folders fails upstream in current Thunderbird
+            (bug 2013929) }
         "504": { $ref: "#/components/responses/Disconnected" }
   /mail/list:
     get:
@@ -211,7 +215,7 @@ paths:
                 read: { type: boolean }
                 starred: { type: boolean }
                 tags: { type: array, items: { type: string } }
-                moveTo: { type: string, description: target folder id (moves the message) }
+                moveTo: { type: string, description: target folder id (moves the message) — must be non-empty }
       responses:
         "200": { description: "{ updated: true }" }
         "400": { description: invalid body }
@@ -226,7 +230,10 @@ paths:
         - { $ref: "#/components/parameters/MessageId" }
       responses:
         "200": { description: "{ deleted: true } — the message is in the Trash" }
-        "502": { description: add-on reported a failure (message already in the Trash) }
+        "502": { description: >
+            add-on reported a failure (message already in the Trash, or
+            trash membership could not be determined — the guard fails
+            closed and refuses to delete) }
         "504": { $ref: "#/components/responses/Disconnected" }
   /addon/hello:
     post:
