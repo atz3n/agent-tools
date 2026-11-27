@@ -1,7 +1,7 @@
 openapi: "3.0.3"
 info:
   title: thunderbird-proxy
-  version: "0.3.0"
+  version: "0.4.0"
   description: >
     Mail proxy for agents. Every agent-face operation is translated into a
     command from a closed set, executed by the Thunderbird MailExtension
@@ -60,6 +60,55 @@ paths:
       responses:
         "200": { description: "{ folders: [...] }" }
         "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+    post:
+      summary: Create a sub-folder (command folders.create)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, description: new folder name — must not contain '/' }
+                parentFolderId: { type: string, description: id of the parent folder }
+                account: { type: string, description: with folder — resolve the parent by account + name/path instead }
+                folder: { type: string, description: parent folder name or path (requires account) }
+      responses:
+        "200": { description: "{ folder: {...} }" }
+        "400": { description: invalid body (error names the offending field) }
+        "502": { description: add-on reported a failure (e.g. parent folder not found) }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /folders/{folderId}:
+    patch:
+      summary: Rename a folder (command folders.update) — the id is path-derived and changes; the response carries the new one
+      parameters:
+        - { $ref: "#/components/parameters/FolderId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, description: new folder name — must not contain '/' }
+      responses:
+        "200": { description: "{ folder: {...} }" }
+        "400": { description: invalid body }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+    delete:
+      summary: Delete a folder (command folders.delete) — only when it and its sub-folders hold no messages
+      parameters:
+        - { $ref: "#/components/parameters/FolderId" }
+      responses:
+        "200": { description: "{ deleted: true }" }
+        "502": { description: >
+            add-on reported a failure — a folder whose own or nested subtree
+            still holds messages is never deleted; deleting IMAP folders
+            fails upstream in current Thunderbird (bug 2013929) }
         "504": { $ref: "#/components/responses/Disconnected" }
   /mail/list:
     get:
@@ -169,12 +218,15 @@ paths:
         "502": { description: add-on reported a failure }
         "504": { $ref: "#/components/responses/Disconnected" }
     delete:
-      summary: Delete a message (command message.delete)
+      summary: >
+        Delete a message (command message.delete) — moves it to the account's
+        Trash; the proxy never deletes mail permanently, so a message already
+        in a trash-type folder cannot be deleted again.
       parameters:
         - { $ref: "#/components/parameters/MessageId" }
       responses:
-        "200": { description: "{ deleted: true }" }
-        "502": { description: add-on reported a failure }
+        "200": { description: "{ deleted: true } — the message is in the Trash" }
+        "502": { description: add-on reported a failure (message already in the Trash) }
         "504": { $ref: "#/components/responses/Disconnected" }
   /addon/hello:
     post:
@@ -229,6 +281,15 @@ components:
         builds — the add-on converts it with Number()). Valid only for the
         current Thunderbird session — re-fetch ids after a Thunderbird
         restart.
+    FolderId:
+      name: folderId
+      in: path
+      required: true
+      schema: { type: string }
+      description: >
+        Thunderbird folder id, percent-encoded (ids contain '/', ':' and
+        sometimes '[ ]', e.g. "account4%3A%2F%2FINBOX%2FNews"). Ids are
+        path-derived — renaming a folder changes its id.
   responses:
     Disconnected:
       description: Thunderbird not connected, or the command timed out

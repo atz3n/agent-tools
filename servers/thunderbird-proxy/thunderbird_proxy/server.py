@@ -154,6 +154,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._reject(400, error, method)
                 return
             params.update(update_params)
+        elif endpoint.command == "folders.create":
+            folder_params, error = whitelist.validate_folder_create_body(payload)
+            if folder_params is None:
+                self._reject(400, error, method)
+                return
+            params.update(folder_params)
+        elif endpoint.command == "folders.update":
+            folder_params, error = whitelist.validate_folder_update_body(payload)
+            if folder_params is None:
+                self._reject(400, error, method)
+                return
+            params.update(folder_params)
 
         try:
             result = bridge.submit(endpoint.command, params)

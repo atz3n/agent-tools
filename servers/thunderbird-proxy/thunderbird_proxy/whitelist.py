@@ -23,6 +23,11 @@ from urllib.parse import parse_qs, unquote
 # matching — routing never sees a decoded '/'.
 _MESSAGE_ID = r"(?:[A-Za-z0-9_\-]|%[0-9A-Fa-f]{2})+"
 
+# Thunderbird folder ids commonly contain '/' (IMAP ids look like
+# "account3/INBOX/News"), so callers must percent-encode it; the pattern
+# refuses a literal '/', so routing never sees a decoded separator.
+_FOLDER_ID = r"[^/?]+"
+
 
 @dataclass(frozen=True)
 class Endpoint:
@@ -55,6 +60,13 @@ ENDPOINTS: tuple[Endpoint, ...] = (
     _endpoint("GET", r"^/accounts$", "accounts.list", query=("includeSubFolders",)),
     _endpoint("GET", r"^/identities$", "identities.list", query=("account",)),
     _endpoint("GET", r"^/folders$", "folders.list", query=("account",)),
+    _endpoint("POST", r"^/folders$", "folders.create"),
+    _endpoint(
+        "PATCH", rf"^/folders/(?P<folder_id>{_FOLDER_ID})$", "folders.update", path_params=("folder_id",)
+    ),
+    _endpoint(
+        "DELETE", rf"^/folders/(?P<folder_id>{_FOLDER_ID})$", "folders.delete", path_params=("folder_id",)
+    ),
     _endpoint("GET", r"^/mail/list$", "messages.list", query=("folderId", "account", "folder", "limit", "offset")),
     (
         _endpoint(
@@ -213,6 +225,72 @@ def validate_update_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
     if "starred" in params:
         params["flagged"] = params.pop("starred")
     return params, ""
+
+
+# ---------------------------------------------------------------------------
+# Body policy for folder create/rename
+# ---------------------------------------------------------------------------
+
+
+def _json_object(body: bytes, allowed: frozenset[str]) -> tuple[dict[str, Any] | None, str]:
+    """Parse a JSON object body and reject unknown keys."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None, "body must be valid JSON"
+    if not isinstance(payload, dict):
+        return None, "body must be a JSON object"
+    unknown = set(payload) - allowed
+    if unknown:
+        return None, f"unsupported field: {sorted(unknown)[0]} (allowed: {', '.join(sorted(allowed))})"
+    return payload, ""
+
+
+def _folder_name(payload: dict[str, Any]) -> tuple[str, str]:
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return "", "name is required and must be a non-empty string"
+    if "/" in name:
+        return "", "name must not contain '/'"
+    return name, ""
+
+
+def validate_folder_create_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
+    """Parse a folders.create POST body: a name plus a parent locator.
+
+    The parent is a raw ``parentFolderId``, or an ``account`` + ``folder``
+    (name or path) pair resolved by the add-on — the same locators
+    /mail/list accepts.
+    """
+    payload, error = _json_object(body, frozenset({"name", "parentFolderId", "account", "folder"}))
+    if payload is None:
+        return None, error
+    name, error = _folder_name(payload)
+    if error:
+        return None, error
+    for key in ("parentFolderId", "account", "folder"):
+        if key in payload and not isinstance(payload[key], str):
+            return None, f"{key} must be a string"
+    params: dict[str, Any] = {"name": name}
+    if isinstance(payload.get("parentFolderId"), str):
+        params["folderId"] = payload["parentFolderId"]
+    for key in ("account", "folder"):
+        if isinstance(payload.get(key), str):
+            params[key] = payload[key]
+    if "folderId" not in params and not ("account" in params and "folder" in params):
+        return None, "parentFolderId (or account + folder) is required"
+    return params, ""
+
+
+def validate_folder_update_body(body: bytes) -> tuple[dict[str, Any] | None, str]:
+    """Parse a folders.update PATCH body: {"name": "<new name>"}."""
+    payload, error = _json_object(body, frozenset({"name"}))
+    if payload is None:
+        return None, error
+    name, error = _folder_name(payload)
+    if error:
+        return None, error
+    return {"name": name}, ""
 
 
 def extract_recipients(params: dict[str, Any]) -> list[str]:

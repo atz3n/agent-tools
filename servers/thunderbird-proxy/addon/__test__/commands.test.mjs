@@ -73,3 +73,149 @@ test("message.update passes an empty tags array through (clears tags)", async ()
   // round-trip through JSON before comparing.
   assert.deepEqual(JSON.parse(JSON.stringify(updated)), { id: 42, properties: { tags: [] } });
 });
+
+test("folders.create creates under the resolved parent folder", async () => {
+  const calls = [];
+  const commands = load({
+    folders: {
+      create: async (parentId, name) => { calls.push([parentId, name]); return { id: `${parentId}/News`, name }; },
+      query: async () => [{ id: "acc1/INBOX", name: "Inbox", path: "/INBOX" }],
+    },
+  });
+  await commands.run("folders.create", { folderId: "acc1", name: "Newsletter" });
+  await commands.run("folders.create", { account: "acc1", folder: "INBOX", name: "Newsletter" });
+  assert.deepEqual(calls, [["acc1", "Newsletter"], ["acc1/INBOX", "Newsletter"]]);
+});
+
+test("folder lookup prefers an exact name/path match over a case-insensitive one", async () => {
+  const calls = [];
+  const commands = load({
+    folders: {
+      create: async (parentId, name) => { calls.push(parentId); return { id: parentId, name }; },
+      query: async () => [
+        { id: "acc1/lo", name: "inbox", path: "/lo" },
+        { id: "acc1/INBOX", name: "INBOX", path: "/INBOX" },
+      ],
+    },
+  });
+  await commands.run("folders.create", { account: "acc1", folder: "INBOX", name: "x" }); // exact name
+  await commands.run("folders.create", { account: "acc1", folder: "/lo", name: "x" }); // exact path
+  await commands.run("folders.create", { account: "acc1", folder: "Inbox", name: "x" }); // case-insensitive
+  assert.deepEqual(calls, ["acc1/INBOX", "acc1/lo", "acc1/lo"]);
+});
+
+test("folders.update renames through browser.folders.rename", async () => {
+  const calls = [];
+  const commands = load({
+    folders: {
+      query: async () => [{ id: "acc1/News", accountId: "acc1", name: "News", path: "/News" }],
+      rename: async (id, newName) => { calls.push([id, newName]); return { id, name: newName }; },
+    },
+  });
+  const result = await commands.run("folders.update", { folder_id: "acc1/News", name: "Archive" });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["acc1/News", "Archive"]]);
+  assert.equal(JSON.parse(JSON.stringify(result)).folder.name, "Archive");
+});
+
+test("folders.update refuses a rename onto an existing sibling (would hang Thunderbird)", async () => {
+  let renamed = false;
+  const commands = load({
+    folders: {
+      query: async () => [
+        { id: "acc1/News", accountId: "acc1", name: "News", path: "/News" },
+        { id: "acc1/Archive", accountId: "acc1", name: "Archive", path: "/Archive" },
+        { id: "acc2/Archive", accountId: "acc2", name: "Archive", path: "/Archive" }, // other account, no clash
+      ],
+      rename: async () => { renamed = true; },
+    },
+  });
+  await assert.rejects(() => commands.run("folders.update", { folder_id: "acc1/News", name: "Archive" }), /already exists/);
+  assert.equal(renamed, false);
+});
+
+test("folders.delete refuses a folder that still holds messages", async () => {
+  let deleted = false;
+  const commands = load({
+    folders: {
+      getSubFolders: async () => [],
+      query: async () => [{ id: "acc1/News" }],
+      delete: async () => { deleted = true; },
+    },
+  });
+  await assert.rejects(() => commands.run("folders.delete", { folder_id: "acc1/News" }), /not empty/);
+  assert.equal(deleted, false);
+});
+
+test("folders.delete refuses a folder whose sub-sub-folder still holds messages", async () => {
+  let deleted = false;
+  const commands = load({
+    folders: {
+      getSubFolders: async () => [{ id: "acc1/News/Sub", subFolders: [{ id: "acc1/News/Sub/Leaf" }] }],
+      query: async () => [{ id: "acc1/News/Sub/Leaf" }],
+      delete: async () => { deleted = true; },
+    },
+  });
+  await assert.rejects(() => commands.run("folders.delete", { folder_id: "acc1/News" }), /not empty/);
+  assert.equal(deleted, false);
+});
+
+test("folders.delete removes an empty folder (non-empty folders elsewhere do not block it)", async () => {
+  const deleted = [];
+  const commands = load({
+    folders: {
+      getSubFolders: async () => [{ id: "acc1/News/Sub" }],
+      query: async () => [{ id: "acc1/INBOX" }],
+      delete: async (id) => { deleted.push(id); },
+    },
+  });
+  const result = await commands.run("folders.delete", { folder_id: "acc1/News" });
+  assert.deepEqual(deleted, ["acc1/News"]);
+  assert.equal(result.deleted, true);
+});
+
+test("folders.delete turns Thunderbird's opaque IMAP failure into a named cause", async () => {
+  const commands = load({
+    folders: {
+      getSubFolders: async () => [],
+      query: async () => [],
+      delete: async () => { throw new Error("folders.delete() failed for unknown reasons"); },
+    },
+  });
+  await assert.rejects(() => commands.run("folders.delete", { folder_id: "acc1/x" }), /bug 2013929/);
+});
+
+test("message.delete moves to Trash and never sets deletePermanently", async () => {
+  const calls = [];
+  const commands = load({
+    messages: {
+      get: async () => ({ id: 7, folder: { id: "acc1/INBOX", specialUse: ["inbox"] } }),
+      delete: async (ids, options) => { calls.push([ids, options]); },
+    },
+  });
+  await commands.run("message.delete", { message_id: "7" });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [[[7], { deletePermanently: false }]]);
+});
+
+test("message.delete refuses a message already in the Trash (would purge it)", async () => {
+  let called = false;
+  const commands = load({
+    messages: {
+      get: async () => ({ id: 7, folder: { id: "acc1/[Gmail]/Bin", specialUse: ["trash"] } }),
+      delete: async () => { called = true; },
+    },
+  });
+  await assert.rejects(() => commands.run("message.delete", { message_id: "7" }), /permanently/);
+  assert.equal(called, false);
+});
+
+test("message.delete still honours the legacy folder type property", async () => {
+  let called = false;
+  const commands = load({
+    messages: {
+      get: async () => ({ id: 7, folder: { id: "acc1/Trash", type: "trash" } }), // pre-specialUse build
+      delete: async () => { called = true; },
+    },
+  });
+  await assert.rejects(() => commands.run("message.delete", { message_id: "7" }), /permanently/);
+  assert.equal(called, false);
+});

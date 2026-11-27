@@ -25,6 +25,58 @@ const ProxyCommands = {
       return { folders: folders.map(slimFolder) };
     },
 
+    async "folders.create"(params) {
+      const parentId = await resolveFolderId(params); // parentFolderId arrives as folderId
+      const folder = await browser.folders.create(parentId, params.name);
+      return { folder: slimFolder(folder) };
+    },
+
+    async "folders.update"(params) {
+      // Renaming onto an existing name can leave Thunderbird hanging on a
+      // conflict prompt that never resolves — refuse up front instead.
+      const all = await browser.folders.query({});
+      const target = all.find((f) => f.id === params.folder_id);
+      if (!target) throw new Error(`folder not found: ${params.folder_id}`);
+      const parentPath = target.path.slice(0, target.path.lastIndexOf("/"));
+      const wanted = `${parentPath}/${params.name}`.toLowerCase();
+      const clash = all.some(
+        (f) => f.id !== target.id && f.accountId === target.accountId && f.path.toLowerCase() === wanted
+      );
+      if (clash) throw new Error(`cannot rename to "${params.name}" — a folder already exists there`);
+      // On recent Thunderbird folders.update only edits isFavorite —
+      // renaming is its own API (folders.rename, TB 68+).
+      const folder = await browser.folders.rename(params.folder_id, params.name);
+      return { folder: slimFolder(folder) };
+    },
+
+    async "folders.delete"(params) {
+      // A folder that still holds mail is never deleted — and neither is one
+      // whose sub-folders do (deleting a folder deletes its whole subtree).
+      const subtree = new Set([params.folder_id]);
+      const walk = (folders) => {
+        for (const folder of folders) {
+          subtree.add(folder.id);
+          if (folder.subFolders) walk(folder.subFolders);
+        }
+      };
+      walk(await browser.folders.getSubFolders(params.folder_id, true));
+      const nonEmpty = await browser.folders.query({ hasMessages: true });
+      if (nonEmpty.some((folder) => subtree.has(folder.id))) {
+        throw new Error("folder is not empty — move or trash its messages first");
+      }
+      try {
+        await browser.folders.delete(params.folder_id);
+      } catch (error) {
+        // Current Thunderbird builds fail to delete IMAP folders (bug 2013929);
+        // name the likely cause instead of leaving "unknown reasons" behind.
+        if (/unknown reasons/.test(error.message)) {
+          throw new Error(`folder not deleted: Thunderbird could not delete it on the server (IMAP folder deletion is broken in current Thunderbird builds, bug 2013929)`);
+        }
+        throw error;
+      }
+      return { deleted: true };
+    },
+
     async "messages.list"(params) {
       const folderId = await resolveFolderId(params);
       const limit = clampCount(params.limit, 25, 200);
@@ -122,7 +174,20 @@ const ProxyCommands = {
     },
 
     async "message.delete"(params) {
-      await browser.messages.delete([messageKey(params.message_id)]);
+      const id = messageKey(params.message_id);
+      // Deletion means "move to Trash", never "purge": deletePermanently is
+      // explicitly false (options object, TB 137+ — the boolean form is
+      // deprecated), and a message already sitting in a trash-type folder is
+      // refused (deleting it again would delete it for good). Current builds
+      // mark folders with the specialUse array; the legacy type property is
+      // checked too so the guard never fails open.
+      const header = await browser.messages.get(id);
+      const folder = header.folder || {};
+      const uses = folder.specialUse || [];
+      if (uses.includes("trash") || folder.type === "trash") {
+        throw new Error("message is already in the Trash — the proxy never deletes mail permanently");
+      }
+      await browser.messages.delete([id], { deletePermanently: false });
       return { deleted: true };
     },
   },
@@ -153,6 +218,7 @@ function slimFolder(folder) {
     name: folder.name,
     path: folder.path,
     type: folder.type,
+    specialUse: folder.specialUse,
   };
 }
 
@@ -232,7 +298,12 @@ async function resolveFolderId(params) {
   }
   if (!params.account) return params.folder; // raw folder id in `folder`
   const folders = await browser.folders.query({ accountId: params.account });
-  const match = folders.find((f) => f.name === params.folder || f.path === params.folder);
+  // Exact name/path wins; otherwise the first case-insensitive hit — Gmail
+  // displays "Inbox" while its IMAP path reads "/INBOX", and callers guess.
+  const wanted = String(params.folder).toLowerCase();
+  const match =
+    folders.find((f) => f.name === params.folder || f.path === params.folder) ||
+    folders.find((f) => f.name.toLowerCase() === wanted || f.path.toLowerCase() === wanted);
   if (!match) throw new Error(`folder not found: ${params.folder}`);
   return match.id;
 }

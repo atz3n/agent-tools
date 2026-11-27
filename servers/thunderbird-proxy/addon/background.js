@@ -7,6 +7,25 @@
 
 const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "", responseSecret: "" };
 
+// A Thunderbird API call can hang forever (e.g. a rename onto a conflicting
+// name parks on a prompt) — report the command as failed instead of letting
+// one wedged call silence the whole bridge.
+const COMMAND_DEADLINE_MS = 25000; // stays under the proxy's 30s command timeout
+
+async function withDeadline(name, promise) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${name} did not complete within ${COMMAND_DEADLINE_MS / 1000}s`)), COMMAND_DEADLINE_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 let settings = { ...DEFAULTS };
 let backoffMs = 1000;
 let restartRequested = false;
@@ -69,7 +88,7 @@ async function register() {
 async function execute(command) {
   const result = { id: command.id, ok: true };
   try {
-    result.data = await ProxyCommands.run(command.command, command.params || {});
+    result.data = await withDeadline(command.command, ProxyCommands.run(command.command, command.params || {}));
   } catch (error) {
     result.ok = false;
     result.error = String((error && error.message) || error);

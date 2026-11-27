@@ -50,6 +50,9 @@ class TestWhitelist(unittest.TestCase):
             "GET /accounts": "accounts.list",
             "GET /identities?account=acc1": "identities.list",
             "GET /folders?account=acc1": "folders.list",
+            "POST /folders": "folders.create",
+            "PATCH /folders/acc1%2FNews": "folders.update",
+            "DELETE /folders/f1": "folders.delete",
             "GET /mail/list?folderId=f1&limit=5": "messages.list",
             "GET /mail/search?subject=hi": "messages.search",
             "GET /mail/msgABC123": "message.get",
@@ -76,13 +79,20 @@ class TestWhitelist(unittest.TestCase):
         self.assertEqual(matched[1], {"unread": "true", "to": "a@b.c", "subject": "hi"})
 
     def test_unknown_paths_never_match(self) -> None:
-        for path in ("/", "/mail", "/mail/forward/xyz", "/admin", "/addon/poll", "/mail/list/extra"):
+        paths = ("/", "/mail", "/mail/forward/xyz", "/admin", "/addon/poll", "/mail/list/extra")
+        paths += ("/folders/acc1/News",)  # raw '/' in a folder id is not routable
+        for path in paths:
             self.assertIsNone(whitelist.match_endpoint("GET", path), path)
 
     def test_wrong_method_is_known_path(self) -> None:
         self.assertIsNone(whitelist.match_endpoint("POST", "/accounts"))
         self.assertTrue(whitelist.path_known_any_method("/accounts"))
         self.assertFalse(whitelist.path_known_any_method("/nope"))
+        # /folders/{id} exists (PATCH/DELETE) — a GET there is a 405, not a 404.
+        self.assertIsNone(whitelist.match_endpoint("GET", "/folders/f1"))
+        self.assertTrue(whitelist.path_known_any_method("/folders/f1"))
+        # A raw '/' in a folder id is not routable — it must be percent-encoded.
+        self.assertFalse(whitelist.path_known_any_method("/folders/acc1/News"))
 
     def test_head_mirrors_get(self) -> None:
         matched = whitelist.match_endpoint("HEAD", "/accounts")
@@ -93,6 +103,11 @@ class TestWhitelist(unittest.TestCase):
         assert matched is not None
         self.assertEqual(matched[1]["message_id"], "abc/def==")
 
+    def test_folder_id_path_param_unquoted(self) -> None:
+        matched = whitelist.match_endpoint("PATCH", "/folders/acc1%2FNews%5Bx%5D")
+        assert matched is not None
+        self.assertEqual(matched[1]["folder_id"], "acc1/News[x]")
+
     def test_only_whitelisted_query_keys_pass(self) -> None:
         matched = whitelist.match_endpoint("GET", "/mail/list?folderId=f1&evil=1")
         assert matched is not None
@@ -102,8 +117,9 @@ class TestWhitelist(unittest.TestCase):
         self.assertEqual(
             whitelist.COMMANDS,
             {
-                "accounts.list", "identities.list", "folders.list", "messages.list", "messages.search",
-                "message.get", "message.send", "message.draft", "message.update", "message.delete",
+                "accounts.list", "identities.list", "folders.list", "folders.create", "folders.update",
+                "folders.delete", "messages.list", "messages.search", "message.get", "message.send",
+                "message.draft", "message.update", "message.delete",
             },
         )
 
@@ -188,6 +204,49 @@ class TestBodyValidation(unittest.TestCase):
         params, error = whitelist.validate_update_body(b'{"tags": ["work", 7]}')
         self.assertIsNone(params)
         self.assertIn("tags must be an array of tag names", error)
+
+    def test_folder_create_body_parent_variants(self) -> None:
+        params, error = whitelist.validate_folder_create_body(b'{"name": "Newsletter", "parentFolderId": "acc1"}')
+        self.assertEqual(error, "")
+        assert params is not None
+        self.assertEqual(params, {"name": "Newsletter", "folderId": "acc1"})
+        params, error = whitelist.validate_folder_create_body(
+            b'{"name": "Newsletter", "account": "acc1", "folder": "INBOX"}'
+        )
+        self.assertEqual(error, "")
+        assert params is not None
+        self.assertEqual(params, {"name": "Newsletter", "account": "acc1", "folder": "INBOX"})
+
+    def test_folder_create_body_errors(self) -> None:
+        for body, fragment in [
+            (b"{}", "name is required"),
+            (b'{"parentFolderId": "acc1"}', "name is required"),
+            (b'{"name": "  ", "parentFolderId": "p"}', "name is required"),
+            (b'{"name": "a/b", "parentFolderId": "p"}', "name must not contain"),
+            (b'{"name": "n"}', "parentFolderId (or account + folder) is required"),
+            (b'{"name": "n", "account": "a"}', "parentFolderId (or account + folder) is required"),
+            (b'{"name": "n", "parentFolderId": 3}', "parentFolderId must be a string"),
+            (b'{"name": "n", "parentFolderId": "p", "extra": 1}', "unsupported field"),
+            (b"not json", "valid JSON"),
+            (b"[]", "must be a JSON object"),
+        ]:
+            params, error = whitelist.validate_folder_create_body(body)
+            self.assertIsNone(params, body)
+            self.assertIn(fragment, error, f"{body}: {error}")
+
+    def test_folder_update_body(self) -> None:
+        params, error = whitelist.validate_folder_update_body(b'{"name": "Renamed"}')
+        self.assertEqual(error, "")
+        assert params is not None
+        self.assertEqual(params, {"name": "Renamed"})
+        for body, fragment in [
+            (b"{}", "name is required"),
+            (b'{"name": "a/b"}', "name must not contain"),
+            (b'{"name": "n", "id": "x"}', "unsupported field"),
+        ]:
+            params, error = whitelist.validate_folder_update_body(body)
+            self.assertIsNone(params, body)
+            self.assertIn(fragment, error, f"{body}: {error}")
 
     def test_extract_recipients(self) -> None:
         params, _ = whitelist.validate_mail_body(
@@ -600,6 +659,46 @@ class TestHTTPServer(unittest.TestCase):
         self.assertEqual(status, 400)
         assert body is not None
         self.assertIn("unsupported field", body["error"])
+
+    def _wait_for_command(self) -> dict[str, Any]:
+        assert self.addon is not None
+        for _ in range(100):
+            if self.addon.seen:
+                return self.addon.seen[0]
+            threading.Event().wait(0.02)
+        self.fail("add-on never received a command")
+
+    def test_folder_create_roundtrip(self) -> None:
+        self._start_addon(lambda c: {"ok": True, "data": {"folder": {"id": "acc1/News", "name": "Newsletter"}}})
+        status, body = self._request("POST", "/folders", {"name": "Newsletter", "parentFolderId": "acc1"})
+        self.assertEqual(status, 200)
+        assert body is not None
+        self.assertEqual(body["folder"]["name"], "Newsletter")
+        command = self._wait_for_command()
+        self.assertEqual(command["command"], "folders.create")
+        self.assertEqual(command["params"], {"name": "Newsletter", "folderId": "acc1"})
+
+    def test_folder_create_validation_400(self) -> None:
+        self._start_addon()
+        status, body = self._request("POST", "/folders", {"parentFolderId": "acc1"})
+        self.assertEqual(status, 400)
+        assert body is not None
+        self.assertIn("name is required", body["error"])
+
+    def test_folder_rename_and_delete_roundtrips(self) -> None:
+        self._start_addon(lambda c: {"ok": True, "data": {"folder": {"id": "acc1/News"}}})
+        status, _ = self._request("PATCH", "/folders/acc1%2FNews", {"name": "Archive"})
+        self.assertEqual(status, 200)
+        command = self._wait_for_command()
+        self.assertEqual(command["command"], "folders.update")
+        self.assertEqual(command["params"], {"folder_id": "acc1/News", "name": "Archive"})
+
+    def test_folder_delete_not_empty_is_502(self) -> None:
+        self._start_addon(lambda c: {"ok": False, "error": "folder is not empty — move or trash its messages first"})
+        status, body = self._request("DELETE", "/folders/acc1%2FNews")
+        self.assertEqual(status, 502)
+        assert body is not None
+        self.assertIn("not empty", body["error"])
 
     # -- logging ------------------------------------------------------------
 
