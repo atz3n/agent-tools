@@ -103,6 +103,13 @@ The add-on source is in [`addon/`](addon/).
   the bridge works regardless of the permission-grant behaviour; preflight
   handling is logged as `OPTIONS <path> 204 ... preflight`. Other origins
   get no CORS at all, and the token gates every real request either way.
+- **`browser.folders.create is not a function`** (or `rename`/`delete`) —
+  Thunderbird silently strips WebExtension functions whose permission is not
+  granted. Folder management needs the **`accountsFolders`** permission (plus
+  `accountsRead`; `folders.delete` also uses `messagesDelete`), which older
+  bridge versions did not declare. Rebuild the xpi
+  (`./scripts/build-addon.sh`) and reinstall it — a reload of an old build is
+  not enough.
 - **"proxy response signature invalid" in the add-on console** — the
   service answering the port did not sign its responses with your
   `THUNDERBIRD_ADDON_SECRET`. Either the secret differs between options
@@ -122,15 +129,19 @@ re-fetch them after a Thunderbird restart.
 | GET | `/accounts` | `accounts.list` | `?includeSubFolders=` |
 | GET | `/identities` | `identities.list` | `?account=<accountId>` (optional) — the ids for `identityId` when sending |
 | GET | `/folders` | `folders.list` | `?account=<accountId>` (required) |
+| POST | `/folders` | `folders.create` | `{"name":"Newsletter","parentFolderId":"<id>"}` — or `"account"`+`"folder"` (parent name/path) instead of `parentFolderId` |
+| PATCH | `/folders/{folderId}` | `folders.update` | `{"name":"<new name>"}` (rename — ids are path-derived, so the id **changes**; the response carries the new one) |
+| DELETE | `/folders/{folderId}` | `folders.delete` | **only empty folders** — a folder that still holds messages, or whose sub-folders do, gets `502 folder is not empty` |
 | GET | `/mail/list` | `messages.list` | `?folderId=` or `?account=&folder=`; `?limit=` (≤200), `?offset=`; newest first |
 | GET | `/mail/search` | `messages.search` | at least one of `?subject=`, `?body=`, `?author=`, `?to=`, `?unread=`, `?account=`/folder scope; up to 500 results |
 | GET | `/mail/{id}` | `message.get` | header + body parts |
 | POST | `/mail/send` | `message.send` | `{"to":[...],"subject":...,"body":...,"cc"?,"bcc"?,"html"?,"identityId"?}` |
 | POST | `/mail/draft` | `message.draft` | same body, saved to the identity's Drafts |
 | PATCH | `/mail/{id}` | `message.update` | subset of `{"read":bool,"starred":bool,"tags":[...],"moveTo":"folderId"}` |
-| DELETE | `/mail/{id}` | `message.delete` | |
+| DELETE | `/mail/{id}` | `message.delete` | moves the message to the account's **Trash** — the proxy never deletes mail permanently (deleting a message that already sits in Trash is refused with `502`) |
 
-`HEAD` is supported on every GET path. Status codes: `400` invalid body
+`HEAD` is supported on every GET path. Folder ids in paths must be
+percent-encoded (they contain `/`, `:` and sometimes `[ ]`). Status codes: `400` invalid body
 (the error names the field), `401` bad token, `403` recipient outside
 `ALLOWED_SENDERS`, `404`/`405` whitelist, `502` the add-on reported a
 failure, `504` Thunderbird not connected or command timed out.
@@ -148,6 +159,13 @@ curl -s -H "$AUTH" -X POST localhost:8090/mail/send \
   -d '{"to":["someone@example.com"],"subject":"hi","body":"from the agent"}'
 curl -s -H "$AUTH" -X PATCH localhost:8090/mail/<messageId> \
   -H "Content-Type: application/json" -d '{"read":true}'
+
+# Folder management — create, rename, delete (empty folders only)
+curl -s -H "$AUTH" -X POST localhost:8090/folders \
+  -H "Content-Type: application/json" -d '{"name":"Newsletter","parentFolderId":"<parentFolderId>"}'
+curl -s -H "$AUTH" -X PATCH localhost:8090/folders/<folderId> \
+  -H "Content-Type: application/json" -d '{"name":"Archive"}'
+curl -s -H "$AUTH" -X DELETE localhost:8090/folders/<folderId>
 ```
 
 ## Configuration (env vars)
@@ -201,10 +219,25 @@ from the xpi it writes to `dist/`.
 - Nothing is persisted: commands and results only live in the in-memory
   queue; no message content touches disk.
 - The add-on executes only the closed command set with checked parameters.
+- **Mail is never destroyed.** `message.delete` always moves to Trash
+  (options `{ deletePermanently: false }`, never omitted-to-true or set)
+  and refuses messages already in a trash-type folder; `folders.delete`
+  refuses folders whose own or nested subtree still holds messages, so no
+  command can permanently delete mail.
 - Set `ALLOWED_SENDERS` if agents should only mail known addresses.
 
 ## Known limitations
 
+- **Deleting folders on IMAP accounts is broken upstream in current
+  Thunderbird** ([bug 2013929](https://bugzilla.mozilla.org/show_bug.cgi?id=2013929)):
+  the proxy reports a clean `502`, and on Gmail the folder is often moved to
+  Trash server-side even though Thunderbird reports failure. Deletion works
+  on Local Folders; the empty-folder guard always runs first, so nothing
+  with mail in it (or in its sub-folders) is ever removed.
+- A folder rename can hang inside Thunderbird on server-side name conflicts
+  (observed with Gmail). The add-on pre-checks sibling collisions and aborts
+  any command that exceeds 25 s, so the bridge survives — the agent gets a
+  timeout error instead of a silent wedge.
 - One add-on instance: a second `hello` (e.g. Thunderbird on two machines
   against one proxy) replaces the first.
 - If Thunderbird goes down mid-command, the waiting request fails with the

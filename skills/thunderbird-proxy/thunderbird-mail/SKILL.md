@@ -1,7 +1,7 @@
 ---
 disable-model-invocation: true
 name: thunderbird-mail
-description: Manage email through the local thunderbird-proxy on port 8090 — list accounts and folders, read, search, flag, move, delete, draft, and send messages via your Thunderbird installation.
+description: Manage email through the local thunderbird-proxy on port 8090 — list accounts, create/rename/delete folders, read, search, flag, move, trash, draft, and send messages via your Thunderbird installation.
 ---
 
 This skill provides instructions for calling the thunderbird-proxy via REST. The proxy runs on `localhost:8090` and executes every operation inside Thunderbird through its bridge add-on — mail accounts and credentials stay in Thunderbird, you only see JSON.
@@ -74,8 +74,43 @@ curl -s -H "$AUTH" -X PATCH "$PROXY/mail/<messageId>" \
   -H "Content-Type: application/json" -d '{"read": true}'
 # also: {"starred": true}, {"tags": ["work"]}, {"moveTo": "<folderId>"}
 
+# Delete a message — this moves it to the account's Trash; mail is never
+# permanently deleted (deleting a message already in Trash is refused).
 curl -s -H "$AUTH" -X DELETE "$PROXY/mail/<messageId>"
 ```
+
+## Manage Folders
+
+```bash
+# Create a sub-folder — parent by id, or by account + parent name/path
+# (case-insensitive name matching, so "INBOX" finds a folder named Inbox)
+curl -s -H "$AUTH" -X POST "$PROXY/folders" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Newsletter","parentFolderId":"<parentFolderId>"}'
+curl -s -H "$AUTH" -X POST "$PROXY/folders" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Newsletter","account":"<accountId>","folder":"INBOX"}'
+
+# Rename — folder ids are path-derived and CHANGE on rename: take the new
+# id from the response (folder.id). Renaming onto an existing sibling name
+# is refused (502 "a folder already exists there").
+curl -s -H "$AUTH" -X PATCH "$PROXY/folders/<folderId>" \
+  -H "Content-Type: application/json" -d '{"name":"Archive"}'
+
+# Delete — only empty folders; a folder that still holds messages, or whose
+# sub-folders do, gets 502 "folder is not empty" (move or trash them first).
+curl -s -H "$AUTH" -X DELETE "$PROXY/folders/<folderId>"
+```
+
+Percent-encode the whole folder id in the path (ids contain `/`, `:` and
+sometimes `[ ]`, e.g. `account4%3A%2F%2FINBOX`); folder names must not
+contain `/`.
+
+**Known limitation:** deleting folders on IMAP accounts currently fails
+inside Thunderbird itself (upstream bug 2013929) — the proxy reports a clean
+`502` and nothing is lost (Gmail may even have moved the folder to Trash
+server-side). Deletion works on Local Folders. Do not retry an IMAP folder
+delete; report it to the user instead.
 
 ## Send and Draft
 
@@ -101,5 +136,6 @@ unknown recipients return `403` with the address named.
 
 All failures return `{"error": "..."}`: `400` invalid body (names the field),
 `401` bad token, `403` recipient not allowed, `404`/`405` endpoint not
-allowed, `502` Thunderbird reported a failure (e.g. folder not found),
+allowed, `502` Thunderbird reported a failure (e.g. folder not found,
+folder not empty, rename collision, IMAP folder delete — upstream bug),
 `504` add-on disconnected or command timed out.
