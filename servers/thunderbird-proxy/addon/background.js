@@ -9,6 +9,7 @@ const DEFAULTS = { proxyUrl: "http://127.0.0.1:8090", token: "", responseSecret:
 
 let settings = { ...DEFAULTS };
 let backoffMs = 1000;
+let restartRequested = false;
 
 async function loadSettings() {
   settings = { ...DEFAULTS, ...(await browser.storage.local.get(DEFAULTS)) };
@@ -44,6 +45,16 @@ function setBadge(connected) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Backoff sleep in short ticks so a settings change wakes it early — saving
+// a corrected URL/token on the options page retries immediately instead of
+// waiting out the remaining backoff.
+async function sleepBackoff(ms) {
+  for (let waited = 0; waited < ms; waited += 500) {
+    if (restartRequested) return;
+    await sleep(Math.min(500, ms - waited));
+  }
+}
+
 async function register() {
   const info = { addonVersion: browser.runtime.getManifest().version };
   try {
@@ -71,11 +82,15 @@ async function pollLoop() {
   for (;;) {
     try {
       await loadSettings();
+      restartRequested = false;
       if (!settings.token) throw new Error("no token configured (options page)");
       await register();
       backoffMs = 1000;
       setBadge(true);
       for (;;) {
+        // A settings change (new URL/token/secret) re-registers via hello
+        // instead of quietly polling a proxy that never saw a hello.
+        if (restartRequested) break;
         const { res, json } = await api("/addon/poll");
         if (res.status === 204) continue;
         if (!res.ok) throw new Error(`poll failed: ${res.status}`);
@@ -84,17 +99,18 @@ async function pollLoop() {
     } catch (error) {
       setBadge(false);
       console.warn(`proxy bridge offline: ${error.message}; retrying in ${backoffMs}ms`);
-      await sleep(backoffMs);
+      await sleepBackoff(backoffMs);
       backoffMs = Math.min(backoffMs * 2, 30000);
     }
   }
 }
 
 browser.storage.onChanged.addListener(() => {
-  // A settings change restarts the loop so a new URL/token/secret applies.
-  loadSettings().then(() => {
-    backoffMs = 1000;
-  });
+  // A settings change restarts the loop at the next poll boundary (or right
+  // away, while backing off) so a new URL/token/secret re-registers via
+  // hello — a URL change alone never errors, so nothing else would notice.
+  restartRequested = true;
+  backoffMs = 1000;
 });
 
 pollLoop();
