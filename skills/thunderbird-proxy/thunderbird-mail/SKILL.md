@@ -22,7 +22,7 @@ fi
 
 ## Authenticate
 
-The token is provided by the environment (`THUNDERBIRD_PROXY_TOKEN`) or by the operator; never guess it.
+The token is provided by the environment (`THUNDERBIRD_PROXY_TOKEN`) or by the operator; never guess it. This is the **agent-face** token — the Thunderbird add-on uses its own separate add-on token and never shares this one.
 
 ```bash
 AUTH="Authorization: Bearer $THUNDERBIRD_PROXY_TOKEN"

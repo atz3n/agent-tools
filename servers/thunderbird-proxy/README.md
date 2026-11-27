@@ -21,10 +21,14 @@ The proxy therefore has two faces:
 
 - **Agent face** — the REST API below; every (method, path) maps to one
   command from a closed set. Unknown paths 404, wrong method 405, uniform
-  `{"error": "..."}` body.
+  `{"error": "..."}` body. Gated by `THUNDERBIRD_PROXY_TOKEN`.
 - **Add-on face** — exactly `POST /addon/hello`, `GET /addon/poll`,
-  `POST /addon/result`. The wire can only ever trigger whitelisted commands
-  with schema-checked params; it cannot drive arbitrary code in Thunderbird.
+  `POST /addon/result`, `GET /addon/status`. Gated by its own
+  `THUNDERBIRD_ADDON_TOKEN`, and every response is signed with
+  `THUNDERBIRD_ADDON_SECRET` (`X-Proxy-Proof`) so the add-on can verify it
+  is talking to *your* proxy. The wire can only ever trigger whitelisted
+  commands with schema-checked params; it cannot drive arbitrary code in
+  Thunderbird.
 
 ## Requirements
 
@@ -39,8 +43,11 @@ The proxy therefore has two faces:
 ```bash
 cd servers/thunderbird-proxy
 
-# 1. The shared token is mandatory — the proxy refuses to start without it.
+# 1. Three secrets are mandatory — the proxy refuses to start without them:
+#    the agent token, the add-on's own token, and the response-signing secret.
 openssl rand -hex 32 > secrets/thunderbird-proxy-token.txt
+openssl rand -hex 32 > secrets/thunderbird-addon-token.txt
+openssl rand -hex 32 > secrets/thunderbird-addon-secret.txt
 
 # 2. Optional recipient allowlist for send/draft (one address per line).
 # echo "friend@example.com" > secrets/allowed-recipients.txt
@@ -75,8 +82,9 @@ The add-on source is in [`addon/`](addon/).
 3. Open the add-on's *Options*, set the proxy URL (default
    `http://127.0.0.1:8090` — prefer the literal IP: Thunderbird may resolve
    `localhost` to `::1`, which the loopback-published proxy does not listen
-   on, and the fetch then fails with `NetworkError`) and paste the same token
-   from `secrets/thunderbird-proxy-token.txt`. The toolbar badge shows `on`
+   on, and the fetch then fails with `NetworkError`), the **add-on token**
+   from `secrets/thunderbird-addon-token.txt` and the **response secret**
+   from `secrets/thunderbird-addon-secret.txt`. The toolbar badge shows `on`
    when the bridge is connected.
 
 ### Troubleshooting
@@ -90,6 +98,12 @@ The add-on source is in [`addon/`](addon/).
   the bridge works regardless of the permission-grant behaviour; preflight
   handling is logged as `OPTIONS <path> 204 ... preflight`. Other origins
   get no CORS at all, and the token gates every real request either way.
+- **"proxy response signature invalid" in the add-on console** — the
+  service answering the port did not sign its responses with your
+  `THUNDERBIRD_ADDON_SECRET`. Either the secret differs between options
+  page and `secrets/thunderbird-addon-secret.txt`, the proxy was restarted
+  with a different secret, or something else is listening on the port — the
+  add-on refuses to execute anything from it by design.
 
 ## Endpoints
 
@@ -137,12 +151,14 @@ curl -s -H "$AUTH" -X PATCH localhost:8090/mail/<messageId> \
 |-----|---------|---------|
 | `PROXY_PORT` | `8090` | listen port |
 | `BIND_HOST` | `0.0.0.0` (Docker) | set `127.0.0.1` when running on a host |
-| `THUNDERBIRD_PROXY_TOKEN` | — **required** | shared secret for both faces; startup exits without it |
+| `THUNDERBIRD_PROXY_TOKEN` | — **required** | agent-face secret; startup exits without it |
+| `THUNDERBIRD_ADDON_TOKEN` | — **required** | add-on-face secret (separate so a leak on one face cannot use the other) |
+| `THUNDERBIRD_ADDON_SECRET` | — **required** | HMAC key for signing add-on-face responses (`X-Proxy-Proof`) |
 | `COMMAND_TIMEOUT` | `30` | seconds an agent request waits for the add-on |
 | `ALLOWED_SENDERS` | *(any)* | comma-separated recipient allowlist for send/draft |
 
-The token lives in `secrets/thunderbird-proxy-token.txt` (gitignored) and is
-loaded by `run-docker.sh`.
+The three secrets live in `secrets/*.txt` (gitignored) and are loaded by
+`run-docker.sh`.
 
 ## Tests
 
@@ -158,9 +174,16 @@ against a fake add-on (token gate, 404/405, 504, end-to-end round-trips).
 
 ## Security notes
 
-- The token gates **both** faces and is compared in constant time; it is
-  never logged. Unlike the llm-proxy there is no open default — this proxy
-  can read and send mail as you.
+- Each face is gated by its own token, compared in constant time, never
+  logged. Unlike the llm-proxy there is no open default — this proxy can
+  read and send mail as you.
+- **Mutual trust.** The add-on authenticates to the proxy with
+  `THUNDERBIRD_ADDON_TOKEN`; the proxy authenticates *to the add-on* by
+  HMAC-signing every add-on-face response over a per-request nonce with
+  `THUNDERBIRD_ADDON_SECRET`. The add-on refuses to execute any command it
+  cannot verify, so a process that squats the port while the proxy is down
+  (or a wrong URL in the options) cannot feed it commands — and it captures
+  only the add-on token, which is worthless on the agent face.
 - The compose file publishes on `127.0.0.1` only. Do not widen that without
   adding TLS or a tunnel.
 - Nothing is persisted: commands and results only live in the in-memory

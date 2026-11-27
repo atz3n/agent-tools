@@ -24,7 +24,7 @@ This repo provides **agent-facing tools** — small, focused services that expos
 | **odoo-proxy** | 8087 | Application server for Odoo task data. Manages an Odoo login session internally and exposes `/task/data`, `/task/messages`, and `/task/message`. |
 | **tasks-server** | 8088 | REST API for managing tasks stored as markdown files with YAML frontmatter. Includes a zero-dependency web UI. |
 | **llm-proxy** | 8089 | Credential-injecting reverse proxy for LLM inference. One host:port, one path prefix per provider (`/openrouter` → openrouter.ai, `/mlx-serve` → local OpenAI-compatible server), per-route endpoint whitelist, optional model allowlist and client token gate, unbuffered SSE passthrough. Format pass-through only — no dialect translation; model selection stays in the agent. |
-| **thunderbird-proxy** | 8090 | Mail for agents. A REST agent face translates requests into commands from a closed set; a bundled Thunderbird MailExtension add-on (`addon/`) long-polls the proxy, executes commands via `browser.accounts/folders/messages`, and reports results. Mandatory shared token on both faces; `THUNDERBIRD_PROXY_TOKEN`. |
+| **thunderbird-proxy** | 8090 | Mail for agents. A REST agent face translates requests into commands from a closed set; a bundled Thunderbird MailExtension add-on (`addon/`) long-polls the proxy, executes commands via `browser.accounts/folders/messages`, and reports results. Three mandatory secrets — `THUNDERBIRD_PROXY_TOKEN` (agent face), `THUNDERBIRD_ADDON_TOKEN` (add-on face), `THUNDERBIRD_ADDON_SECRET` (the proxy HMAC-signs every add-on-face response so the add-on can verify it is talking to the real proxy). |
 | **skills/** | — | Agent skill markdown files organized by feature. |
 | **templates/llm-wiki/** | — | Template for LLM-assisted knowledge bases (idea file + format spec + init prompt). |
 | **harnesses/** | — | Isolated agent runtimes — currently `pia`: Pi agent harness with Docker setup and `pia` multi-instance manager.
@@ -216,8 +216,10 @@ echo "some-random-token" > secrets/llm-proxy-token.txt
 ```bash
 cd servers/thunderbird-proxy
 
-# 1. The shared token is mandatory — the proxy refuses to start without it
-openssl rand -hex 32 > secrets/thunderbird-proxy-token.txt
+# 1. Three secrets are mandatory — the proxy refuses to start without them
+openssl rand -hex 32 > secrets/thunderbird-proxy-token.txt   # agent face
+openssl rand -hex 32 > secrets/thunderbird-addon-token.txt   # add-on face
+openssl rand -hex 32 > secrets/thunderbird-addon-secret.txt  # response signing
 
 # 2. Build and run
 ./scripts/build-docker.sh
@@ -225,10 +227,11 @@ openssl rand -hex 32 > secrets/thunderbird-proxy-token.txt
 
 # Proxy is now at http://localhost:8090
 #   agent face: GET /status, /accounts, /folders, /mail/list|search|{id}, POST /mail/send|draft, ...
-#   add-on face: POST /addon/hello, GET /addon/poll, POST /addon/result (used by the add-on only)
+#   add-on face: POST /addon/hello, GET /addon/poll, POST /addon/result, GET /addon/status (used by the add-on only)
 
 # 3. Install the bridge add-on (addon/) into Thunderbird (>= 153) and set the
-#    same token in its options page — see the server README.
+#    add-on token and response secret in its options page — see the server
+#    README.
 
 # Stop
 ./scripts/stop-docker.sh
@@ -369,7 +372,7 @@ To use: copy the template into a project and run the initialization prompt from 
 - **Package-based structure**: Each proxy is a Python package (`github_proxy/`, `odoo_proxy/`, `tasks_server/`) with separate modules: `config.py` (configuration and logging), `whitelist.py` (endpoint patterns), and `server.py` (HTTP handler). The odoo-proxy also has `session.py` for Odoo session management. The tasks-server has `storage.py` for markdown file CRUD operations.
 - **No external dependencies**: All code uses only Python stdlib (`http.server`, `json`, `re`, `os`, `signal`, `http.client`, `urllib.parse`, etc.).
 - **Endpoint whitelisting**: All services use compiled regex patterns to whitelist allowed paths. Non-matching paths return 404 with a uniform `{"error": "..."}` body in all five services; 405 for a whitelisted path with an unsupported method (odoo-proxy, tasks-server, llm-proxy, thunderbird-proxy; github-proxy forwards every method it implements, including HEAD). OPTIONS and TRACE are unimplemented everywhere and return 501 from the HTTP layer (no proxy log line) — except thunderbird-proxy, which answers `OPTIONS` preflights from `moz-extension://` origins with 204 + CORS headers (echoing the origin) on every path so the Thunderbird add-on survives CORS being applied to extension fetches; the token still gates every real request.
-- **Configuration via env vars**: `PROXY_PORT`, `BIND_HOST` (all five), `GITHUB_PERSONAL_ACCESS_TOKEN` (github-proxy), `ODOO_DB`, `ODOO_URL`, `ODOO_USER`, `ODOO_PASSWORD`, `ODOO_SESSION_TIMEOUT` (odoo-proxy), `TASKS_DIR` (tasks-server), `OPENROUTER_API_KEY`, `MLX_SERVE_URL`, `LLM_PROXY_TOKEN`, `ALLOWED_MODELS`, `LLM_UPSTREAM_TIMEOUT` (llm-proxy), `THUNDERBIRD_PROXY_TOKEN` (mandatory), `COMMAND_TIMEOUT`, `ALLOWED_SENDERS` (thunderbird-proxy). Credentials are loaded from `secrets/` files by the Docker scripts and passed as env vars.
+- **Configuration via env vars**: `PROXY_PORT`, `BIND_HOST` (all five), `GITHUB_PERSONAL_ACCESS_TOKEN` (github-proxy), `ODOO_DB`, `ODOO_URL`, `ODOO_USER`, `ODOO_PASSWORD`, `ODOO_SESSION_TIMEOUT` (odoo-proxy), `TASKS_DIR` (tasks-server), `OPENROUTER_API_KEY`, `MLX_SERVE_URL`, `LLM_PROXY_TOKEN`, `ALLOWED_MODELS`, `LLM_UPSTREAM_TIMEOUT` (llm-proxy), `THUNDERBIRD_PROXY_TOKEN` (mandatory, agent face), `THUNDERBIRD_ADDON_TOKEN` (mandatory, add-on face), `THUNDERBIRD_ADDON_SECRET` (mandatory, signs add-on-face responses), `COMMAND_TIMEOUT`, `ALLOWED_SENDERS` (thunderbird-proxy). Credentials are loaded from `secrets/` files by the Docker scripts and passed as env vars.
 - **Graceful shutdown**: All servers register SIGTERM/SIGINT handlers; the handler dispatches `server.shutdown()` to a short-lived background thread (calling it on the signal handler's own thread deadlocks against `serve_forever()`), and all five run `ThreadingHTTPServer` with `daemon_threads` so concurrent clients never head-of-line-block and in-flight requests can't block shutdown.
 - **Logging**: All requests log to `stderr` in format `[proxy] <ISO-8601> <METHOD> <PATH> <STATUS> from <IP>`.
 
@@ -473,8 +476,8 @@ Containers are grouped under the `pia` project by plain `docker --label` stampin
 ### thunderbird-proxy
 
 - **Command bridge, not a reverse proxy**: a WebExtension cannot listen on a port, so the add-on dials out — it registers via `POST /addon/hello`, long-polls `GET /addon/poll` (30 s window), and posts results to `POST /addon/result`. Agent requests block on a per-command `threading.Event` in `bridge.py` and get 504 on disconnect (add-on silent > 90 s) or timeout (`COMMAND_TIMEOUT`, 30 s default); an add-on-reported failure maps to 502.
-- **Closed command set**: `whitelist.py` derives `COMMANDS` from the agent-face table (accounts.list, folders.list, messages.list, messages.search, message.get/send/draft/update/delete); the add-on's dispatcher refuses everything else. Add-on face is exactly the trio `/addon/{hello,poll,result}`.
-- **Token mandatory on both faces**: `THUNDERBIRD_PROXY_TOKEN` is required at startup (`validate_config()` exits without it) and checked with a constant-time compare on every request — unlike the llm-proxy there is no open default because the proxy can read and send mail.
+- **Closed command set**: `whitelist.py` derives `COMMANDS` from the agent-face table (accounts.list, identities.list, folders.list, messages.list, messages.search, message.get/send/draft/update/delete); the add-on's dispatcher refuses everything else. Add-on face is exactly `/addon/{hello,poll,result,status}`.
+- **Per-face tokens + signed responses**: `THUNDERBIRD_PROXY_TOKEN` gates the agent face, `THUNDERBIRD_ADDON_TOKEN` the add-on face — both required at startup (`validate_config()` exits without any of the three) and checked with a constant-time compare; unlike the llm-proxy there is no open default because the proxy can read and send mail. The proxy also authenticates *to the add-on*: every add-on-face response carries `X-Proxy-Proof = HMAC-SHA256(THUNDERBIRD_ADDON_SECRET, "<X-Addon-Nonce>\n<body>")` over a per-request nonce, and the add-on refuses to execute a command whose dispatch response it cannot verify — a process squatting the port cannot forge commands, and captures at most the add-on token, which is useless on the agent face.
 - **Add-on**: MV2 persistent background page (long-poll survives across the loop), Thunderbird >= 153 (`messages.sendMessage`/`saveMessage`), permissions `accountsRead`/`messagesRead`/`messagesUpdate`/`messagesMove`/`messagesDelete`/`messages.save`/`compose.send`/`storage` + `http://localhost:8090/*` and `http://127.0.0.1:8090/*` (the old `messagesModify` no longer unlocks the modify APIs on recent TB — ungranted functions are stripped from `browser.messages`; note there is no `messages.send` permission despite what the docs claim — sending is gated by `compose.send`); proxy URL and token configured on the options page via `browser.storage.local`; exponential backoff while the proxy is down; badge shows bridge state.
 - **Nothing persisted**: commands and results only live in the in-memory queue; no mail content touches disk.
 
@@ -491,5 +494,5 @@ Containers are grouped under the `pia` project by plain `docker --label` stampin
 - The odoo-proxy credentials are stored as files in `secrets/` (gitignored) and injected into backend requests internally — agents never see them.
 - The tasks-server has no secrets; it writes task files to a local volume (`/data/tasks/`).
 - The llm-proxy OpenRouter key is stored as a file in `secrets/` (gitignored) and injected into backend requests internally — agent containers configured against the proxy never hold a provider key. The proxy is intentionally unauthenticated by default (localhost-only publish, single-user host, agents you control); pair it with a dedicated openrouter key carrying a small per-key spend limit, and set `LLM_PROXY_TOKEN` before the host is shared or the port is reachable beyond localhost.
-- The thunderbird-proxy's shared token is stored as a file in `secrets/` (gitignored) and is **mandatory** — the same token is configured in the add-on's options page. It exposes your mailboxes (read, send as you) to anything that can reach port 8090, so the compose file publishes loopback-only and `ALLOWED_SENDERS` can restrict recipients.
+- The thunderbird-proxy's three secrets are stored as files in `secrets/` (gitignored) and are **mandatory**; the add-on's options page holds the add-on token and the response secret (never the agent token). The agent token exposes your mailboxes (read, send as you) to anything that can reach port 8090, so the compose file publishes loopback-only and `ALLOWED_SENDERS` can restrict recipients.
 - All proxies reject non-whitelisted endpoints, minimizing the attack surface.
