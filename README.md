@@ -30,7 +30,7 @@ pia list                                   # all agent instances
 pia stop myproj && pia rs                  # stop, then resume the last session
 ```
 
-**Watching an agent (`pia monitor`, `pia urls`).** Trust, but verify: a passive `tshark` capture inside each container shows *where the agent's requests actually go* — live with `pia monitor` (destinations plus CPU/memory/net per sample), or retrospectively with `pia urls`, which reports every destination the container has called since it was created, surviving stop/start cycles. HTTPS exposes the hostname (SNI); cleartext HTTP — your traffic to the local proxies on 8086/8087/8088/8089 — shows full URLs. The monitor itself logs nothing.
+**Watching an agent (`pia monitor`, `pia urls`).** Trust, but verify: a passive `tshark` capture inside each container shows *where the agent's requests actually go* — live with `pia monitor` (destinations plus CPU/memory/net per sample), or retrospectively with `pia urls`, which reports every destination the container has called since it was created, surviving stop/start cycles. HTTPS exposes the hostname (SNI); cleartext HTTP — your traffic to the local proxies on 8086/8087/8088/8089/8090 — shows full URLs. The monitor itself logs nothing.
 
 The rest of the `pia` surface is routine lifecycle management: `create`, `start/run`, `stop`, `remove`, `restart`, `exec`, `sh`, `clean`, plus `keep`/`unkeep`/`rename` to protect a session container from cleanup. Full command reference, monitor internals, and Docker-socket caveats: [harnesses/pia/README.md](harnesses/pia/README.md).
 
@@ -48,6 +48,7 @@ Agent (pia container) → curl → localhost:8086 (github-proxy)  → api.github
 Agent (pia container) → curl → localhost:8087 (odoo-proxy)    → your Odoo instance
 Agent (pia container) → curl → localhost:8088 (tasks-server)  → markdown files on a volume
 Agent (pia container) → curl → localhost:8089 (llm-proxy)     → openrouter.ai / local model server
+Agent (pia container) → curl → localhost:8090 (thunderbird-proxy) → Thunderbird (via bridge add-on)
 ```
 
 | Server | Port | What it does |
@@ -56,6 +57,7 @@ Agent (pia container) → curl → localhost:8089 (llm-proxy)     → openrouter
 | [odoo-proxy](servers/odoo-proxy/) | 8087 | Application server over Odoo: manages the login session internally and exposes `/task/data`, `/task/messages`, and `/task/message` for project tasks. |
 | [tasks-server](servers/tasks-server/) | 8088 | REST API + zero-dependency web UI for tasks stored as markdown files with YAML frontmatter, organized per project with auto-incrementing IDs. |
 | [llm-proxy](servers/llm-proxy/) | 8089 | Credential-injecting reverse proxy for LLM inference. One host:port, one path prefix per provider (`/openrouter`, `/mlx-serve`), per-route endpoint whitelist, optional model allowlist, unbuffered SSE passthrough. |
+| [thunderbird-proxy](servers/thunderbird-proxy/) | 8090 | Mail for agents. REST calls become commands from a closed set, executed by a bundled Thunderbird add-on that long-polls the proxy (an add-on can't be called over HTTP, so the bridge dials out) — read, search, flag, move, delete, draft, and send through your Thunderbird identity. |
 
 Each server has its own README with endpoints, setup, and configuration.
 
@@ -105,11 +107,18 @@ open http://localhost:8088/ui
 cd servers/llm-proxy && ./scripts/build-docker.sh && ./scripts/run-docker.sh
 curl -s http://localhost:8089/openrouter/v1/models
 
+# thunderbird-proxy — three mandatory secrets; Thunderbird + bridge add-on must be running:
+#   openssl rand -hex 32 > secrets/thunderbird-proxy-token.txt
+#   openssl rand -hex 32 > secrets/thunderbird-addon-token.txt
+#   openssl rand -hex 32 > secrets/thunderbird-addon-secret.txt
+cd servers/thunderbird-proxy && ./scripts/build-docker.sh && ./scripts/run-docker.sh
+curl -s -H "Authorization: Bearer $(cat secrets/thunderbird-proxy-token.txt)" http://localhost:8090/status
+
 # stop any service
 ./scripts/stop-docker.sh
 ```
 
-odoo-proxy works the same way but needs four credential files in `secrets/` (`odoo-db`, `odoo-url`, `odoo-user`, `odoo-password`) — see its README.
+odoo-proxy works the same way but needs four credential files in `secrets/` (`odoo-db`, `odoo-url`, `odoo-user`, `odoo-password`) — see its README. thunderbird-proxy additionally ships a MailExtension add-on (`servers/thunderbird-proxy/addon/`) that you install into Thunderbird once — see its README.
 
 ## Development
 

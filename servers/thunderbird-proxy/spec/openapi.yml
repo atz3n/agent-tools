@@ -1,0 +1,240 @@
+openapi: "3.0.3"
+info:
+  title: thunderbird-proxy
+  version: "0.3.0"
+  description: >
+    Mail proxy for agents. Every agent-face operation is translated into a
+    command from a closed set, executed by the Thunderbird MailExtension
+    add-on, and returned to the caller. Each face has its own bearer token:
+    agents use THUNDERBIRD_PROXY_TOKEN, the add-on uses
+    THUNDERBIRD_ADDON_TOKEN under /addon/*. The proxy signs every
+    add-on-face response with THUNDERBIRD_ADDON_SECRET as
+    X-Proxy-Proof = HMAC-SHA256(secret, "<X-Addon-Nonce>\n<body>"), which
+    the add-on verifies before executing anything. Non-whitelisted paths
+    return 404; a whitelisted path with the wrong method returns 405; the
+    error body is always {"error": "..."}. When Thunderbird is not connected
+    or a command times out, 504 is returned; an add-on-side failure returns
+    502. OPTIONS requests carrying an Origin from a moz-extension:// add-on
+    are answered with 204 and CORS headers (preflight support).
+servers:
+  - url: http://localhost:8090
+security:
+  - bearerToken: []
+paths:
+  /status:
+    get:
+      summary: Proxy-local health and add-on connection state (no add-on round-trip)
+      responses:
+        "200":
+          description: connected flag, lastSeen epoch, queued commands, add-on info
+  /accounts:
+    get:
+      summary: List mail accounts (command accounts.list)
+      parameters:
+        - name: includeSubFolders
+          in: query
+          schema: { type: boolean }
+      responses:
+        "200": { description: "{ accounts: [...] }" }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /identities:
+    get:
+      summary: List sending identities (command identities.list) — the ids for identityId
+      parameters:
+        - name: account
+          in: query
+          schema: { type: string }
+      responses:
+        "200": { description: "{ identities: [{ id, accountId, email, name }] }" }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /folders:
+    get:
+      summary: List folders of one account (command folders.list)
+      parameters:
+        - name: account
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: "{ folders: [...] }" }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /mail/list:
+    get:
+      summary: List messages of a folder, newest first (command messages.list)
+      parameters:
+        - { name: folderId, in: query, schema: { type: string } }
+        - { name: account, in: query, schema: { type: string } }
+        - { name: folder, in: query, schema: { type: string }, description: folder name or path (with account), or a raw folder id alone }
+        - { name: limit, in: query, schema: { type: integer, default: 25, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200": { description: "{ messages: [...] }" }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /mail/search:
+    get:
+      summary: Search messages (command messages.search)
+      parameters:
+        - { name: subject, in: query, schema: { type: string } }
+        - { name: body, in: query, schema: { type: string } }
+        - { name: author, in: query, schema: { type: string } }
+        - { name: to, in: query, schema: { type: string }, description: recipient address }
+        - { name: unread, in: query, schema: { type: boolean }, description: only unread (true) or only read (false) }
+        - { name: folderId, in: query, schema: { type: string } }
+        - { name: account, in: query, schema: { type: string } }
+        - { name: folder, in: query, schema: { type: string } }
+      responses:
+        "200": { description: "{ messages: [...] } — up to 500 results" }
+        "502": { description: no search criteria given, or add-on-side failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /mail/send:
+    post:
+      summary: Send a message (command message.send)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, subject, body]
+              properties:
+                to: { type: array, items: { type: string }, minItems: 1 }
+                cc: { type: array, items: { type: string } }
+                bcc: { type: array, items: { type: string } }
+                subject: { type: string }
+                body: { type: string, description: plain-text body (ignored when html is set) }
+                html: { type: string, description: send as HTML only — no plain-text alternative is attached and body is dropped }
+                identityId: { type: string, description: sending identity (GET /identities); defaults to the account default identity }
+      responses:
+        "200": { description: "{ sent: true, message: {...} }" }
+        "400": { description: invalid body (error names the offending field) }
+        "403": { description: recipient outside ALLOWED_SENDERS }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /mail/draft:
+    post:
+      summary: Save a message as a draft (command message.draft)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, subject, body]
+              properties:
+                to: { type: array, items: { type: string }, minItems: 1 }
+                cc: { type: array, items: { type: string } }
+                bcc: { type: array, items: { type: string } }
+                subject: { type: string }
+                body: { type: string }
+                html: { type: string }
+                identityId: { type: string }
+      responses:
+        "200": { description: "{ draft: true, message: {...} }" }
+        "400": { description: invalid body }
+        "403": { description: recipient outside ALLOWED_SENDERS }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /mail/{messageId}:
+    get:
+      summary: Read one message — header plus body parts (command message.get)
+      parameters:
+        - { $ref: "#/components/parameters/MessageId" }
+      responses:
+        "200": { description: "{ header: {...}, parts: {...} }" }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+    patch:
+      summary: Update flags or move a message (command message.update)
+      parameters:
+        - { $ref: "#/components/parameters/MessageId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                read: { type: boolean }
+                starred: { type: boolean }
+                tags: { type: array, items: { type: string } }
+                moveTo: { type: string, description: target folder id (moves the message) }
+      responses:
+        "200": { description: "{ updated: true }" }
+        "400": { description: invalid body }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+    delete:
+      summary: Delete a message (command message.delete)
+      parameters:
+        - { $ref: "#/components/parameters/MessageId" }
+      responses:
+        "200": { description: "{ deleted: true }" }
+        "502": { description: add-on reported a failure }
+        "504": { $ref: "#/components/responses/Disconnected" }
+  /addon/hello:
+    post:
+      summary: Add-on face — register the add-on (called by Thunderbird, not agents)
+      security:
+        - addonToken: []
+      responses:
+        "200": { description: "{ ok: true }, signed with X-Proxy-Proof" }
+  /addon/poll:
+    get:
+      summary: Add-on face — long-poll for one queued command
+      security:
+        - addonToken: []
+      parameters:
+        - { name: X-Addon-Nonce, in: header, required: false, schema: { type: string }, description: per-request nonce mixed into the response signature }
+      responses:
+        "200": { description: "{ id, command, params }, signed with X-Proxy-Proof" }
+        "204": { description: "no command within the poll window (also signed)" }
+  /addon/status:
+    get:
+      summary: Add-on face — health probe for the add-on options page (no round-trip)
+      security:
+        - addonToken: []
+      responses:
+        "200": { description: "connected flag and add-on info, signed with X-Proxy-Proof" }
+  /addon/result:
+    post:
+      summary: Add-on face — report a command result
+      security:
+        - addonToken: []
+      responses:
+        "200": { description: "{ ok: true }" }
+        "404": { description: unknown command id }
+components:
+  securitySchemes:
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: THUNDERBIRD_PROXY_TOKEN (agent face)
+    addonToken:
+      type: http
+      scheme: bearer
+      description: THUNDERBIRD_ADDON_TOKEN (add-on face only)
+  parameters:
+    MessageId:
+      name: messageId
+      in: path
+      required: true
+      schema: { type: string }
+      description: >
+        Opaque Thunderbird message id (numeric for current Thunderbird
+        builds — the add-on converts it with Number()). Valid only for the
+        current Thunderbird session — re-fetch ids after a Thunderbird
+        restart.
+  responses:
+    Disconnected:
+      description: Thunderbird not connected, or the command timed out
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }

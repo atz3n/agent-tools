@@ -36,6 +36,7 @@ to mount: `docker` calls simply fail, which is the fully-contained mode.
 | `--ssh` | host SSH agent socket mounted read-only |
 | `--docker` / `--docker-dev` | `--net container:NAME-dind` + `-e DOCKER_HOST=tcp://127.0.0.1:2375`, no socket mount |
 | `--docker-full` | `-v <DOCKER_SOCKET>:/var/run/docker.sock` |
+| `-e NAME[=value]` | label: `pia.user-env=<specs, \x1f-joined>` (only when `-e` is used) — the `pia restart` env carry-over source; bare `NAME` specs re-resolve against the host on recreate |
 | (always) | labels: `com.docker.compose.project=pia`, `config-hash=…`, and for daemons `pia-role=dind`, `pia-parent=NAME`, `pia-dind-mounts=<ws>` |
 
 The `pia` project label is stamped with plain `docker --label` — compose is

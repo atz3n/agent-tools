@@ -7,6 +7,7 @@ __pycache__
 .ruff_cache
 .coverage
 htmlcov/
+dist/
 .DS_Store
 .playwright
 # Playwright CLI output (may contain credentials)

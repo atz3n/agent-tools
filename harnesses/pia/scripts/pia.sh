@@ -56,6 +56,8 @@ set -euo pipefail
 #                      (alias: --no-continue). Without it, restart continues
 #                      the last pi session and only re-creates the container
 #                      when the given flags actually differ from its config.
+#                      The -e/--env environment carries over on every
+#                      recreate — --fresh resets the session, not the env.
 #
 # Command options (monitor):
 #   -i, --interval <sec>  Seconds per resource sample (default: 1)
@@ -101,6 +103,9 @@ MONITOR_RAW_CHUNK="5"      # default capture chunk for 'pia monitor --raw'; '-i'
 DIND_SUFFIX="-dind"               # suffix of an agent's throwaway daemon container
 DIND_IMAGE_DEFAULT="pia-dind"     # built daemon image (tag = guard version); PIA_DIND_IMAGE overrides fully
 DIND_WS_TARGET="/workspace"       # where 'dind-mount' exposes the workspace inside the daemon
+ENV_SPECS=""                      # -e/--env specs for run/create/restart, one per line
+ENV_LABEL="pia.user-env"          # label stamping the container's user-supplied env specs
+ENV_LABEL_SEP=$'\x1f'             # unit separator packing multi-line specs into one label value
 # guard policy version lives in docker/pia-dind/guard.sh (line 2 marker);
 # read it with dind_guard_version() — there is no second copy to drift.
 
@@ -284,6 +289,11 @@ Global options (any command):
 
 Command options (run/create/restart):
   -m, --mount <dir>  Mount the specified directory into /workspace
+  -e, --env <spec>   Set an environment variable in the container (repeatable).
+                     NAME=VALUE sets it directly; NAME alone forwards the
+                     host's value (like 'docker run -e NAME'). Survives
+                     'pia restart' (unchanged specs resume, changed ones
+                     recreate, omitted specs carry over).
   -s, --ssh          Mount the host SSH agent socket into the container
       --docker       Give the container a throwaway sibling Docker daemon
                      (sibling container 'NAME-dind', NO host mounts, host
@@ -305,7 +315,9 @@ Command options (restart):
                      (alias: --no-continue). Without it, 'restart' continues
                      the container's last pi session ('pi --continue') and
                      re-creates the container only when the given flags
-                     actually differ from its current config.
+                     actually differ from its current config. The -e/--env
+                     environment carries over on every recreate — --fresh
+                     resets the pi session, not the environment.
 
 Command options (monitor):
   -i, --interval <sec>  Seconds per resource sample (default: 1)
@@ -326,6 +338,7 @@ Examples:
   $(basename "$0") run my-project       # Start with custom name
   $(basename "$0") run -m /path/to/proj # Start with mount, auto name
   $(basename "$0") run proj -m . --ssh  # Start with name, mount, and SSH
+  $(basename "$0") run mail -e THUNDERBIRD_PROXY_TOKEN # ... forwarding a host env var
   $(basename "$0") run proj --docker    # Start with a throwaway sibling Docker daemon
   $(basename "$0") run proj -m . --docker-dev # ... daemon sees /workspace (bind mounts work)
   $(basename "$0") run proj --docker-full # Host socket (host-root-equivalent!)
@@ -366,12 +379,16 @@ EOF
 # Field 7 is the --docker MODE string ('' | dind | dind-mount | socket), not a
 # yes/no flag: --docker → dind, --docker-dev → dind-mount, --docker-full → socket.
 # Field 9 is the restart-only --fresh flag ('yes' forces recreate + fresh session).
+# Any -e/--env specs follow as EXTRA LINES after the fields line (one spec per
+# line); callers keep line 1 for the fields and pass the rest to ENV_SPECS.
 extract_name_and_options() {
     local name=""
     local in_mount_value=0
+    local in_env_value=0
     local help_requested=0
     local invalid_option=0
     local mount_dir=""
+    local env_specs=""
     local ssh_flag=""
     local debug_flag=""
     local docker_mode=""
@@ -386,10 +403,27 @@ extract_name_and_options() {
             continue
         fi
 
+        # If we're in a -e/--env value, validate and capture it
+        if [ "$in_env_value" -eq 1 ]; then
+            local env_key="${arg%%=*}"
+            if [[ ! "$env_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                log_error "Invalid environment variable name: '${arg}' (expected NAME or NAME=VALUE)."
+                invalid_option=1
+            else
+                env_specs="${env_specs:+$env_specs$'\n'}$arg"
+            fi
+            in_env_value=0
+            continue
+        fi
+
         case "$arg" in
             -m|--mount)
                 # Next arg is the mount dir — capture it now
                 in_mount_value=1
+                ;;
+            -e|--env)
+                # Next arg is the env spec — NAME (host pass-through) or NAME=VALUE
+                in_env_value=1
                 ;;
             -s|--ssh)
                 ssh_flag="yes"
@@ -442,14 +476,22 @@ extract_name_and_options() {
         log_error "Option '--mount' requires a value."
         missing_value=1
     fi
+    if [ "$in_env_value" -eq 1 ]; then
+        log_error "Option '--env' requires a value (NAME or NAME=VALUE)."
+        missing_value=1
+    fi
 
-    echo "${name}|${help_requested}|${invalid_option}|${mount_dir:-}|${ssh_flag:-}|${debug_flag:-}|${docker_mode:-}|${missing_value}|${fresh_flag:-}"
+    printf '%s\n' "${name}|${help_requested}|${invalid_option}|${mount_dir:-}|${ssh_flag:-}|${debug_flag:-}|${docker_mode:-}|${missing_value}|${fresh_flag:-}"
+    if [ -n "$env_specs" ]; then
+        printf '%s\n' "$env_specs"
+    fi
 }
 
 # Build docker run arguments shared between run and restart
 # Outputs one argument per line for safe reassembly by callers
 build_docker_args() {
     local name="$1"
+    local spec
 
     echo "--name"
     echo "$name"
@@ -507,6 +549,21 @@ build_docker_args() {
             printf '%s\n' "-e" "DOCKER_HOST=tcp://127.0.0.1:2375"
             ;;
     esac
+
+    # User environment (-e/--env, repeatable). Specs go to docker verbatim:
+    # 'NAME=VALUE' sets it, bare 'NAME' forwards the host's value.
+    if [ -n "${ENV_SPECS:-}" ]; then
+        while IFS= read -r spec; do
+            [ -n "$spec" ] && printf '%s\n' "-e" "$spec"
+        done <<< "$ENV_SPECS"
+        # Record the requested specs on the container itself — 'restart'
+        # carries them over from this label instead of diffing the container
+        # env against the image env (a diff drops deliberate -e overrides of
+        # pia's internal variables and misreads image variables added by an
+        # image rebuild as user env).
+        printf '%s\n' "--label" \
+            "${ENV_LABEL}=$(printf '%s' "$ENV_SPECS" | tr '\n' "$ENV_LABEL_SEP")"
+    fi
 
     echo "$IMAGE_NAME"
 }
@@ -1313,6 +1370,35 @@ container_run_config() {
     echo "${mount:-}|${ssh}|${mode}"
 }
 
+# The container's user-supplied environment: the 'pia.user-env' label that
+# build_docker_args stamps at creation. One spec per line — the format
+# ENV_SPECS uses. This is what 'restart' carries over when the caller passes
+# no -e. Containers created without -e, or by a pia version predating the
+# label, carry over nothing (recreate with an explicit -e).
+container_user_env() {
+    local stamped
+    stamped="$(docker container inspect -f "{{ index .Config.Labels \"${ENV_LABEL}\" }}" "$1" 2>/dev/null)" || true
+    if [ -z "$stamped" ] || [ "$stamped" = "<no value>" ]; then
+        return 0
+    fi
+    printf '%s\n' "$stamped" | tr "$ENV_LABEL_SEP" '\n'
+}
+
+# 0 when every requested spec already matches the container's environment.
+# A bare 'NAME' spec is pass-through — compared against the host's value now.
+env_specs_match() {
+    local name="$1" specs="$2" spec key cur_env
+    cur_env="$(docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$name" 2>/dev/null)"
+    while IFS= read -r spec; do
+        [ -n "$spec" ] || continue
+        key="${spec%%=*}"
+        if [ "$key" = "$spec" ]; then
+            spec="${key}=${!key:-}"
+        fi
+        printf '%s\n' "$cur_env" | grep -Fxq -- "$spec" || return 1
+    done <<< "$specs"
+}
+
 # Copy the pi session state (and the urls request log) out of a container
 # into a fresh host temp dir. Prints the dir path, or nothing when the
 # container has no session directory (nothing to continue).
@@ -1401,6 +1487,8 @@ cmd_create() {
     local name help_req invalid_opt
     local result
     result="$(extract_name_and_options "$@")"
+    ENV_SPECS="$(printf '%s\n' "$result" | tail -n +2)"
+    result="$(printf '%s\n' "$result" | head -1)"
     name="$(echo "$result" | cut -d'|' -f1)"
     help_req="$(echo "$result" | cut -d'|' -f2)"
     invalid_opt="$(echo "$result" | cut -d'|' -f3)"
@@ -1496,6 +1584,8 @@ cmd_run() {
     local name help_req invalid_opt
     local result
     result="$(extract_name_and_options "$@")"
+    ENV_SPECS="$(printf '%s\n' "$result" | tail -n +2)"
+    result="$(printf '%s\n' "$result" | head -1)"
     name="$(echo "$result" | cut -d'|' -f1)"
     help_req="$(echo "$result" | cut -d'|' -f2)"
     invalid_opt="$(echo "$result" | cut -d'|' -f3)"
@@ -1571,6 +1661,12 @@ cmd_run() {
                     esac
                     log_warn "Recreate it with 'pia restart ${name} ${mode_flag}'."
                 fi
+            fi
+            # Same story for the environment — baked in at creation. Warn
+            # only when the requested specs contradict what exists.
+            if [ -n "${ENV_SPECS:-}" ] && ! env_specs_match "$name" "$ENV_SPECS"; then
+                log_warn "Container '${name}' was created with a different environment — -e/--env is unchanged."
+                log_warn "Recreate it with 'pia restart ${name} -e ...'."
             fi
             # A dind-mode agent shares its daemon's netns: the daemon must
             # be up before 'docker start' of the agent can succeed at all.
@@ -1791,6 +1887,8 @@ cmd_restart() {
     local name help_req invalid_opt
     local result
     result="$(extract_name_and_options "$@")"
+    ENV_SPECS="$(printf '%s\n' "$result" | tail -n +2)"
+    result="$(printf '%s\n' "$result" | head -1)"
     name="$(echo "$result" | cut -d'|' -f1)"
     help_req="$(echo "$result" | cut -d'|' -f2)"
     invalid_opt="$(echo "$result" | cut -d'|' -f3)"
@@ -1853,6 +1951,10 @@ cmd_restart() {
     # patch them on an existing container).
     local cur_mount cur_ssh cur_mode
     IFS='|' read -r cur_mount cur_ssh cur_mode < <(container_run_config "$name")
+    # Captured here, before any stop/rm takes the container (and its env)
+    # away — this is what an env-less recreate carries over.
+    local cur_user_env
+    cur_user_env="$(container_user_env "$name")"
 
     local flags_changed="" changed_list=""
     if [ -n "$MOUNT_DIR" ]; then
@@ -1867,6 +1969,9 @@ cmd_restart() {
     fi
     if [ -n "$DOCKER_MODE" ] && [ "$DOCKER_MODE" != "$cur_mode" ]; then
         flags_changed="yes"; changed_list="${changed_list:+$changed_list, }--docker mode"
+    fi
+    if [ -n "${ENV_SPECS:-}" ] && ! env_specs_match "$name" "$ENV_SPECS"; then
+        flags_changed="yes"; changed_list="${changed_list:+$changed_list, }env"
     fi
 
     if [ "$fresh_flag" != "yes" ] && [ -z "$flags_changed" ]; then
@@ -1933,7 +2038,10 @@ cmd_restart() {
     # Options the caller did not pass carry over from the old container, so
     # 'restart NAME --ssh' on a mounted agent recreates WITH the mount
     # instead of silently dropping it. (--fresh keeps the historical
-    # 'unspecified = absent' semantics.)
+    # 'unspecified = absent' semantics — for the session, the mount, the SSH
+    # socket and the daemon, but NOT the environment: the user env survives
+    # every recreate, because --fresh resets the pi *session*, not the -e
+    # environment a mail workflow's tokens live in.)
     if [ "$fresh_flag" != "yes" ]; then
         if [ -z "$MOUNT_DIR" ] && [ -n "$cur_mount" ]; then MOUNT_DIR="$cur_mount"; fi
         if [ -z "$SSH_FLAG" ]; then SSH_FLAG="$cur_ssh"; fi
@@ -1942,6 +2050,7 @@ cmd_restart() {
             validate_docker_request || exit 1
         fi
     fi
+    if [ -z "${ENV_SPECS:-}" ] && [ -n "$cur_user_env" ]; then ENV_SPECS="$cur_user_env"; fi
 
     # --docker modes (same order as 'run': daemon first, agent second)
     prepare_dind_daemon "$name" || {
