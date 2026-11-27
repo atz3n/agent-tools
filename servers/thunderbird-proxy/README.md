@@ -51,6 +51,12 @@ openssl rand -hex 32 > secrets/thunderbird-proxy-token.txt
 ./scripts/stop-docker.sh         # done
 ```
 
+To let a [pia](../../harnesses/pia/README.md) agent use the mail skill, forward the token into its container at start:
+
+```bash
+export THUNDERBIRD_PROXY_TOKEN=$(cat secrets/thunderbird-proxy-token.txt) && pia run -e THUNDERBIRD_PROXY_TOKEN
+```
+
 ### Install the add-on
 
 The add-on source is in [`addon/`](addon/).
@@ -67,24 +73,40 @@ The add-on source is in [`addon/`](addon/).
    Then *Add-ons and Themes* → gear → *Install Add-on From File*.
 
 3. Open the add-on's *Options*, set the proxy URL (default
-   `http://localhost:8090`) and paste the same token from
-   `secrets/thunderbird-proxy-token.txt`. The toolbar badge shows `on` when
-   the bridge is connected.
+   `http://127.0.0.1:8090` — prefer the literal IP: Thunderbird may resolve
+   `localhost` to `::1`, which the loopback-published proxy does not listen
+   on, and the fetch then fails with `NetworkError`) and paste the same token
+   from `secrets/thunderbird-proxy-token.txt`. The toolbar badge shows `on`
+   when the bridge is connected.
+
+### Troubleshooting
+
+- **`NetworkError` / `Cross-Origin Request Blocked` on *Test connection***
+  — Thunderbird may resolve `localhost` to `::1` (the proxy listens on IPv4
+  loopback only) and may apply CORS to the add-on's fetches even with the
+  host permission declared. Use the literal `http://127.0.0.1:8090`. The
+  proxy answers CORS preflights (`OPTIONS` with a `moz-extension://`
+  origin) on every path with `204` and echoes that origin on responses, so
+  the bridge works regardless of the permission-grant behaviour; preflight
+  handling is logged as `OPTIONS <path> 204 ... preflight`. Other origins
+  get no CORS at all, and the token gates every real request either way.
 
 ## Endpoints
 
-All requests need `Authorization: Bearer <token>`. Message ids are opaque
-Thunderbird strings — percent-encode any `/` in them.
+All requests need `Authorization: Bearer <token>`. Message ids are numeric
+Thunderbird keys that are only valid for the current Thunderbird session —
+re-fetch them after a Thunderbird restart.
 
 | Method | Path | Command | Notes |
 |--------|------|---------|-------|
 | GET | `/status` | — | proxy-local: `connected`, `lastSeen`, `queued`, add-on info |
 | GET | `/accounts` | `accounts.list` | `?includeSubFolders=` |
+| GET | `/identities` | `identities.list` | `?account=<accountId>` (optional) — the ids for `identityId` when sending |
 | GET | `/folders` | `folders.list` | `?account=<accountId>` (required) |
-| GET | `/mail/list` | `messages.list` | `?folderId=` or `?account=&folder=`; `?limit=` (≤200), `?offset=` |
-| GET | `/mail/search` | `messages.search` | at least one of `?subject=`, `?body=`, `?author=`; optional folder scope |
+| GET | `/mail/list` | `messages.list` | `?folderId=` or `?account=&folder=`; `?limit=` (≤200), `?offset=`; newest first |
+| GET | `/mail/search` | `messages.search` | at least one of `?subject=`, `?body=`, `?author=`, `?to=`, `?unread=`, `?account=`/folder scope; up to 500 results |
 | GET | `/mail/{id}` | `message.get` | header + body parts |
-| POST | `/mail/send` | `message.send` | `{"to":[...],"subject":...,"body":...,"cc"?,"bcc"?,"html"?}` |
+| POST | `/mail/send` | `message.send` | `{"to":[...],"subject":...,"body":...,"cc"?,"bcc"?,"html"?,"identityId"?}` |
 | POST | `/mail/draft` | `message.draft` | same body, saved to the identity's Drafts |
 | PATCH | `/mail/{id}` | `message.update` | subset of `{"read":bool,"starred":bool,"tags":[...],"moveTo":"folderId"}` |
 | DELETE | `/mail/{id}` | `message.delete` | |
@@ -152,4 +174,8 @@ against a fake add-on (token gate, 404/405, 504, end-to-end round-trips).
   against one proxy) replaces the first.
 - If Thunderbird goes down mid-command, the waiting request fails with the
   command timeout; commands queued while disconnected are refused at once.
+- On builds where `messages.sendMessage` cannot be unlocked (the documented
+  `messages.send` permission is rejected by the manifest validator), sending
+  falls back to `compose.beginNew` + `compose.sendMessage` — a compose window
+  briefly opens and closes itself after the send.
 - Thunderbird < 153 is not supported by the current API handlers.

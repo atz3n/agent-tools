@@ -33,7 +33,7 @@ AUTH="Authorization: Bearer $THUNDERBIRD_PROXY_TOKEN"
 `/status` is answered by the proxy itself; `connected: true` means Thunderbird's add-on is attached:
 
 ```bash
-curl -s -H "$AUTH" $PROXY/status
+curl -s -H "$AUTH" "$PROXY/status"
 # {"connected": true, ...}   -> ready
 # {"connected": false, ...}  -> start Thunderbird (add-on auto-reconnects)
 ```
@@ -43,8 +43,9 @@ A `504` on any other endpoint means the same thing: the add-on is not there.
 ## Explore
 
 ```bash
-curl -s -H "$AUTH" $PROXY/accounts                          # accounts (id, name, type)
-curl -s -H "$AUTH" $PROXY/folders?account=<accountId>       # folders of one account
+curl -s -H "$AUTH" "$PROXY/accounts"                          # accounts (id, name, type)
+curl -s -H "$AUTH" "$PROXY/identities"                        # sending identities — ids for identityId
+curl -s -H "$AUTH" "$PROXY/folders?account=<accountId>"       # folders of one account
 ```
 
 ## List, Read, Search
@@ -55,22 +56,25 @@ curl -s -H "$AUTH" "$PROXY/mail/list?folderId=<folderId>&limit=10"
 curl -s -H "$AUTH" "$PROXY/mail/list?account=<accountId>&folder=Inbox&limit=10"
 
 # One message: header + body parts (text/plain sections are in parts)
-curl -s -H "$AUTH" $PROXY/mail/<messageId>
+curl -s -H "$AUTH" "$PROXY/mail/<messageId>"
 
-# Search (at least one field; optional folder scope)
+# Search (at least one field; optional account/folder scope)
 curl -s -H "$AUTH" "$PROXY/mail/search?subject=invoice&folderId=<folderId>"
+curl -s -H "$AUTH" "$PROXY/mail/search?unread=true&account=<accountId>"
+curl -s -H "$AUTH" "$PROXY/mail/search?to=someone@example.com"
 ```
 
-Message ids are opaque and may contain `/` — always percent-encode them in the URL.
+Message ids are numeric Thunderbird keys, valid only for the current Thunderbird
+session — re-fetch them after a Thunderbird restart.
 
 ## Organize
 
 ```bash
-curl -s -H "$AUTH" -X PATCH $PROXY/mail/<messageId> \
+curl -s -H "$AUTH" -X PATCH "$PROXY/mail/<messageId>" \
   -H "Content-Type: application/json" -d '{"read": true}'
 # also: {"starred": true}, {"tags": ["work"]}, {"moveTo": "<folderId>"}
 
-curl -s -H "$AUTH" -X DELETE $PROXY/mail/<messageId>
+curl -s -H "$AUTH" -X DELETE "$PROXY/mail/<messageId>"
 ```
 
 ## Send and Draft
@@ -78,18 +82,20 @@ curl -s -H "$AUTH" -X DELETE $PROXY/mail/<messageId>
 `/mail/send` sends real email through the Thunderbird identity — confirm recipients with the user before sending unless the task explicitly authorizes sending.
 
 ```bash
-curl -s -H "$AUTH" -X POST $PROXY/mail/send \
+curl -s -H "$AUTH" -X POST "$PROXY/mail/send" \
   -H "Content-Type: application/json" \
-  -d '{"to":["someone@example.com"],"cc":[],"subject":"Subject","body":"Plain text body"}'
+  -d '{"to":["someone@example.com"],"cc":[],"subject":"Subject","body":"Plain text body","identityId":"id1"}'
 
 # Same body shape, saved to Drafts instead of sent:
-curl -s -H "$AUTH" -X POST $PROXY/mail/draft \
+curl -s -H "$AUTH" -X POST "$PROXY/mail/draft" \
   -H "Content-Type: application/json" \
   -d '{"to":["someone@example.com"],"subject":"Subject","body":"Draft body"}'
 ```
 
-Add `"html": "<p>...</p>"` to send HTML mail. If the operator set a recipient
-allowlist, unknown recipients return `403` with the address named.
+Add `"identityId"` (from `GET /identities`) to send from a specific address;
+without it Thunderbird picks the account's default identity. Add `"html":
+"<p>...</p>"` to send HTML mail. If the operator set a recipient allowlist,
+unknown recipients return `403` with the address named.
 
 ## Errors
 
