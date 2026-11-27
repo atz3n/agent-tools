@@ -251,7 +251,7 @@ class TestBridge(unittest.TestCase):
         self.assertIn("not connected", ctx.exception.message)
 
     def test_hello_enables_roundtrip(self) -> None:
-        self.bridge.hello({"version": "1.0"})
+        self.bridge.hello({"addonVersion": "1.0"})
         thread = threading.Thread(target=self._serve_one, args=({"ok": True, "data": {"accounts": []}},))
         thread.start()
         result = self.bridge.submit("accounts.list", {})
@@ -619,6 +619,21 @@ class TestHTTPServer(unittest.TestCase):
         finally:
             config.logger.removeHandler(capture)
         self.assertTrue(any("GET /status 200 from 127.0.0.1" in line for line in lines), lines)
+
+    def test_hello_log_carries_addon_version(self) -> None:
+        capture = _LogCapture()
+        config.logger.addHandler(capture)
+        try:
+            self._request("POST", "/addon/hello", {"addonVersion": "9.9"}, token=TEST_ADDON_TOKEN)
+            lines: list[str] = []
+            for _ in range(50):
+                lines = [r.getMessage() for r in capture.records]
+                if any("hello version=9.9" in line for line in lines):
+                    break
+                threading.Event().wait(0.02)
+        finally:
+            config.logger.removeHandler(capture)
+        self.assertTrue(any("hello version=9.9" in line for line in lines), lines)
 
     def test_shutdown_handler(self) -> None:
         probe = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)

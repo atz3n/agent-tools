@@ -200,7 +200,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path == "/addon/hello":
             bridge.hello(data)
             self._respond(200, {"ok": True})
-            self._log_ok(method, 200, f"hello version={data.get('version', '?')}")
+            self._log_ok(method, 200, f"hello version={data.get('addonVersion', '?')}")
             return
 
         # /addon/result
